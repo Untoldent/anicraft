@@ -4570,6 +4570,9 @@ impl App {
             self.workspace(ui);
         }
         self.windows(&ctx);
+        // A live Array preview must not keep an editing gesture open when its panel
+        // is closed or hidden by a different dock tab.
+        crate::array_panel::cancel_when_hidden(self);
     }
 
     /// The editor's panels (ADR 0075): the edit bar and status bar, then the tools, the docks
