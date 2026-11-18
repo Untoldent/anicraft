@@ -131,7 +131,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let original = s.editable_keyframe()?.elements.iter().find(|e| e.id == *id)
         .map(|e| (**e).clone())
         .ok_or_else(|| EngineError::State("selected instance is not in the editable keyframe".into()))?;
-    if !matches!(original.kind, ElementKind::Symbol { .. }) {
+    if !matches!(&original.kind, ElementKind::Symbol { .. }) {
         return Err(EngineError::State("the initial Array implementation requires a symbol instance".into()));
     }
     let [original_x, original_y] = [original.transform.m[4], original.transform.m[5]];
@@ -224,6 +224,35 @@ mod tests {
         assert_eq!(b.translation().x, 102.0);
         assert_eq!(ta, 0.0);
         assert_eq!(tb, 1.0);
+    }
+
+    #[test]
+    fn command_creates_baked_instances_as_one_undoable_edit() {
+        let mut s = Session::default();
+        assert!(s.execute("draw.rect", &json!({"x": 10, "y": 10, "w": 24, "h": 14, "fill": "#ffcc00", "stroke": null})).is_ok());
+        assert!(s.execute("modify.convert_to_symbol", &json!({"name": "Test petal"})).is_ok());
+        assert_eq!(s.selection.len(), 1);
+        let original = s.selection.ids().next();
+        let before = s.history_len();
+        let made = s.execute("array.create", &json!({
+            "mode": "linear", "count": 10, "dx": 20, "dy": 0,
+            "alpha_stops": [
+                {"offset": 0.0, "alpha": 0.75},
+                {"offset": 0.4, "alpha": 1.0},
+                {"offset": 1.0, "alpha": 0.03}
+            ]
+        }));
+        assert!(made.is_ok(), "{made:?}");
+        assert_eq!(s.history_len(), before + 1, "baking an array is a single undo step");
+        assert_eq!(s.selection.len(), 10, "count includes the original");
+        assert_eq!(s.selection.ids().next(), original, "instance #1 keeps the source ID");
+        let elements = s.selected_elements();
+        assert_eq!(elements.len(), 10);
+        let alphas: Vec<f32> = elements.iter().map(|(_, e)| e.color.alpha()).collect();
+        assert!((alphas[0] - 0.75).abs() < 1e-4);
+        assert!((alphas[9] - 0.03).abs() < 1e-4);
+        assert!(s.execute("edit.undo", &json!({})).is_ok());
+        assert_eq!(s.selected_elements().len(), 1, "undo restores the original single instance");
     }
 
     #[test]
