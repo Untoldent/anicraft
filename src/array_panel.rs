@@ -219,7 +219,7 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
     app.array_panel = state;
 }
 
-fn field(ui: &mut Ui, label: String, value: &mut f32, suffix: &'static str) -> bool {
+fn field(ui: &mut Ui, label: &str, value: &mut f32, suffix: &'static str) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
