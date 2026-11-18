@@ -175,7 +175,7 @@ pub fn panel_icon(p: Panel) -> Icon {
     match p {
         Panel::Properties => Icon::PanelProperties,
         Panel::Align => Icon::AlignLeft,
-        Panel::Array => Icon::Grid3x3,
+        Panel::Array => Icon::DistributeH,
         Panel::Colour => Icon::Ink,
         Panel::Swatches => Icon::PanelSwatches,
         Panel::Library => Icon::PanelLibrary,
