@@ -116,6 +116,15 @@ impl State {
     }
 }
 
+/// Cancel the uncommitted preview if the panel closes or another tab covers it.
+pub(crate) fn cancel_when_hidden(app: &mut App) {
+    if app.array_panel.previewing && !app.panel_visible(crate::dock::Panel::Array) {
+        let mut state = std::mem::take(&mut app.array_panel);
+        state.cancel(app);
+        app.array_panel = state;
+    }
+}
+
 /// Called by the dock. The document is not changed until preview starts; after that,
 /// adjusting geometry or the stop ramp updates the stage without accumulating copies.
 pub fn panel(app: &mut App, ui: &mut Ui) {
