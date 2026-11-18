@@ -378,7 +378,7 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
 pub(crate) fn array_stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Option<(&'static str, bool)> {
     stop_bar_with(ui, popup, stops, true, |ui, _popup, _sel, st| {
         let mut changed = false;
-        if let Some(()) = crate::theme::section(ui, "array_stop_colour_effect", crate::theme::Section::Rule, tr!("Colour effect"), None, |ui| {
+        let _ = crate::theme::section(ui, "array_stop_colour_effect", crate::theme::Section::Rule, tr!("Colour effect"), None, |ui| {
             ui.horizontal(|ui| {
                 ui.label(tr!("Alpha"));
                 let mut value = (st.color.a * 100.0).round();
@@ -389,9 +389,7 @@ pub(crate) fn array_stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<Gradi
                     changed = true;
                 }
             });
-        }) {
-            // The section's content has already changed the stop, if applicable.
-        }
+        });
         changed
     })
 }
