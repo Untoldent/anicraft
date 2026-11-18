@@ -518,6 +518,8 @@ pub struct App {
     pub tl_layer_w_drag: Option<f32>,
     /// Where the panels are (ADR 0075): the current workspace's arrangement.
     pub dock: crate::dock::Layout,
+    /// Array panel settings and live (revertible) preview.
+    pub array_panel: crate::array_panel::State,
     /// The dock's view state: a tab being dragged, where groups were drawn.
     pub dock_view: crate::dock_ui::DockView,
     /// Window › Workspace › Manage Workspaces… (ADR 0087).
@@ -841,6 +843,7 @@ impl App {
             tl_parent_dots: Vec::new(),
             tl_layer_w_drag: None,
             dock: prefs.workspaces.layout(),
+            array_panel: Default::default(),
             dock_view: Default::default(),
             manage_workspaces: Default::default(),
             me_prop: anicraft_engine::doc::Property::X,
