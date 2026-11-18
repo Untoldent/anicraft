@@ -13,6 +13,7 @@ pub mod cmds_brush;
 mod cmds_camera;
 mod parenting;
 mod cmds_draw;
+mod cmds_array;
 pub mod cmds_filter;
 pub mod cmds_ease;
 pub mod cmds_envelope;
@@ -170,6 +171,7 @@ pub fn commands() -> Vec<CommandSpec> {
     v.extend(onion::specs());
     v.extend(multi::specs());
     v.extend(cmds_draw::specs());
+    v.extend(cmds_array::specs());
     v.extend(cmds_view::specs());
     v.extend(cmds_group::specs());
     v.extend(cmds_library::specs());
