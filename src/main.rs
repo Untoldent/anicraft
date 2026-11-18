@@ -31,6 +31,7 @@ mod brush_panel;
 mod brushtool;
 mod colour;
 mod colour_panel;
+mod array_panel;
 mod envelope;
 mod find_panel;
 mod publish_panel;
