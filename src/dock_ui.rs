@@ -175,6 +175,7 @@ pub fn panel_icon(p: Panel) -> Icon {
     match p {
         Panel::Properties => Icon::PanelProperties,
         Panel::Align => Icon::AlignLeft,
+        Panel::Array => Icon::Grid3x3,
         Panel::Colour => Icon::Ink,
         Panel::Swatches => Icon::PanelSwatches,
         Panel::Library => Icon::PanelLibrary,
@@ -905,6 +906,12 @@ pub fn panel_body(app: &mut App, ui: &mut egui::Ui, p: Panel) {
             scroll("align").show(ui, |ui| {
                 held(ui);
                 pad(12, 8).show(ui, |ui| crate::panels::align_panel(app, ui))
+            });
+        }
+        Panel::Array => {
+            scroll("array").show(ui, |ui| {
+                held(ui);
+                pad(12, 8).show(ui, |ui| crate::array_panel::panel(app, ui))
             });
         }
         Panel::Colour => {
