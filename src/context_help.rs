@@ -39,6 +39,7 @@ pub fn panel_topic(p: Panel) -> &'static str {
     match p {
         Panel::Properties => "workspace.md#properties",
         Panel::Align => "drawing.md#align-and-distribute",
+        Panel::Array => "drawing.md#align-and-distribute",
         Panel::Colour => "drawing.md#choosing-colours",
         Panel::Library => "symbols-and-library.md#the-library-panel",
         Panel::MovieExplorer => "workspace.md#the-movie-explorer",
