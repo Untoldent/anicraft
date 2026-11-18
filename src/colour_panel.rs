@@ -361,6 +361,50 @@ fn remove_stop(stops: &mut Vec<GradientStop>, i: usize) -> bool {
 /// The bar of colour stops, the picked stop's position and its colour (the colour picker,
 /// with opacity). What changed (its undo label), and whether it is live (a drag or typing).
 fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Option<(&'static str, bool)> {
+    stop_bar_with(ui, popup, stops, false, |ui, popup, sel, st| {
+        let mut px = bytes(st.color);
+        if crate::colour::picker(ui, popup.with(("stop", sel)), &mut px, true, None) {
+            st.color = from_bytes(px);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// The Array panel uses exactly the gradient editor's stop handles, drag/tear-off,
+/// keyboard navigation, editable positions and ramp, but a different properties editor.
+/// For now the ramp colour's alpha holds the instance's opacity at this stop.
+pub(crate) fn array_stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Option<(&'static str, bool)> {
+    stop_bar_with(ui, popup, stops, true, |ui, _popup, _sel, st| {
+        let mut changed = false;
+        if let Some(()) = crate::theme::section(ui, "array_stop_colour_effect", crate::theme::Section::Rule, tr!("Colour effect"), None, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(tr!("Alpha"));
+                let mut value = (st.color.a * 100.0).round();
+                let slider = ui.add(egui::Slider::new(&mut value, 0.0..=100.0).show_value(false));
+                let drag = with_type(ui, Type::Data, |ui| ui.add(egui::DragValue::new(&mut value).range(0.0..=100.0).suffix(" %").max_decimals(0)));
+                if slider.changed() || drag.changed() {
+                    st.color.a = (value / 100.0).clamp(0.0, 1.0);
+                    changed = true;
+                }
+            });
+        }) {
+            // The section's content has already changed the stop, if applicable.
+        }
+        changed
+    })
+}
+
+/// Shared gradient/array stop interaction, with only the selected stop's properties
+/// supplied by the caller. Both panels have the same gestures and appearance.
+fn stop_bar_with(
+    ui: &mut egui::Ui,
+    popup: Id,
+    stops: &mut Vec<GradientStop>,
+    array: bool,
+    mut editor: impl FnMut(&mut egui::Ui, Id, usize, &mut GradientStop) -> bool,
+) -> Option<(&'static str, bool)> {
     let sel_id = popup.with("fill_stop");
     let tear_id = popup.with("fill_stop_tear");
     let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0).min(stops.len().saturating_sub(1));
@@ -368,8 +412,8 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
     let can_remove = stops.len() > 2;
     let w = BAR_WIDTH;
     let (strip, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click());
-    a11y::control(ui, &resp, WidgetType::Button, tr!("Gradient: add a colour stop"), None);
-    let resp = resp.on_hover_text(tr!("Click to add a colour stop. Drag a stop to move it, or off the bar to remove it. With a stop focused, the arrow keys move it and Delete removes it."));
+    a11y::control(ui, &resp, WidgetType::Button, if array { tr!("Array: add a property stop") } else { tr!("Gradient: add a colour stop") }, None);
+    let resp = resp.on_hover_text(if array { tr!("Click to add an array stop. Drag to reposition, or drag off the bar to remove. Arrow keys nudge the focused stop.") } else { tr!("Click to add a colour stop. Drag a stop to move it, or off the bar to remove it. With a stop focused, the arrow keys move it and Delete removes it.") });
     let p = ui.painter();
     // A checkerboard under the ramp shows its opacity.
     let cell = 4.0;
@@ -407,7 +451,8 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
         let r = ui.interact(hit, popup.with(("fill_stop_marker", i)), Sense::click_and_drag());
         let at = format!("{:.0}", off * 100.0);
         let alpha = stops.get(i).map(|s| format!("{:.0}", s.color.sanitized().a * 100.0)).unwrap_or_else(|| "100".into());
-        a11y::control(ui, &r, WidgetType::Button, &tr!("Colour stop {stop} of {count} at {at}%, alpha {alpha}%", stop = i + 1, count = count, at = at, alpha = alpha), Some(i == sel));
+        let accessible_name = if array { tr!("Array stop {stop} of {count} at {at}%, alpha {alpha}%", stop = i + 1, count = count, at = at, alpha = alpha) } else { tr!("Colour stop {stop} of {count} at {at}%, alpha {alpha}%", stop = i + 1, count = count, at = at, alpha = alpha) };
+        a11y::control(ui, &r, WidgetType::Button, &accessible_name, Some(i == sel));
         if r.clicked() || r.drag_started() || r.gained_focus() {
             sel = i;
         }
@@ -420,7 +465,7 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
             tearing = off_bar.then_some(i);
             if !off_bar {
                 move_stop(stops, i, (pt.x - strip.left()) / strip.width());
-                changed = Some((tr_noop!("Move colour stop"), true));
+                changed = Some((if array { tr_noop!("Move array stop") } else { tr_noop!("Move colour stop") }, true));
             }
         }
         if r.drag_stopped() && tearing == Some(i) {
@@ -434,7 +479,7 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
             let d = if right { step } else if left { -step } else { 0.0 };
             if d != 0.0 {
                 move_stop(stops, i, off + d);
-                changed = Some((tr_noop!("Move colour stop"), true));
+                changed = Some((if array { tr_noop!("Move array stop") } else { tr_noop!("Move colour stop") }, true));
             }
             if del && can_remove {
                 remove = Some(i);
@@ -464,14 +509,14 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
         let t = resp.interact_pointer_pos().map_or_else(|| widest_gap(stops), |at| (at.x - strip.left()) / strip.width());
         if let Some(i) = add_stop(stops, t) {
             sel = i;
-            changed = Some((tr_noop!("Add colour stop"), false));
+            changed = Some((if array { tr_noop!("Add array stop") } else { tr_noop!("Add colour stop") }, false));
         }
     }
     if let Some(i) = remove.take()
         && remove_stop(stops, i)
     {
         sel = sel.min(stops.len().saturating_sub(1));
-        changed = Some((tr_noop!("Remove colour stop"), false));
+        changed = Some((if array { tr_noop!("Remove array stop") } else { tr_noop!("Remove colour stop") }, false));
     }
     // The picked stop: its position, then its colour in the colour picker.
     let n = stops.len();
@@ -481,26 +526,24 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
             ui.label(tr!("Stop {stop} at", stop = sel + 1));
             let mut pct = st.offset * 100.0;
             let r = with_type(ui, Type::Data, |ui| ui.add(egui::DragValue::new(&mut pct).suffix(" %").speed(0.5).range(0.0..=100.0).max_decimals(0)));
-            if r.named(tr!("Colour stop position")).changed() {
+            if r.named(if array { tr!("Array stop position") } else { tr!("Colour stop position") }).changed() {
                 st.offset = (pct / 100.0).clamp(0.0, 1.0);
-                changed = Some((tr_noop!("Move colour stop"), true));
+                changed = Some((if array { tr_noop!("Move array stop") } else { tr_noop!("Move colour stop") }, true));
             }
-            if ui.add_enabled(n > 2, egui::Button::new(tr!("Remove")).small()).named(tr!("Remove colour stop")).on_hover_text(tr!("Remove this colour stop (or drag it off the bar)")).clicked() {
+            if ui.add_enabled(n > 2, egui::Button::new(tr!("Remove")).small()).named(if array { tr!("Remove array stop") } else { tr!("Remove colour stop") }).on_hover_text(tr!("Remove this stop (or drag it off the bar)")).clicked() {
                 remove = Some(sel);
             }
         });
         ui.add_space(4.0);
-        let mut px = bytes(st.color);
-        if crate::colour::picker(ui, popup.with(("stop", sel)), &mut px, true, None) {
-            st.color = from_bytes(px);
-            changed = Some((tr_noop!("Colour stop"), true));
+        if editor(ui, popup, sel, st) {
+            changed = Some((if array { tr_noop!("Array stop properties") } else { tr_noop!("Colour stop") }, true));
         }
     }
     if let Some(i) = remove
         && remove_stop(stops, i)
     {
         sel = sel.min(stops.len().saturating_sub(1));
-        changed = Some((tr_noop!("Remove colour stop"), false));
+        changed = Some((if array { tr_noop!("Remove array stop") } else { tr_noop!("Remove colour stop") }, false));
     }
     // Typed positions may pass a neighbour: keep the stops in order (the pick follows its stop).
     if let Some(picked) = stops.get(sel).copied() {
