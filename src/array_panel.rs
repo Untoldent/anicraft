@@ -6,10 +6,11 @@ use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
+use anicraft_engine::{ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ElementId, ElementKind, LayerId};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -45,12 +46,13 @@ impl Settings {
     }
 
     fn params(&self, mode: Mode) -> Value {
-        let alpha_stops: Vec<Value> = self
+        let property_stops: Vec<Value> = self
             .stops
             .iter()
             .map(|s| {
                 json!({
                     "offset": s.value.offset, "alpha": s.value.alpha,
+                    "scale_x": s.value.scale[0], "scale_y": s.value.scale[1], "rotation": s.value.rotation,
                 })
             })
             .collect();
@@ -74,7 +76,7 @@ impl Settings {
             }),
         };
         params["stacking"] = json!(if self.backwards { "front_to_back" } else { "back_to_front" });
-        params["alpha_stops"] = json!(alpha_stops);
+        params["property_stops"] = json!(property_stops);
         params
     }
 }
@@ -83,6 +85,44 @@ struct Active {
     mode: Mode,
     /// Where defaults are anchored if settings are reset during this preview.
     origin: [f32; 2],
+    history: EditHistory,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditGesture {
+    Pointer(egui::ViewportId, Id),
+    Text(egui::ViewportId, Id),
+}
+
+struct Configuration {
+    mode: Mode,
+    settings: Settings,
+    selected_stop: Option<usize>,
+}
+
+#[derive(Default)]
+struct EditHistory {
+    undo: VecDeque<Configuration>,
+    redo: Vec<Configuration>,
+    pending: Option<(EditGesture, Configuration)>,
+}
+
+impl EditHistory {
+    fn record(&mut self, before: Configuration) {
+        self.redo.clear();
+        self.undo.push_back(before);
+        if self.undo.len() > anicraft_engine::history::MAX_STEPS {
+            self.undo.pop_front();
+        }
+    }
+
+    fn settle(&mut self, mode: Mode, settings: &Settings) {
+        if let Some((_, before)) = self.pending.take()
+            && (before.mode != mode || &before.settings != settings)
+        {
+            self.record(before);
+        }
+    }
 }
 
 pub struct State {
@@ -92,6 +132,7 @@ pub struct State {
     error: Option<String>,
     reset_pending: bool,
     stop_editor_epoch: u64,
+    selected_stop: Option<usize>,
     show_gizmo: bool,
     dim_stage: bool,
     pub(crate) gizmo_drag: Option<GizmoDrag>,
@@ -106,6 +147,7 @@ impl Default for State {
             error: None,
             reset_pending: false,
             stop_editor_epoch: 0,
+            selected_stop: None,
             show_gizmo: true,
             dim_stage: true,
             gizmo_drag: None,
@@ -138,14 +180,16 @@ impl State {
             self.finish(s, false);
             return;
         };
+        let before = self.before_edit(None);
         if let Some(active) = &mut self.active {
             active.mode = mode;
+            self.record_edit(before, None);
             self.refresh(s);
         } else if let Some(origin) = source_origin(s) {
             let settings = self.settings.clone().unwrap_or_else(|| Settings::at(origin));
             match s.preview_array(&settings.params(mode)) {
                 Ok(()) => {
-                    self.active = Some(Active { mode, origin });
+                    self.active = Some(Active { mode, origin, history: EditHistory::default() });
                     self.settings = Some(settings);
                     self.draft_source = None;
                     self.error = None;
@@ -182,6 +226,7 @@ impl State {
         self.settings = None;
         self.draft_source = None;
         self.reset_pending = false;
+        self.selected_stop = None;
         self.stop_editor_epoch = self.stop_editor_epoch.wrapping_add(1);
     }
 
@@ -198,10 +243,85 @@ impl State {
     }
 
     fn reset(&mut self, s: &mut Session) {
+        let before = self.before_edit(None);
         self.discard_draft();
         self.settings = self.active.as_ref().map(|active| Settings::at(active.origin));
         self.gizmo_drag = None;
+        self.record_edit(before, None);
         self.refresh(s);
+    }
+
+    // Keep only the settings and the stop pick. The engine still has one open document gesture.
+    fn before_edit(&self, gesture: Option<EditGesture>) -> Option<Configuration> {
+        let active = self.active.as_ref()?;
+        if active.history.pending.as_ref().is_some_and(|(id, _)| Some(*id) == gesture) {
+            return None;
+        }
+        Some(Configuration { mode: active.mode, settings: self.settings.clone()?, selected_stop: self.selected_stop })
+    }
+
+    fn differs(&self, before: &Configuration) -> bool {
+        self.mode() != Some(before.mode) || self.settings.as_ref() != Some(&before.settings)
+    }
+
+    fn record_edit(&mut self, before: Option<Configuration>, gesture: Option<EditGesture>) {
+        let Some(before) = before.filter(|before| self.differs(before)) else { return };
+        let Some(active) = &mut self.active else { return };
+        // A different edit may arrive before the previous gesture ended.
+        active.history.settle(before.mode, &before.settings);
+        if let Some(id) = gesture {
+            active.history.pending = Some((id, before));
+        } else {
+            active.history.record(before);
+        }
+    }
+
+    pub(crate) fn finish_edit(&mut self, ctx: &egui::Context) {
+        let (Some(active), Some(settings)) = (&mut self.active, &self.settings) else { return };
+        if active.history.pending.as_ref().is_some_and(|(gesture, _)| match *gesture {
+            EditGesture::Pointer(viewport, id) => viewport == ctx.viewport_id() && ctx.dragged_id() != Some(id),
+            EditGesture::Text(viewport, id) => viewport == ctx.viewport_id() && focused_text(ctx) != Some(id),
+        }) {
+            active.history.settle(active.mode, settings);
+        }
+    }
+
+    fn cancel_text_edit(&mut self, s: &mut Session, gesture: EditGesture) {
+        let Some(active) = &mut self.active else { return };
+        if active.history.pending.as_ref().is_some_and(|(owner, _)| *owner == gesture)
+            && let Some((_, before)) = active.history.pending.take()
+        {
+            self.settings = Some(before.settings);
+            self.selected_stop = before.selected_stop;
+            self.refresh(s);
+        }
+    }
+
+    pub(crate) fn can_step(&self, redo: bool) -> bool {
+        let Some(active) = &self.active else { return false };
+        let changed_edit = active.history.pending.as_ref().is_some_and(|(_, before)| self.differs(before));
+        if redo { !changed_edit && !active.history.redo.is_empty() }
+        else { changed_edit || !active.history.undo.is_empty() }
+    }
+
+    pub(crate) fn step(&mut self, s: &mut Session, redo: bool) -> bool {
+        if !self.can_step(redo) { return false; }
+        let (Some(active), Some(settings)) = (&mut self.active, &mut self.settings) else { return false };
+        let history = &mut active.history;
+        history.settle(active.mode, settings);
+        let next = if redo { history.redo.pop() } else { history.undo.pop_back() };
+        let Some(next) = next else { return false };
+        let current = Configuration {
+            mode: std::mem::replace(&mut active.mode, next.mode),
+            settings: std::mem::replace(settings, next.settings),
+            selected_stop: std::mem::replace(&mut self.selected_stop, next.selected_stop),
+        };
+        if redo { history.undo.push_back(current); } else { history.redo.push(current); }
+        self.reset_pending = false;
+        self.gizmo_drag = None;
+        self.stop_editor_epoch = self.stop_editor_epoch.wrapping_add(1);
+        self.refresh(s);
+        true
     }
 
     pub(crate) fn gizmo_geometry(&self) -> Option<Geometry> {
@@ -226,20 +346,22 @@ impl State {
         !self.reset_pending
     }
 
-    pub(crate) fn set_gizmo_geometry(&mut self, s: &mut Session, geometry: Geometry) {
+    pub(crate) fn set_gizmo_geometry(&mut self, s: &mut Session, geometry: Geometry, gesture: Option<EditGesture>) {
         if self.gizmo_geometry().is_none_or(|old| old == geometry) { return; }
+        let before = self.before_edit(gesture);
         if let Some(settings) = &mut self.settings {
             match geometry {
                 Geometry::Linear(ends) => settings.linear = ends,
                 Geometry::Radial(radial) => settings.radial = radial,
             }
         }
+        self.record_edit(before, gesture);
         self.refresh(s);
     }
 
     #[cfg(test)]
     fn set_endpoints(&mut self, s: &mut Session, endpoints: Endpoints) {
-        self.set_gizmo_geometry(s, Geometry::Linear(endpoints));
+        self.set_gizmo_geometry(s, Geometry::Linear(endpoints), None);
     }
 
     pub(crate) fn dim_stage(&self) -> bool {
@@ -250,6 +372,54 @@ impl State {
 pub(crate) fn blocked(app: &mut App) -> bool {
     if app.s.array_preview_active() {
         app.status_err(tr!("Commit or cancel the Array preview first."));
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn history_action(id: &str) -> Option<bool> {
+    match id {
+        "edit.undo" => Some(false),
+        "edit.redo" => Some(true),
+        _ => None,
+    }
+}
+
+pub(crate) fn blocked_command(app: &mut App, id: &str) -> bool {
+    history_action(id).is_none() && blocked(app)
+}
+
+pub(crate) fn history_command(app: &mut App, redo: bool) -> Option<Value> {
+    if app.array_panel.step(&mut app.s, redo) {
+        let label = tr_noop!("Array edit");
+        return Some(if redo { json!({"redone": label}) } else { json!({"undone": label}) });
+    }
+    app.status_err(if redo { tr!("Nothing to redo in this Array session.") } else { tr!("Nothing to undo in this Array session.") });
+    None
+}
+
+pub(crate) fn history_shortcut(app: &mut App, ctx: &egui::Context) -> bool {
+    if !app.s.array_preview_active() || focused_text(ctx).is_some() || app.modal_open()
+        || app.palette.is_some() || egui::Popup::is_any_open(ctx)
+    {
+        return false;
+    }
+    let action = ctx.input_mut(|input| {
+        // In Array mode this chord is Redo; in the document it keeps its normal binding.
+        if input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
+            return Some("edit.redo");
+        }
+        app.shortcuts.iter().find_map(|(mods, key, id)| {
+            (history_action(id).is_some() && input.consume_key(*mods, *key)).then_some(*id)
+        })
+    });
+    if let Some(action) = action {
+        if history_action(action).is_some_and(|redo| app.array_panel.can_step(redo)) {
+            ctx.stop_dragging();
+        }
+        app.invoke(action);
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
         true
     } else {
         false
@@ -293,12 +463,17 @@ fn text_focus_id(ctx: &egui::Context) -> Id {
 }
 
 pub(crate) fn remember_text_focus(ctx: &egui::Context) {
-    let focus = ctx.memory(|m| m.focused()).filter(|_| ctx.text_edit_focused());
+    let focus = focused_text(ctx);
     let key = text_focus_id(ctx);
     ctx.data_mut(|d| d.insert_temp(key, focus));
 }
 
+fn focused_text(ctx: &egui::Context) -> Option<Id> {
+    ctx.memory(|m| m.focused()).filter(|_| ctx.text_edit_focused())
+}
+
 pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
+    app.array_panel.finish_edit(ctx);
     app.array_panel.check_draft(&app.s);
     if !app.panel_visible(Panel::Array) {
         app.array_panel.reset_pending = false;
@@ -306,8 +481,9 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
     remember_text_focus(ctx);
 }
 
-/// A live preview with a multi-stop alpha ramp and surrounding artwork for screenshot checks.
+/// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
+    let transform_sample = matches!(view, "array-transform" | "array-transform-radial");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
         let sweep = values.next()?.parse::<f32>().ok()?;
@@ -322,7 +498,11 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     app.run("draw.rect", json!({"x": 72, "y": 72, "w": 125, "h": 60, "fill": "#376b93", "stroke": null}));
     app.run("draw.ellipse", json!({"x": 494, "y": 275, "w": 82, "h": 68, "fill": "#376b93", "stroke": null}));
     let diameter = if open_radial.is_some() { 20 } else { 56 };
-    app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
+    if transform_sample {
+        app.run("draw.rect", json!({"x": 92, "y": 172, "w": 34, "h": 15, "fill": "#ce523f", "stroke": null}));
+    } else {
+        app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
+    }
     app.run("modify.convert_to_symbol", json!({"name": "Array sample"}));
     if matches!(view, "array-polish" | "array-polish-off" | "array-radial")
         && let Some((_, source)) = app.s.selection.first()
@@ -337,7 +517,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
-    let mode = if view == "array-radial" || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
+    let mode = if matches!(view, "array-radial" | "array-transform-radial") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
     app.array_panel.dim_stage = view != "array-polish-off";
@@ -362,16 +542,40 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             settings.stops =
                 vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(2, 0.4, 1.0), PropertyStop::new(1, 1.0, 0.03)];
         }
+        if transform_sample {
+            settings.count = if mode == Mode::Radial { 17 } else { 12 };
+            settings.linear.end[0] += 140.0;
+            for (stop, (scale, rotation, alpha)) in settings.stops.iter_mut().zip([
+                ([0.65, 1.15], 20.0, 0.75), ([1.05, 0.7], 320.0, 1.0), ([1.55, 1.0], 720.0, 0.45),
+            ]) {
+                stop.value.scale = scale;
+                stop.value.rotation = rotation;
+                stop.value.alpha = alpha;
+            }
+            if mode == Mode::Radial {
+                settings.radial.centre = [270.0, 185.0];
+                settings.radial.closed_loop = false;
+                settings.radial.sweep = 630.0;
+                settings.radial.radius = 58.0;
+                settings.radial.spiral_offset = 26.0;
+                settings.radial.centre_drift = [40.0, 12.0];
+                settings.radial.rotate = true;
+            }
+        }
     }
     app.array_panel.refresh(&mut app.s);
 }
 
 pub(crate) fn text_had_escape(ctx: &egui::Context) -> bool {
+    current_or_previous_text(ctx).is_some()
+}
+
+fn current_or_previous_text(ctx: &egui::Context) -> Option<Id> {
     // egui surrenders ordinary TextEdit focus before the frame on Escape. DragValue still
     // needs to see the key to discard the typed value rather than applying it on blur.
     let key = text_focus_id(ctx);
     let prior = ctx.data(|d| d.get_temp::<Option<Id>>(key)).flatten();
-    ctx.text_edit_focused() || prior.is_some_and(|id| ctx.memory(|m| m.had_focus_last_frame(id)))
+    focused_text(ctx).or_else(|| prior.filter(|id| ctx.memory(|m| m.had_focus_last_frame(*id))))
 }
 
 pub(crate) fn escape(app: &mut App, ctx: &egui::Context) {
@@ -380,8 +584,13 @@ pub(crate) fn escape(app: &mut App, ctx: &egui::Context) {
         || app.palette.is_some()
         || app.dock_view.drag.is_some()
         || egui::Popup::is_any_open(ctx)
-        || text_had_escape(ctx)
     {
+        return;
+    }
+    if let Some(id) = current_or_previous_text(ctx) {
+        if ctx.input(|input| input.key_pressed(Key::Escape)) {
+            app.array_panel.cancel_text_edit(&mut app.s, EditGesture::Text(ctx.viewport_id(), id));
+        }
         return;
     }
     if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
@@ -446,13 +655,19 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
         if state.mode().is_some() && view_options(ui, state) {
             app.stage_cache.shown_state = None;
         }
-        if state.mode().is_some()
-            && let Some(settings) = &mut state.settings
-        {
-            let changed = ui
-                .add_enabled_ui(!state.reset_pending, |ui| settings_ui(ui, settings, mode, state.stop_editor_epoch))
-                .inner;
+        if state.mode().is_some() {
+            let ctx = ui.ctx();
+            let viewport = ctx.viewport_id();
+            let gesture = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()).map(|id| EditGesture::Pointer(viewport, id))
+                .or_else(|| focused_text(ctx).map(|id| EditGesture::Text(viewport, id)));
+            let before = state.before_edit(gesture);
+            let changed = state.settings.as_mut().is_some_and(|settings| {
+                ui.add_enabled_ui(!state.reset_pending, |ui| {
+                    settings_ui(ui, settings, mode, state.stop_editor_epoch, &mut state.selected_stop, &mut app.scale_lock)
+                }).inner
+            });
             if changed {
+                state.record_edit(before, gesture);
                 state.refresh(&mut app.s);
                 ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
             }
@@ -514,11 +729,13 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
     }).inner
 }
 
-fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64) -> bool {
+fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64, selected_stop: &mut Option<usize>, scale_lock: &mut bool) -> bool {
     let mut changed = false;
     section(ui, "array_stops", Section::Rule, tr!("Property stops"), None, |ui| {
         let id = ui.make_persistent_id(("array_stop_bar", stop_editor_epoch));
-        changed |= crate::colour_panel::array_stop_bar(ui, id, &mut settings.stops, stop_properties);
+        changed |= crate::colour_panel::array_stop_bar(ui, id, &mut settings.stops, selected_stop, |ui, stop| {
+            stop_properties(ui, stop, scale_lock)
+        });
     });
     ui.add_space(4.0);
     section(ui, "array_distribution", Section::Rule, tr!("Distribution"), None, |ui| {
@@ -562,7 +779,7 @@ fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
     changed
 }
 
-fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop) -> bool {
+fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, scale_lock: &mut bool) -> bool {
     egui::Frame::new()
         .fill(T.panel_alt)
         .stroke(egui::Stroke::new(1.0, T.border))
@@ -570,22 +787,52 @@ fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop) -> bool {
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            // Add applicable editors here in order: Transform, Colour Effect, Filters,
-            // Playback, Stacking Order. The property sections share the same outer card.
-            section(ui, "array_stop_colour_effect", Section::Rule, tr!("Colour Effect"), None, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let label = ui.label(text(Type::Label, tr!("Alpha")));
+            let marker = stop.marker_id();
+            let transform = section(ui, "array_stop_transform", Section::Rule, tr!("Transform"), None, |ui| {
+                ui.push_id(("transform", marker), |ui| transform_stop(ui, &mut stop.value, scale_lock)).inner
+            }).unwrap_or(false);
+            let colour = section(ui, "array_stop_colour_effect", Section::Rule, tr!("Colour Effect"), None, |ui| {
+                ui.push_id(("colour", marker), |ui| ui.horizontal_wrapped(|ui| {
+                    ui.label(text(Type::Label, tr!("Alpha")));
                     let mut value = stop.value.alpha * 100.0;
                     let changed = with_type(ui, Type::Data, |ui| {
                         ui.add(egui::DragValue::new(&mut value).range(0.0..=100.0).suffix(" %").max_decimals(1))
-                    }).labelled_by(label.id).changed();
+                    }).named(tr!("Alpha")).changed();
                     if changed {
                         stop.value.alpha = value / 100.0;
                     }
                     changed
-                }).inner
-            }).unwrap_or(false)
+                }).inner).inner
+            }).unwrap_or(false);
+            transform || colour
         }).inner
+}
+
+fn transform_stop(ui: &mut Ui, stop: &mut ArrayPropertyStop, scale_lock: &mut bool) -> bool {
+    let mut changed = with_type(ui, Type::Data, |ui| ui.horizontal_wrapped(|ui| {
+        ui.label(text(Type::Label, tr!("Scale")));
+        let [mut x, mut y] = stop.scale.map(|value| value * 100.0);
+        let old = (x, y);
+        let limit = 100.0 * ArrayPropertyStop::SCALE_LIMIT;
+        let value = |ui: &mut Ui, value: &mut f32, axis: &str, name: &str| {
+            ui.add(egui::DragValue::new(value).range(-limit..=limit).clamp_existing_to_range(false)
+                .prefix(axis).suffix(" %").speed(0.5).max_decimals(1)).named(name).changed()
+        };
+        let x_changed = value(ui, &mut x, "X ", tr!("Scale X"));
+        let y_changed = value(ui, &mut y, "Y ", tr!("Scale Y"));
+        let icon = if *scale_lock { crate::icons::Icon::Lock } else { crate::icons::Icon::Unlock };
+        if crate::timeline::icon_button_wide(ui, tr!("Lock scale"), Some(*scale_lock), icon, 20.0).clicked() {
+            *scale_lock = !*scale_lock;
+        }
+        if x_changed || y_changed {
+            if *scale_lock { (x, y) = crate::panels::linked_scale(old, (x, y), x_changed); }
+            stop.scale = [x / 100.0, y / 100.0];
+        }
+        x_changed || y_changed
+    }).inner);
+    let limit = ArrayPropertyStop::ROTATION_LIMIT;
+    changed |= dimension(ui, tr!("Rotation"), &mut stop.rotation, -limit..=limit, "°", true);
+    changed
 }
 
 fn linear_dimensions(ui: &mut Ui, endpoints: &mut Endpoints, count: u32) -> bool {
@@ -899,6 +1146,274 @@ mod tests {
         })]);
     }
 
+    fn history_key(ctx: &egui::Context, app: &mut App, key: Key, extra: Modifiers) {
+        let modifiers = Modifiers::COMMAND | extra;
+        frame(ctx, app, vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]);
+        frame(ctx, app, vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }]);
+    }
+
+    #[test]
+    fn array_history_coalesces_stage_drags_and_commits_one_document_step() {
+        use anicraft_engine::geom::Vec2 as Point;
+        let (mut app, ctx) = linear_app();
+        let (base, source, steps) = (app.s.doc.clone(), app.s.selection.clone(), app.s.history_len());
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        nodes(&ctx, &mut app);
+        let initial = app.array_panel.settings.clone();
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, initial);
+        assert!(app.s.array_preview_active() && app.s.committed_document().0 == &base);
+
+        let from = screen(&app, initial.as_ref().unwrap().linear.end);
+        drag_gizmo(&ctx, &mut app, from, vec2(12.0, 8.0), false);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(30.0, 20.0))]);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(44.0, 26.0))]);
+        frame(&ctx, &mut app, vec![pointer_button(from + vec2(44.0, 26.0), false)]);
+        let linear = app.array_panel.settings.clone();
+        assert_ne!(linear, initial);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, initial);
+        assert!(!app.array_panel.can_step(false));
+        history_key(&ctx, &mut app, Key::Z, Modifiers::SHIFT);
+        assert_eq!(app.array_panel.settings, linear);
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert!(app.perform("edit.undo", json!({})).is_some());
+        assert_eq!(app.array_panel.mode(), Some(Mode::Linear));
+        assert_eq!(app.array_panel.settings, linear);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(app.array_panel.mode(), Some(Mode::Radial));
+        let radial = Radial { centre: [260.0, 220.0], radius: 80.0, start: 0.0, sweep: 90.0,
+            closed_loop: false, spiral_offset: 0.0, centre_drift: [70.0, -65.0], rotate: true };
+        app.array_panel.set_gizmo_geometry(&mut app.s, Geometry::Radial(radial), None);
+        nodes(&ctx, &mut app);
+        let before = app.array_panel.settings.clone();
+        let preview = app.s.doc.clone();
+        let project = |app: &App, p: Point| screen(app, [p.x, p.y]);
+        let from = project(&app, radial.point(1.0));
+        let to = project(&app, Radial { sweep: 130.0, spiral_offset: 60.0, ..radial }.point(1.0));
+        drag_gizmo(&ctx, &mut app, from, (to - from) * 0.5, false);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        let after = app.array_panel.settings.clone();
+        let ended = after.as_ref().unwrap().radial;
+        assert!((ended.sweep - 130.0).abs() < 0.01 && (ended.spiral_offset - 60.0).abs() < 0.05);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, before);
+        assert!(app.s.doc == preview && app.s.committed_document().0 == &base);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, after);
+        let final_preview = app.s.doc.clone();
+        let shown = nodes(&ctx, &mut app);
+        click(&ctx, &mut app, &shown.iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1);
+        assert_eq!(app.s.history_len(), steps + 1);
+        assert!(app.array_panel.settings.is_none() && !app.s.array_preview_active());
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert!(app.s.doc == base && app.s.selection == source);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert!(app.s.doc == final_preview);
+    }
+
+    #[test]
+    fn array_history_coalesces_numeric_drags_and_typing_and_preserves_text_escape() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let shown = |app: &mut App, label: &str| nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label)).unwrap();
+        let initial = app.array_panel.settings.clone();
+        let bounds = shown(&mut app, "Scale X").1.bounds().unwrap();
+        let from = pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
+        drag_gizmo(&ctx, &mut app, from, vec2(20.0, 0.0), false);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(46.0, 0.0))]);
+        frame(&ctx, &mut app, vec![pointer_button(from + vec2(46.0, 0.0), false)]);
+        let scaled = app.array_panel.settings.clone();
+        assert_ne!(initial, scaled);
+        assert_eq!(app.array_panel.active.as_ref().unwrap().history.undo.len(), 1);
+
+        let edit = |app: &mut App| {
+            let field = shown(app, "Rotation").1;
+            click(&ctx, app, &field);
+            frame(&ctx, app, vec![]);
+        };
+        let text = |app: &mut App, value: &str| frame(&ctx, app, vec![Event::Text(value.to_owned())]);
+        edit(&mut app);
+        text(&mut app, "7");
+        text(&mut app, "2");
+        assert_eq!(app.array_panel.active.as_ref().unwrap().history.undo.len(), 1);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert!(ctx.text_edit_focused());
+        assert_eq!(app.array_panel.active.as_ref().unwrap().history.undo.len(), 1);
+        frame(&ctx, &mut app, vec![Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: Modifiers::COMMAND }, Event::Text("720".to_owned())]);
+        frame(&ctx, &mut app, vec![key(Key::Enter, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Enter, false)]);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.rotation, 720.0);
+        assert_eq!(app.array_panel.active.as_ref().unwrap().history.undo.len(), 2);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, scaled);
+
+        edit(&mut app);
+        text(&mut app, "97");
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        assert_eq!(app.array_panel.settings, scaled);
+        assert!(app.array_panel.can_step(true) && app.s.array_preview_active());
+        let alpha = shown(&mut app, "Alpha").0;
+        set_number(&ctx, &mut app, alpha, 45.0);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.alpha, 0.45);
+        assert!(!app.array_panel.can_step(true));
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, scaled);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings, initial);
+    }
+
+    #[test]
+    fn array_history_restores_stop_creation_movement_properties_and_removal() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let node = |app: &mut App, label| nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label)).unwrap();
+        let settings = |app: &App| app.array_panel.settings.clone().unwrap();
+        let initial = settings(&app);
+        for label in ["Dim Stage", "Hide Array Handles"] {
+            let control = node(&mut app, label).1;
+            click(&ctx, &mut app, &control);
+        }
+        assert!(!app.array_panel.can_step(false));
+        let track = node(&mut app, "Array: add a property stop").1;
+        click(&ctx, &mut app, &track);
+        let added = settings(&app);
+        assert_eq!(added.stops.len(), 3);
+        let added_marker = Some(added.stops[1].marker_id());
+        assert_eq!(app.array_panel.selected_stop, added_marker);
+        let stop = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label().is_some_and(|name| name.starts_with("Array stop 2 of"))).unwrap().1;
+        let rect = stop.bounds().unwrap();
+        let from = pos2(((rect.x0 + rect.x1) / 2.0) as f32, ((rect.y0 + rect.y1) / 2.0) as f32);
+        drag_gizmo(&ctx, &mut app, from, vec2(20.0, 0.0), false);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(40.0, 0.0))]);
+        frame(&ctx, &mut app, vec![pointer_button(from + vec2(40.0, 0.0), false)]);
+        let moved = settings(&app);
+        assert_ne!(moved, added);
+        let alpha = node(&mut app, "Alpha").0;
+        set_number(&ctx, &mut app, alpha, 30.0);
+        let coloured = settings(&app);
+        let scale_y = node(&mut app, "Scale Y").0;
+        set_number(&ctx, &mut app, scale_y, 145.0);
+        let edited = settings(&app);
+        assert_eq!(edited.stops[1].value.alpha, 0.30);
+        assert_eq!(edited.stops[1].value.scale[1], 1.45);
+        let remove = node(&mut app, "Remove array stop").1;
+        click(&ctx, &mut app, &remove);
+        assert_eq!(settings(&app).stops.len(), 2);
+
+        for target in [edited.clone(), coloured, moved, added, initial] {
+            history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+            assert_eq!(settings(&app), target);
+            if target.stops.len() == 3 { assert_eq!(app.array_panel.selected_stop, added_marker); }
+        }
+        assert!(!app.array_panel.can_step(false));
+        for _ in 0..4 { history_key(&ctx, &mut app, Key::Y, Modifiers::NONE); }
+        assert_eq!(settings(&app), edited);
+        assert!(!app.array_panel.dim_stage && !app.array_panel.show_gizmo);
+        let copies = app.s.selected_elements();
+        assert!(copies.iter().any(|(_, element)| element.color.alpha() < 0.8));
+        assert!(copies.iter().any(|(_, element)| element.transform.m[3] > 1.2));
+    }
+
+    #[test]
+    fn array_history_exits_keep_the_draft_and_leave_document_redo_intact() {
+        let (mut app, ctx) = linear_app();
+        app.s.execute("element.translate", &json!({"dx": 10, "dy": 0})).unwrap();
+        app.s.undo().unwrap();
+        let (base, source, undo_len, redo_len) = (app.s.doc.clone(), app.s.selection.clone(), app.s.history_len(), app.s.history().redo_len());
+        for exit in ["Cancel", "Escape", "None"] {
+            app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+            assert!(!app.array_panel.can_step(false) && !app.array_panel.can_step(true));
+            nodes(&ctx, &mut app);
+            let mut ends = app.array_panel.gizmo_endpoints().unwrap();
+            ends.end[0] -= 40.0;
+            app.array_panel.set_endpoints(&mut app.s, ends);
+            let draft = app.array_panel.settings.clone();
+            ends.end[1] += 10.0;
+            app.array_panel.set_endpoints(&mut app.s, ends);
+            history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+            assert_eq!(app.array_panel.settings, draft);
+            assert!(app.array_panel.can_step(true));
+            match exit {
+                "Cancel" => {
+                    let cancel = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1;
+                    click(&ctx, &mut app, &cancel);
+                }
+                "Escape" => {
+                    frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+                    frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+                }
+                _ => app.array_panel.select_mode(&mut app.s, None),
+            }
+            assert!(!app.s.array_preview_active());
+            assert!(app.s.doc == base && app.s.selection == source);
+            assert_eq!(app.array_panel.settings, draft);
+            assert_eq!(app.s.history_len(), undo_len);
+            assert_eq!(app.s.history().redo_len(), redo_len);
+        }
+    }
+
+    #[test]
+    fn transform_stop_fields_drag_live_and_type_without_overwriting_other_stops() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let field = |app: &mut App, label: &str| {
+            nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label)).unwrap()
+        };
+        let value = |app: &App, i: usize| app.array_panel.settings.as_ref().unwrap().stops.get(i).unwrap().value;
+        let last = |app: &App| app.s.selected_elements().last().unwrap().1.transform;
+        assert_eq!(value(&app, 0), ArrayPropertyStop::new(0.0, 1.0));
+        let before = last(&app);
+        let lock = field(&mut app, "Lock scale").1;
+        click(&ctx, &mut app, &lock);
+        let scale = field(&mut app, "Scale X").1.bounds().unwrap();
+        let from = pos2(((scale.x0 + scale.x1) * 0.5) as f32, ((scale.y0 + scale.y1) * 0.5) as f32);
+        drag_gizmo(&ctx, &mut app, from, vec2(40.0, 0.0), false);
+        let first = value(&app, 0);
+        assert!(first.scale[0] > 1.0);
+        assert_eq!(first.scale[0], first.scale[1]);
+        assert_eq!(last(&app), before);
+        assert!(app.s.selected_elements().first().unwrap().1.transform.m[0] > 1.0);
+        frame(&ctx, &mut app, vec![pointer_button(from + vec2(40.0, 0.0), false)]);
+
+        let other = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label().is_some_and(|s| s.starts_with("Array stop 2 of"))).unwrap().1;
+        click(&ctx, &mut app, &other);
+        assert_eq!(field(&mut app, "Scale X").1.numeric_value(), Some(100.0));
+        let rotation = field(&mut app, "Rotation").1;
+        click(&ctx, &mut app, &rotation);
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: Modifiers::COMMAND }, Event::Text("720".to_owned())]);
+        frame(&ctx, &mut app, vec![key(Key::Enter, true)]);
+        assert_eq!(value(&app, 1).rotation, 720.0);
+        assert_eq!(value(&app, 0), first);
+        assert_eq!(value(&app, 1).alpha, 1.0);
+
+        let transform = field(&mut app, "Transform").1;
+        click(&ctx, &mut app, &transform);
+        let collapsed = nodes(&ctx, &mut app);
+        assert!(!collapsed.iter().any(|(_, n)| n.label() == Some("Rotation")));
+        assert!(collapsed.iter().any(|(_, n)| n.role() == Role::SpinButton && n.label() == Some("Alpha")));
+
+        let mut endpoints = app.array_panel.gizmo_endpoints().unwrap();
+        endpoints.end[0] += 150.0;
+        app.array_panel.set_endpoints(&mut app.s, endpoints);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let mut radial = app.array_panel.settings.as_ref().unwrap().radial;
+        radial.closed_loop = false;
+        radial.spiral_offset = 44.0;
+        radial.centre_drift = [20.0, -30.0];
+        radial.sweep = -810.0;
+        radial.rotate = true;
+        app.array_panel.set_gizmo_geometry(&mut app.s, Geometry::Radial(radial), None);
+        assert_eq!(value(&app, 0), first);
+        assert_eq!(value(&app, 1), ArrayPropertyStop { rotation: 720.0, ..ArrayPropertyStop::new(1.0, 1.0) });
+    }
+
     fn near(actual: [f32; 2], expected: [f32; 2]) {
         assert!((actual[0] - expected[0]).abs() < 0.01 && (actual[1] - expected[1]).abs() < 0.01, "{actual:?} != {expected:?}");
     }
@@ -993,7 +1508,7 @@ mod tests {
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
         let radial = Radial { centre: [260.0, 220.0], radius: 80.0, start: 0.0, sweep: 90.0,
             closed_loop: false, spiral_offset: 0.0, centre_drift: [70.0, -90.0], rotate: false };
-        app.array_panel.set_gizmo_geometry(&mut app.s, Geometry::Radial(radial));
+        app.array_panel.set_gizmo_geometry(&mut app.s, Geometry::Radial(radial), None);
         nodes(&ctx, &mut app);
 
         let current = |app: &App| app.array_panel.settings.as_ref().unwrap().radial;

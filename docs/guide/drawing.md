@@ -560,8 +560,12 @@ its outline. Drag **Drift** in any direction to steer successive turns. The dist
 to Drift indicates the displacement over one turn. Drag their connecting bar to move the array.
 
 Click the property track to add a stop. Drag a stop to move it or enter its position as a
-percentage. Open **Colour Effect** to change Alpha at the selected stop. With a stop focused,
-use the arrow keys to nudge it, Shift for larger steps, or Delete to remove it.
+percentage. In **Transform**, drag a Scale or Rotation value horizontally or click it to type.
+Scale multiplies the original instance's size on each axis. **Lock scale** keeps the selected stop's
+proportions while editing. Rotation adds to the instance's orientation, including **Rotate instances**.
+Enter 720° at the end of a progression starting at 0° to turn the artwork twice. Open **Colour
+Effect** to change Alpha. With a stop focused, use the arrow keys to nudge it, Shift for larger
+steps, or Delete to remove it.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the

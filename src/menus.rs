@@ -416,7 +416,7 @@ impl MenuKeys {
 
 fn enabled(app: &App, id: &str) -> bool {
     if app.s.array_preview_active() {
-        return false;
+        return crate::array_panel::history_action(id).is_some_and(|redo| app.array_panel.can_step(redo));
     }
     // With Edit Multiple Frames on, the selection is on several keyframes (ADR 0051).
     if let Some(on) = crate::onion::enabled(app, id) {
@@ -480,6 +480,8 @@ fn checked(app: &App, id: &str) -> Option<bool> {
 
 fn item(app: &mut App, ui: &mut egui::Ui, spec: &CommandSpec) {
     let label = match spec.id {
+        "edit.undo" if app.s.array_preview_active() => tr!("Undo Array edit").to_string(),
+        "edit.redo" if app.s.array_preview_active() => tr!("Redo Array edit").to_string(),
         "edit.undo" => app.s.undo_label().map_or_else(|| crate::i18n::t_cmd(spec.id, spec.label).to_string(), |l| tr!("Undo {action}", action = crate::i18n::t_dyn(l))),
         _ => crate::i18n::t_cmd(spec.id, spec.label).to_string(),
     };

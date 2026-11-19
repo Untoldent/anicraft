@@ -431,7 +431,8 @@ pub(crate) fn input(app: &mut App, ui: &mut Ui, canvas: Rect, to_screen: Option<
             && let Some(moved) = drag.at(to_stage.apply(as_vec(p)))
             && moved != geometry
         {
-            app.array_panel.set_gizmo_geometry(&mut app.s, moved);
+            let gesture = crate::array_panel::EditGesture::Pointer(ui.ctx().viewport_id(), response.id);
+            app.array_panel.set_gizmo_geometry(&mut app.s, moved, Some(gesture));
             overlay = Overlay::new(moved, to_screen)?;
             ui.ctx().request_repaint();
         }

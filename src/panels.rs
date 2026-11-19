@@ -953,7 +953,7 @@ const STROKE_HAIRLINE: f32 = 0.1;
 /// A degenerate old axis (near zero) cannot divide, so the other axis follows the new value
 /// instead. Both sizes are clamped to 1–10000 %, so a typed extreme cannot produce a zero
 /// scale; a negative scale is a mirror (#116) and each axis keeps its own direction.
-fn linked_scale(old: (f32, f32), now: (f32, f32), x_changed: bool) -> (f32, f32) {
+pub(crate) fn linked_scale(old: (f32, f32), now: (f32, f32), x_changed: bool) -> (f32, f32) {
     const MIN: f32 = 1.0;
     const MAX: f32 = 10000.0;
     // The size follows in proportion; each axis keeps its own direction (a mirrored axis stays

@@ -14,7 +14,7 @@
 use crate::a11y::{self, Named};
 use crate::app::App;
 use crate::theme::{T, Type, text, to_color32, with_type};
-use anicraft_engine::ArrayAlphaStop;
+use anicraft_engine::ArrayPropertyStop;
 use anicraft_engine::doc::{ElementKind, GradientStop, MAX_FOCAL, MAX_GRADIENT_STOPS, Paint, Rgba, Spread, ramp_at};
 use egui::{Id, Key, Rect, Response, Sense, Stroke, StrokeKind, WidgetType, pos2, vec2};
 use serde_json::{Value, json};
@@ -348,26 +348,27 @@ impl TrackStop for GradientStop {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PropertyStop {
     marker: usize,
-    pub value: ArrayAlphaStop,
+    pub value: ArrayPropertyStop,
 }
 
 impl PropertyStop {
     pub(crate) fn new(marker: usize, offset: f32, alpha: f32) -> Self {
-        Self { marker, value: ArrayAlphaStop { offset, alpha } }
+        Self { marker, value: ArrayPropertyStop::new(offset, alpha) }
     }
+
+    pub(crate) fn marker_id(&self) -> usize { self.marker }
 }
 
 impl TrackStop for PropertyStop {
     const ARRAY: bool = true;
-    const LIMIT: usize = ArrayAlphaStop::LIMIT;
+    const LIMIT: usize = ArrayPropertyStop::LIMIT;
     fn offset(&self) -> f32 { self.value.offset }
     fn set_offset(&mut self, offset: f32) { self.value.offset = offset; }
     fn alpha(&self) -> f32 { self.value.alpha }
     fn colour(&self) -> Option<Rgba> { None }
     fn sample(stops: &[Self], offset: f32) -> Self {
-        let values: Vec<_> = stops.iter().map(|s| s.value).collect();
         let marker = (0..Self::LIMIT).find(|i| stops.iter().all(|s| s.marker != *i)).unwrap_or(Self::LIMIT);
-        Self::new(marker, offset, ArrayAlphaStop::sample(&values, offset))
+        Self { marker, value: ArrayPropertyStop::sample(stops.iter().map(|s| s.value), offset) }
     }
     fn marker(&self, _: usize) -> usize { self.marker }
 }
@@ -414,7 +415,7 @@ fn remove_stop(stops: &mut Vec<impl TrackStop>, i: usize) -> bool {
 /// The bar of colour stops, the picked stop's position and its colour (the colour picker,
 /// with opacity). What changed (its undo label), and whether it is live (a drag or typing).
 fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Option<(&'static str, bool)> {
-    stop_bar_with(ui, popup, stops, |ui, sel, st| {
+    stop_bar_with(ui, popup, stops, None, |ui, sel, st| {
         let mut px = bytes(st.color);
         if crate::colour::picker(ui, popup.with(("stop", sel)), &mut px, true, None) {
             st.color = from_bytes(px);
@@ -425,8 +426,11 @@ fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Opti
     })
 }
 
-pub(crate) fn array_stop_bar(ui: &mut egui::Ui, id: Id, stops: &mut Vec<PropertyStop>, editor: impl FnOnce(&mut egui::Ui, &mut PropertyStop) -> bool) -> bool {
-    stop_bar_with(ui, id, stops, |ui, _, stop| editor(ui, stop)).is_some()
+pub(crate) fn array_stop_bar(ui: &mut egui::Ui, id: Id, stops: &mut Vec<PropertyStop>, marker: &mut Option<usize>, editor: impl FnOnce(&mut egui::Ui, &mut PropertyStop) -> bool) -> bool {
+    let mut selected = stops.iter().position(|s| Some(s.marker) == *marker).unwrap_or(0);
+    let changed = stop_bar_with(ui, id, stops, Some(&mut selected), |ui, _, stop| editor(ui, stop)).is_some();
+    *marker = stops.get(selected).map(|s| s.marker);
+    changed
 }
 
 /// Shared stop interaction. Each track paints its own marks and edits its selected payload.
@@ -434,12 +438,14 @@ fn stop_bar_with<S: TrackStop>(
     ui: &mut egui::Ui,
     popup: Id,
     stops: &mut Vec<S>,
+    selected: Option<&mut usize>,
     editor: impl FnOnce(&mut egui::Ui, usize, &mut S) -> bool,
 ) -> Option<(&'static str, bool)> {
     let array = S::ARRAY;
     let sel_id = popup.with("fill_stop");
     let tear_id = popup.with("fill_stop_tear");
-    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0).min(stops.len().saturating_sub(1));
+    let mut sel: usize = selected.as_deref().copied().or_else(|| ui.data(|d| d.get_temp(sel_id)))
+        .unwrap_or(0).min(stops.len().saturating_sub(1));
     let mut changed = None;
     let can_remove = stops.len() > 2;
     let w = if array { (ui.available_width() - 6.0).clamp(1.0, BAR_WIDTH) } else { BAR_WIDTH };
@@ -542,6 +548,7 @@ fn stop_bar_with<S: TrackStop>(
     let n = stops.len();
     if let Some(st) = stops.get_mut(sel) {
         ui.add_space(2.0);
+        let marker = st.marker(sel);
         let position = |ui: &mut egui::Ui| {
             ui.label(tr!("Stop {stop} at", stop = sel + 1));
             let mut pct = st.offset() * 100.0;
@@ -555,7 +562,7 @@ fn stop_bar_with<S: TrackStop>(
             }
         };
         if array {
-            ui.horizontal_wrapped(position);
+            ui.push_id(popup.with(marker), |ui| ui.horizontal_wrapped(position));
         } else {
             ui.horizontal(position);
         }
@@ -575,7 +582,8 @@ fn stop_bar_with<S: TrackStop>(
         stops.sort_by(|a, b| a.offset().total_cmp(&b.offset()));
         sel = stops.iter().position(|s| *s == picked).unwrap_or(sel);
     }
-    ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    if let Some(selected) = selected { *selected = sel; }
+    else { ui.data_mut(|d| d.insert_temp(sel_id, sel)); }
     changed
 }
 
@@ -644,7 +652,7 @@ mod tests {
     fn track_frame<S: TrackStop>(ctx: &egui::Context, id: Id, stops: &mut Vec<S>, events: Vec<egui::Event>) {
         let input = egui::RawInput { events, ..Default::default() };
         ctx.run_ui(input, |ui| {
-            stop_bar_with(ui, id, stops, |_, _, _| false);
+            stop_bar_with(ui, id, stops, None, |_, _, _| false);
         }).textures_delta.clear();
     }
 
@@ -672,10 +680,12 @@ mod tests {
     }
 
     #[test]
-    fn property_track_samples_alpha_and_keeps_a_dragged_stop_through_reordering() {
+    fn property_track_samples_all_values_and_keeps_a_dragged_stop_through_reordering() {
         let ctx = egui::Context::default();
         let id = Id::new("property_stop_test");
         let mut stops = vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(1, 0.7, 1.0), PropertyStop::new(2, 1.0, 0.03)];
+        stops[1].value.scale = [1.7, 0.3];
+        stops[1].value.rotation = 700.0;
         track_frame(&ctx, id, &mut stops, vec![]);
         let start = marker(&ctx, id, 0).rect.center();
         let end = marker(&ctx, id, 2).rect.center();
@@ -686,9 +696,12 @@ mod tests {
         let picked = stops[1];
         assert!((picked.value.offset - 0.4).abs() < 1e-4);
         assert!((picked.value.alpha - (0.75 + 0.25 * 0.4 / 0.7)).abs() < 1e-4);
+        assert!((picked.value.scale[0] - 1.4).abs() < 1e-4);
+        assert!((picked.value.scale[1] - 0.6).abs() < 1e-4);
+        assert!((picked.value.rotation - 400.0).abs() < 1e-3);
         drag_track(&ctx, id, &mut stops, at, start.lerp(end, 0.85));
         assert_eq!(stops[2].marker, picked.marker);
-        assert_eq!(stops[2].value.alpha, picked.value.alpha);
+        assert_eq!(stops[2].value, ArrayPropertyStop { offset: stops[2].value.offset, ..picked.value });
         assert!((stops[2].value.offset - 0.85).abs() < 1e-4);
 
         let handle = marker(&ctx, id, picked.marker);

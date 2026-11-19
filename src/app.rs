@@ -485,8 +485,8 @@ pub struct App {
     pub width_sel: Option<(anicraft_engine::doc::ElementId, usize)>,
     /// Opens the Tools bar's fill swatch picker on the next frame (the `swatches` screenshot).
     pub open_fill_swatch: bool,
-    /// The Properties panel's Scale lock (#304; view state, not undoable): while on, editing
-    /// one Scale axis adjusts the other so the selection keeps its width:height proportion.
+    /// The shared Scale lock for Properties and Array stop editing (#304): while on, editing
+    /// one Scale axis adjusts the other to keep its width:height proportion.
     pub scale_lock: bool,
     /// Free Transform's own state (ADR 0111; view state): the transformation point held for a
     /// selection that can't keep one, and the box a drag began with.
@@ -988,6 +988,9 @@ impl App {
     }
 
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
+        if self.s.array_preview_active() && let Some(redo) = crate::array_panel::history_action(id) {
+            return crate::array_panel::history_command(self, redo);
+        }
         if crate::array_panel::blocked(self) {
             return None;
         }
@@ -2999,7 +3002,19 @@ impl App {
             Some(which @ ("array" | "array-hidden" | "array-polish" | "array-polish-off" | "array-radial")) => {
                 crate::array_panel::screenshot(self, which);
             }
-            Some(which) if self.shot.is_some() && which.starts_with("array-radial-open:") => {
+            Some("array-history") if self.shot.is_some() => {
+                crate::array_panel::screenshot(self, "array-transform");
+                if let Some(crate::array_gizmo::Geometry::Linear(mut ends)) = self.array_panel.gizmo_geometry() {
+                    for delta in [-45.0, 70.0] {
+                        ends.end[1] += delta;
+                        self.array_panel.set_gizmo_geometry(&mut self.s, crate::array_gizmo::Geometry::Linear(ends), None);
+                    }
+                    self.invoke("edit.undo");
+                }
+                self.script_keys([(Key::E, Modifiers::ALT)]);
+            }
+            Some(which) if self.shot.is_some()
+                && (which.starts_with("array-radial-open:") || matches!(which, "array-transform" | "array-transform-radial")) => {
                 crate::array_panel::screenshot(self, which);
             }
             Some(which @ ("gradient" | "gradientbucket")) => {
@@ -3273,7 +3288,7 @@ impl App {
     /// The single entry point for user-initiated commands: asks first when the engine says the
     /// command needs confirmation (ADR 0004), otherwise runs it.
     pub fn request(&mut self, id: &str, mut params: Value) {
-        if crate::array_panel::blocked(self) {
+        if crate::array_panel::blocked_command(self, id) {
             return;
         }
         // A saved command from a file goes into the user's commands folder (ADR 0097).
@@ -3310,7 +3325,7 @@ impl App {
 
     /// [`App::perform`] on the document being edited, whatever the command.
     pub(crate) fn perform_here(&mut self, id: &str, params: Value) -> Option<Value> {
-        if crate::array_panel::blocked(self) {
+        if crate::array_panel::blocked_command(self, id) {
             return None;
         }
         if id == "file.publish" {
@@ -3514,7 +3529,7 @@ impl App {
     /// Invokes a command from a menu, shortcut, palette or context menu, asking for a path or
     /// name first when it needs one.
     pub fn invoke(&mut self, id: &'static str) {
-        if crate::array_panel::blocked(self) {
+        if crate::array_panel::blocked_command(self, id) {
             return;
         }
         // Ctrl+X/C/V act on frames when the timeline was used last and has frames to act on
@@ -4017,10 +4032,11 @@ impl App {
         if keys == crate::a11y::Keyboard::Text || self.palette.is_some() {
             return;
         }
-        // Array's controls keep the arrows and Delete. A conflicting command shortcut still
-        // gives the same feedback as a document action from a menu.
+        // Array's controls keep the arrows and Delete. Only its local history can run here.
         if self.s.array_preview_active() {
-            if ctx.input_mut(|i| self.shortcuts.iter().any(|(m, k, _)| m.any() && i.consume_key(*m, *k))) {
+            if !crate::array_panel::history_shortcut(self, ctx)
+                && ctx.input_mut(|i| self.shortcuts.iter().any(|(m, k, _)| m.any() && i.consume_key(*m, *k)))
+            {
                 crate::array_panel::blocked(self);
             }
             return;

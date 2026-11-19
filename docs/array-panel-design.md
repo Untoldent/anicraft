@@ -50,6 +50,24 @@ unavailable, rather than pretending they generate anything.
 - The mode's geometry and property configuration is **view state** and is not
   itself written into the document or undo stack.
 
+### Undo within Array mode
+
+Use **Undo** and **Redo** from the Edit menu or its shortcuts to move through edits in the
+current Array session. Ctrl+Shift+Z also invokes Redo while Array mode is active. Each history
+step restores the distribution type, both sets of geometry, count, stacking, every property
+stop, and the corresponding stop selection. The preview is regenerated from the same source.
+
+Stage, stop, and numeric drags each make one step when the pointer is released. A drag of the
+Spiral End handle groups Sweep and Spiral Offset into that step. Numeric typing previews live
+and makes one step when the field is committed. While typing, the field keeps its own text
+undo. Escape discards the current text edit. A new change after Undo clears the Array redo
+branch. Dim Stage, handle visibility, and other editor controls stay outside this history.
+
+Undo stops at the configuration with which the session opened. Commit records the current
+result in one document-level step. Cancel, Escape, and None keep the current draft while the
+source remains selected, then discard the session history. Reopening the draft starts a fresh
+Array history. Only the compact Array settings are stored per step.
+
 ### Remembering versus resetting
 
 Keep one unfinished configuration, including geometry for each array type and property stops,
@@ -169,11 +187,18 @@ capture transform, opacity, tint/brightness/advanced colour effects, filter
 parameters, playback offset for Graphic symbols, stacking depth, and easing.
 
 - Show a **neutral horizontal track** with draggable pentagonal stop handles and a distinct
-  selected marker. The track carries positions and selection while Alpha is edited below.
+  selected marker. The track carries positions and selection. Numeric values sit below it.
 - One rounded container beneath the track holds the selected stop's properties. Its section
   order is **Transform**, **Colour Effect**, **Filters**, **Playback**, and **Stacking Order**.
-  Show sections with implemented controls that apply to the source artwork. **Colour Effect ›
-  Alpha** is the section available in this increment.
+  Show only implemented sections. **Transform** and **Colour Effect** collapse independently.
+- **Transform** offers draggable and typeable Scale X and Y in percent and Rotation in degrees.
+  Scale defaults to 100% on each local axis and multiplies the source basis. The shared Scale
+  lock preserves the selected stop's scale ratio while editing. Rotation defaults to 0° and
+  adds to the source orientation and Rotate Instances. It interpolates the entered degrees
+  directly, so 0° to 720° takes two turns. Scale and rotation keep the instance's transformation
+  point in place after the distribution positions it.
+- **Colour Effect** retains Alpha as a multiplier of the source effect. New stops sample each
+  property at their insertion point. Geometry edits leave the authored stop values intact.
 - Preserve independently draggable stops at positions 0..100%. Example:
   positions 0%, 40%, 100% can have Alpha 75%, 100%, 3%; dragging the 40% stop
   changes how quickly that middle value is approached.
@@ -223,7 +248,9 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
    radial offset, and recovery tied to the selected source.
 6. **Radial and spiral stage controls** covers Centre, Start, End and Drift, guide translation,
    independent radial growth and centre displacement, and signed sweep winding during a drag.
-7. Later: Grid, Path/node placement, more stop properties,
+7. **Transform property stops** adds independent scale axes, the Scale lock and additive rotation.
+8. **Session undo and redo** covers coalesced gestures, numeric edits, and the single-step Commit.
+9. Later: Grid, Path/node placement, more stop properties,
    filter interpolation, easing, Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

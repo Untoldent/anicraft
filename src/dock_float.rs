@@ -174,6 +174,7 @@ fn own_window(app: &mut App, ctx: &egui::Context, f: &Float, layout: &Layout, ac
         }
         if class != egui::ViewportClass::EmbeddedWindow {
             crate::array_panel::escape(app, ui.ctx());
+            crate::array_panel::history_shortcut(app, ui.ctx());
         }
         if class == egui::ViewportClass::EmbeddedWindow {
             // egui's own stand-in, with no window system under it (tests): already in a window.
@@ -184,6 +185,7 @@ fn own_window(app: &mut App, ctx: &egui::Context, f: &Float, layout: &Layout, ac
             egui::CentralPanel::default().frame(frame).show(ui, |ui| float_body(app, ui, f, layout, false, acts));
         }
         if class != egui::ViewportClass::EmbeddedWindow {
+            app.array_panel.finish_edit(ui.ctx());
             crate::array_panel::remember_text_focus(ui.ctx());
         }
         // The app's shortcuts with Ctrl (⌘) or Alt still work over it (Undo, Save, Test Movie),

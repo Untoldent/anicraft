@@ -70,29 +70,56 @@ impl RadialDistribution {
 
 /// One property snapshot on the array's 0..1 progression.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArrayAlphaStop {
+pub struct ArrayPropertyStop {
     pub offset: f32,
     pub alpha: f32,
+    pub scale: [f32; 2],
+    pub rotation: f32,
 }
 
-impl ArrayAlphaStop {
+impl ArrayPropertyStop {
     pub const LIMIT: usize = 15;
+    pub const SCALE_LIMIT: f32 = 100.0;
+    pub const ROTATION_LIMIT: f32 = 100_000.0;
+
+    pub const fn new(offset: f32, alpha: f32) -> Self {
+        Self { offset, alpha, scale: [1.0; 2], rotation: 0.0 }
+    }
 
     /// Hold the endpoint value outside the first or last stop, as gradients do.
     /// Both the editor and command pass in stops sorted by position.
-    pub fn sample(stops: &[Self], t: f32) -> f32 {
-        let Some(first) = stops.first() else { return 1.0 };
-        if t <= first.offset { return first.alpha; }
-        for pair in stops.windows(2) {
-            let [a, b] = pair else { continue };
+    pub fn sample(stops: impl IntoIterator<Item = Self>, t: f32) -> Self {
+        let mut stops = stops.into_iter();
+        let Some(mut a) = stops.next() else { return Self::new(t, 1.0) };
+        if t <= a.offset { return Self { offset: t, ..a }; }
+        for b in stops {
             if t <= b.offset {
                 let span = b.offset - a.offset;
-                return if span <= f32::EPSILON { b.alpha } else {
-                    a.alpha + (b.alpha - a.alpha) * ((t - a.offset) / span).clamp(0.0, 1.0)
+                if span <= f32::EPSILON || t == b.offset { return Self { offset: t, ..b }; }
+                let f = ((t - a.offset) / span).clamp(0.0, 1.0);
+                let blend = |a, b| a + (b - a) * f;
+                return Self {
+                    offset: t,
+                    alpha: blend(a.alpha, b.alpha),
+                    scale: [blend(a.scale[0], b.scale[0]), blend(a.scale[1], b.scale[1])],
+                    rotation: blend(a.rotation, b.rotation),
                 };
             }
+            a = b;
         }
-        stops.last().map_or(first.alpha, |s| s.alpha)
+        Self { offset: t, ..a }
+    }
+
+    fn apply_transform(self, base: Affine, pivot: Option<Vec2>) -> Affine {
+        let [sx, sy] = self.scale;
+        // Wrap after interpolation so full turns affect the intermediate copies.
+        let degrees = self.rotation % CLOSED_SWEEP_LIMIT;
+        if [sx, sy] == [1.0; 2] && degrees == 0.0 { return base; }
+        let mut adjusted = Affine::rotate(degrees.to_radians()).mul(&base.mul(&Affine::scale(sx, sy)));
+        let shift = pivot.map_or(Vec2::ZERO, |p| base.apply_vector(p) - adjusted.apply_vector(p));
+        adjusted.m[4] = base.m[4] + shift.x;
+        adjusted.m[5] = base.m[5] + shift.y;
+        adjusted
     }
 }
 
@@ -196,7 +223,15 @@ impl PositionPreview {
         let first = kf.elements.iter().position(|e| s.selection.contains(s.layer, e.id))?;
         let instances = first..first + count;
         let reversed = p.get("stacking").and_then(Value::as_str) == Some("front_to_back");
-        let ids = kf.elements.get(instances.clone())?.iter().map(|e| e.id);
+        let copies = kf.elements.get(instances.clone())?;
+        // A transformed custom pivot can offset the copy from its layout position.
+        // Replay from the source so those offsets stay exact after a move.
+        if copies.first()?.pivot().is_some() && p.get("property_stops").is_some()
+            && parse_stops(p).ok()?.is_some_and(|stops| stops.iter().any(|stop| stop.scale != [1.0; 2] || stop.rotation != 0.0))
+        {
+            return None;
+        }
+        let ids = copies.iter().map(|e| e.id);
         let in_order = if reversed { ids.rev().eq(s.selection.ids()) } else { ids.eq(s.selection.ids()) };
         in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, params: p.clone() })
     }
@@ -240,28 +275,43 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative)}. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
 }
 
-fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayAlphaStop>>> {
-    let Some(v) = p.get("alpha_stops") else { return Ok(None) };
-    let stops = v.as_array().ok_or_else(|| EngineError::Param("alpha_stops must be an array".into()))?;
-    if !(2..=ArrayAlphaStop::LIMIT).contains(&stops.len()) {
-        return Err(EngineError::Param(format!("alpha_stops needs 2..={} stops", ArrayAlphaStop::LIMIT)));
+fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
+    let (field, value, legacy) = match (p.get("property_stops"), p.get("alpha_stops")) {
+        (Some(_), Some(_)) => return Err(EngineError::Param("use property_stops or alpha_stops".into())),
+        (Some(v), None) => ("property_stops", v, false),
+        (None, Some(v)) => ("alpha_stops", v, true),
+        (None, None) => return Ok(None),
+    };
+    let stops = value.as_array().ok_or_else(|| EngineError::Param(format!("{field} must be an array")))?;
+    if !(2..=ArrayPropertyStop::LIMIT).contains(&stops.len()) {
+        return Err(EngineError::Param(format!("{field} needs 2..={} stops", ArrayPropertyStop::LIMIT)));
     }
     let mut out = Vec::with_capacity(stops.len());
     for v in stops {
-        let number = |key: &str| -> Result<f32> {
-            let n = v.get(key).and_then(Value::as_f64).ok_or_else(|| EngineError::Param(format!("alpha_stops entries need numeric '{key}'")))?;
-            if !n.is_finite() || !(0.0..=1.0).contains(&n) {
-                return Err(EngineError::Param(format!("alpha_stops '{key}' must be in 0..=1")));
+        let number = |key: &str, min: f32, max: f32, default: Option<f32>| -> Result<f32> {
+            if v.get(key).is_none() && let Some(default) = default { return Ok(default); }
+            let n = v.get(key).and_then(Value::as_f64).ok_or_else(|| EngineError::Param(format!("{field} entries need numeric '{key}'")))?;
+            if !(f64::from(min)..=f64::from(max)).contains(&n) {
+                return Err(EngineError::Param(format!("{field} '{key}' must be in {min}..={max}")));
             }
             Ok(n as f32)
         };
-        out.push(ArrayAlphaStop { offset: number("offset")?, alpha: number("alpha")? });
+        let offset = number("offset", 0.0, 1.0, None)?;
+        let alpha = number("alpha", 0.0, 1.0, (!legacy).then_some(1.0))?;
+        let mut stop = ArrayPropertyStop::new(offset, alpha);
+        if !legacy {
+            let scale = ArrayPropertyStop::SCALE_LIMIT;
+            let rotation = ArrayPropertyStop::ROTATION_LIMIT;
+            stop.scale = [number("scale_x", -scale, scale, Some(1.0))?, number("scale_y", -scale, scale, Some(1.0))?];
+            stop.rotation = number("rotation", -rotation, rotation, Some(0.0))?;
+        }
+        out.push(stop);
     }
     out.sort_by(|a, b| a.offset.total_cmp(&b.offset));
     Ok(Some(out))
@@ -352,7 +402,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let mut copies: Vec<Arc<Element>> = Vec::with_capacity(count as usize);
     let mut ids: Vec<ElementId> = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let (transform, t) = layout.place(original.transform, i, count);
+        let (base, t) = layout.place(original.transform, i, count);
+        let stop = stops.as_deref().map(|stops| ArrayPropertyStop::sample(stops.iter().copied(), t));
+        let transform = stop.map_or(base, |stop| stop.apply_transform(base, original.pivot()));
         if !transform.is_finite() {
             return Err(EngineError::Param("array positions exceeded finite coordinate range".into()));
         }
@@ -360,8 +412,8 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         // Instance #1 is the original and keeps its ID.
         if i > 0 { el.id = ElementId(s.doc.alloc_id()); }
         el.transform = transform;
-        if let Some(stops) = stops.as_deref() {
-            el.color = el.color.with_alpha(ArrayAlphaStop::sample(stops, t));
+        if let Some(stop) = stop {
+            el.color = el.color.with_alpha(stop.alpha);
         }
         ids.push(el.id);
         copies.push(Arc::new(el));
@@ -383,14 +435,71 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
 mod tests {
     use super::*;
 
-    fn st(p: f32, alpha: f32) -> ArrayAlphaStop { ArrayAlphaStop { offset: p, alpha } }
+    fn st(p: f32, alpha: f32) -> ArrayPropertyStop { ArrayPropertyStop::new(p, alpha) }
 
     #[test]
     fn independent_stops_can_fade_out_then_back_in() {
         let stops = [st(0.0, 1.0), st(0.5, 0.0), st(1.0, 1.0)];
-        assert!((ArrayAlphaStop::sample(&stops, 0.25) - 0.5).abs() < 1e-6);
-        assert!((ArrayAlphaStop::sample(&stops, 0.75) - 0.5).abs() < 1e-6);
-        assert_eq!(ArrayAlphaStop::sample(&stops, 0.5), 0.0);
+        assert!((ArrayPropertyStop::sample(stops, 0.25).alpha - 0.5).abs() < 1e-6);
+        assert!((ArrayPropertyStop::sample(stops, 0.75).alpha - 0.5).abs() < 1e-6);
+        assert_eq!(ArrayPropertyStop::sample(stops, 0.5).alpha, 0.0);
+    }
+
+    #[test]
+    fn transform_stops_bake_relative_scale_and_two_full_turns_with_alpha() {
+        let mut s = radial_source();
+        let id = s.selection.ids().next().unwrap();
+        let source = s.editable_keyframe().unwrap().elements.iter_mut().find(|e| e.id == id).unwrap();
+        let source = Arc::make_mut(source);
+        source.transform = Affine::rotate(30.0_f32.to_radians()).mul(&Affine::scale(2.0, 0.5));
+        let alpha = anicraft_doc::ColorEffect::Alpha(0.8);
+        source.color = alpha;
+        s.execute("array.create", &json!({"count": 9, "start_x": 25, "start_y": 60, "dx": 40,
+            "property_stops": [{"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 0.25, "scale_x": 2, "scale_y": 0.5, "rotation": 720}]})).unwrap();
+        assert_eq!(s.selection.len(), 9);
+        for (i, (_, copy)) in s.selected_elements().into_iter().enumerate() {
+            let t = i as f32 / 8.0;
+            let (sin, cos) = (30.0 + i as f32 * 90.0).to_radians().sin_cos();
+            let xf = copy.transform;
+            assert_eq!(xf.translation(), Vec2::new(25.0 + i as f32 * 40.0, 60.0));
+            assert!(xf.apply_vector(Vec2::new(1.0, 0.0)).distance(Vec2::new(cos, sin) * (2.0 * (1.0 + t))) < 1e-5);
+            assert!(xf.apply_vector(Vec2::new(0.0, 1.0)).distance(Vec2::new(-sin, cos) * (0.5 * (1.0 - 0.5 * t))) < 1e-5);
+            assert_eq!(copy.color, alpha.with_alpha(1.0 - 0.75 * t));
+        }
+    }
+
+    #[test]
+    fn transform_stops_follow_radial_progression_and_add_to_rotate_instances_about_the_pivot() {
+        let mut s = radial_source();
+        let id = s.selection.ids().next().unwrap();
+        let source = s.editable_keyframe().unwrap().elements.iter_mut().find(|e| e.id == id).unwrap();
+        let source = Arc::make_mut(source);
+        let pivot = Vec2::new(4.0, -3.0);
+        assert!(source.set_pivot(Some(pivot)));
+        source.transform = Affine::rotate(15.0_f32.to_radians()).mul(&Affine::scale(1.5, 0.75));
+        let basis = source.transform;
+        for (closed_loop, rotate, sweep) in [(true, true, -360.0), (false, false, 630.0), (false, true, -630.0)] {
+            let p = json!({"mode": "radial", "count": 5, "center_x": 210, "center_y": 80, "radius": 40, "start_angle": 12,
+                "sweep_angle": sweep, "closed_loop": closed_loop, "rotate": rotate, "spiral_offset": 33, "drift_x": 24, "drift_y": -17,
+                "property_stops": [{"offset": 0, "rotation": -45, "scale_x": 0.5}, {"offset": 1, "rotation": 675, "scale_x": 2.5, "scale_y": 2} ]});
+            let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+            let copies = placed(&mut s, &p);
+            assert_eq!(copies.len(), 5);
+            for (i, xf) in copies.into_iter().enumerate() {
+                let t = i as f64 / if closed_loop { 5.0 } else { 4.0 };
+                let travel = if rotate { sweep * t } else { 0.0 };
+                let base = Affine::rotate((travel as f32).to_radians()).mul(&basis);
+                let anchor = radial.point(t) + base.apply_vector(pivot);
+                assert!(xf.apply(pivot).distance(anchor) < 0.0001);
+                let angle = (15.0 + travel - 45.0 + 720.0 * t).to_radians() as f32;
+                let (sin, cos) = angle.sin_cos();
+                let t = t as f32;
+                assert!(xf.apply_vector(Vec2::new(1.0, 0.0)).distance(Vec2::new(cos, sin) * (1.5 * (0.5 + 2.0 * t))) < 1e-5);
+                assert!(xf.apply_vector(Vec2::new(0.0, 1.0)).distance(Vec2::new(-sin, cos) * (0.75 * (1.0 + t))) < 1e-5);
+            }
+        }
+        assert!(s.array_translation_generation().is_none());
+        s.finish_array_preview(false);
     }
 
     fn radial_source() -> Session {
@@ -632,6 +741,11 @@ mod tests {
         assert_eq!(parsed[0].alpha, 0.75);
         assert_eq!(parsed[1].offset, 0.4);
         assert!(parse_stops(&json!({"alpha_stops": [{"offset": 2, "alpha": 0.5}, {"offset": 1, "alpha": 0.4}]})).is_err());
+        for (key, value) in [("alpha", json!(1.01)), ("scale_x", json!(101)), ("scale_y", json!("50%")), ("rotation", json!(1e10))] {
+            let mut params = json!({"property_stops": [{"offset": 0}, {"offset": 1}]});
+            params["property_stops"][0][key] = value;
+            assert!(parse_stops(&params).is_err());
+        }
     }
 
     #[test]
@@ -693,7 +807,8 @@ mod tests {
         s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
         let (base, selected, steps) = (s.doc.clone(), s.selection.clone(), s.history_len());
         let mut p = json!({"mode": "linear", "count": 5, "start_x": 50, "start_y": 40, "dx": 12, "dy": -5,
-            "stacking": "front_to_back", "alpha_stops": [{"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 0.2}]});
+            "stacking": "front_to_back", "property_stops": [{"offset": 0, "alpha": 1, "scale_x": 0.6},
+            {"offset": 1, "alpha": 0.2, "scale_x": 1.8, "scale_y": 1.5, "rotation": -540}]});
         s.preview_array(&p).unwrap();
         let generation = s.array_translation_generation().unwrap();
         let ids = s.selection.clone();
