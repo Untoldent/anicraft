@@ -307,6 +307,7 @@ fn settle(app: &mut App) {
 /// (ADR 0112: a document that isn't shown holds no render caches).
 fn arrived(app: &mut App) {
     app.stage_cache.forget_document();
+    app.array_panel.discard_draft();
     app.last_revision = 0;
     app.heard = None;
     app.tl_heard = None;

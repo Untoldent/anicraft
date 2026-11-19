@@ -95,7 +95,7 @@ pub use anicraft_svg as svg;
 /// Whether a path is an Animate document (`.fla`, `.xfl`, or an XFL folder) that `file.open`
 /// imports.
 pub use cmds_file::is_animate;
-pub use cmds_array::ArrayAlphaStop;
+pub use cmds_array::{ArrayAlphaStop, CLOSED_SWEEP_LIMIT};
 pub use cmds_modify::{Item as SelectedItem, transform_origins};
 
 #[derive(Debug, thiserror::Error)]

@@ -14,11 +14,13 @@ The experimental [Array panel](array-panel-design.md) previews Linear and Radial
 one symbol instance, with a neutral property track for Alpha stops. Array mode stays active
 when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
 next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
-configuration. A selected-stop card holds its Alpha editor.
+configuration while the original instance stays selected. A selected-stop card holds its Alpha editor.
 Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
 direction, length and spacing are editable in the panel. Both modes display white pivot markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only
-Linear edits reuse the instances and eligible stage tiles.
+Linear edits reuse the instances and eligible stage tiles. Radial distribution supports an explicit
+Closed Loop and open arcs with a signed sweep and spiral offset. Radial and spiral stage controls
+are planned for the next increment.
 
 | Dimension | Status |
 |---|---|

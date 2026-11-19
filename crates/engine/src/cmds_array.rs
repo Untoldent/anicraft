@@ -5,7 +5,7 @@
 //! symbol instances, not a new document object, so existing editors and exports work.
 //! A geometry-only Linear edit moves the existing preview instances in place.
 
-use crate::params::{opt_f32, opt_str, opt_u32};
+use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
 use anicraft_doc::{Element, ElementId, ElementKind};
 use anicraft_geom::Affine;
@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 const MAX_COPIES: u32 = 500;
+pub const CLOSED_SWEEP_LIMIT: f32 = 360.0;
 /// One property snapshot on the array's 0..1 progression.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArrayAlphaStop {
@@ -176,7 +177,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals and applies spiral_offset (pixels per turn, default 0) along the sweep, stopping at zero radius. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -206,7 +207,7 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayAlphaStop>>> {
 #[derive(Clone, Copy, Debug)]
 enum Layout {
     Linear { start_x: f32, start_y: f32, dx: f32, dy: f32 },
-    Radial { cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, rotate: bool },
+    Radial { cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, closed_loop: bool, spiral_offset: f32, rotate: bool },
 }
 
 impl Layout {
@@ -219,26 +220,19 @@ impl Layout {
                 let t = if count <= 1 { 0.0 } else { index as f32 / (count - 1) as f32 };
                 (m, t)
             }
-            Layout::Radial { cx, cy, radius, start, sweep, rotate } => {
-                // A complete revolution has N unique places, not N-1 and a duplicate at 360.
-                let closed = (sweep.abs() - std::f32::consts::TAU).abs() < 1e-5;
-                let divisor = if closed { count } else { count.saturating_sub(1).max(1) };
-                let t = index as f32 / divisor as f32;
-                let angle = start + sweep * t;
-                let mut m = source;
+            Layout::Radial { cx, cy, radius, start, sweep, closed_loop, spiral_offset, rotate } => {
+                let divisor = count.saturating_sub(u32::from(!closed_loop)).max(1);
+                let t = f64::from(index) / f64::from(divisor);
+                let travel = f64::from(sweep) * t;
+                let angle = (f64::from(start) + travel).to_radians();
                 let (sin, cos) = angle.sin_cos();
-                let (x, y) = (cx + radius * cos, cy + radius * sin);
-                m.m[4] = x;
-                m.m[5] = y;
-                if rotate {
-                    // Change the instance's own orientation while keeping its registration
-                    // point at (x, y). Do not rotate its translation around stage origin.
-                    let turn = Affine::translate(x, y)
-                        .mul(&Affine::rotate(sweep * t))
-                        .mul(&Affine::translate(-x, -y));
-                    m = turn.mul(&m);
-                }
-                (m, t)
+                let turns = travel.abs() / f64::from(CLOSED_SWEEP_LIMIT);
+                let r = (f64::from(radius) + f64::from(spiral_offset) * turns).max(0.0);
+                // Rotate the basis by the signed travel, then set the registration point.
+                let mut m = if rotate { Affine::rotate(travel.to_radians() as f32).mul(&source) } else { source };
+                m.m[4] = (f64::from(cx) + r * cos) as f32;
+                m.m[5] = (f64::from(cy) + r * sin) as f32;
+                (m, t as f32)
             }
         }
     }
@@ -281,11 +275,15 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             if !radius.is_finite() || radius < 0.0 {
                 return Err(EngineError::Param("radius must be finite and >= 0".into()));
             }
-            let start = opt_f32(p, "start_angle")?.unwrap_or((original_y - cy).atan2(original_x - cx).to_degrees()).to_radians();
-            let sweep = opt_f32(p, "sweep_angle")?.unwrap_or(360.0).to_radians();
+            let start = opt_f32(p, "start_angle")?.unwrap_or((original_y - cy).atan2(original_x - cx).to_degrees());
+            let sweep = opt_f32(p, "sweep_angle")?.unwrap_or(CLOSED_SWEEP_LIMIT);
+            let closed_loop = opt_bool(p, "closed_loop")?.unwrap_or(true);
+            let spiral_offset = opt_f32(p, "spiral_offset")?.unwrap_or(0.0);
             Layout::Radial {
-                cx, cy, radius, start, sweep,
-                rotate: crate::params::opt_bool(p, "rotate")?.unwrap_or(false),
+                cx, cy, radius, start, closed_loop,
+                sweep: if closed_loop { sweep.clamp(-CLOSED_SWEEP_LIMIT, CLOSED_SWEEP_LIMIT) } else { sweep },
+                spiral_offset: if closed_loop { 0.0 } else { spiral_offset },
+                rotate: opt_bool(p, "rotate")?.unwrap_or(false),
             }
         }
         other => return Err(EngineError::Param(format!("unknown array mode '{other}' (linear, radial)"))),
@@ -335,15 +333,125 @@ mod tests {
         assert_eq!(ArrayAlphaStop::sample(&stops, 0.5), 0.0);
     }
 
+    fn radial_source() -> Session {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 5, "y": 10, "w": 20, "h": 18})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        s
+    }
+
+    fn placed(s: &mut Session, p: &Value) -> Vec<Affine> {
+        s.preview_array(p).unwrap();
+        s.selected_elements().into_iter().map(|(_, el)| el.transform).collect()
+    }
+
+    fn assert_polar(at: Affine, radius: f32, angle: f32) {
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let expected = anicraft_geom::Vec2::new(radius * cos, radius * sin);
+        assert!(at.translation().distance(expected) < 1e-3, "expected {expected:?}, got {:?}", at.translation());
+    }
+
     #[test]
-    fn a_closed_radial_array_does_not_duplicate_its_first_position() {
-        let l = Layout::Radial { cx: 100.0, cy: 100.0, radius: 50.0, start: 0.0, sweep: std::f32::consts::TAU, rotate: false };
-        let (a, ta) = l.place(Affine::IDENTITY, 0, 12);
-        let (b, tb) = l.place(Affine::IDENTITY, 11, 12);
-        assert_eq!(ta, 0.0);
-        assert!(tb < 1.0);
-        assert!((a.m[4] - b.m[4]).abs() > 1.0);
-        assert!((b.m[4] - 100.0).abs() > 1.0);
+    fn closed_radial_defaults_to_one_turn_and_keeps_count_intervals_below_it() {
+        let mut s = radial_source();
+        let mut p = json!({"mode": "radial", "center_x": 0, "center_y": 0, "radius": 50, "start_angle": 0});
+        for count in [1, 2, 4, 9] {
+            p["count"] = json!(count);
+            let copies = placed(&mut s, &p);
+            assert_eq!(copies.len(), count);
+            for (i, at) in copies.into_iter().enumerate() {
+                assert_polar(at, 50.0, 360.0 * i as f32 / count as f32);
+            }
+        }
+        // A spiral value remains available when switching back to open mode.
+        p["count"] = json!(4);
+        p["spiral_offset"] = json!(35);
+        p["closed_loop"] = json!(true);
+        for sweep in [358.0f32, 360.0, 362.0, -358.0, -360.0, -362.0, 720.0, -1080.0] {
+            p["sweep_angle"] = json!(sweep);
+            let copies = placed(&mut s, &p);
+            assert_polar(copies[0], 50.0, 0.0);
+            assert_polar(copies[3], 50.0, sweep.clamp(-360.0, 360.0) * 0.75);
+        }
+    }
+
+    #[test]
+    fn open_radial_keeps_both_endpoints_through_positive_and_negative_turn_boundaries() {
+        let mut s = radial_source();
+        let mut p = json!({"mode": "radial", "closed_loop": false, "center_x": 0, "center_y": 0, "radius": 50, "start_angle": 23});
+        for count in [1, 2, 5, 8, 17] {
+            p["count"] = json!(count);
+            for sweep in [358.0, 360.0, 362.0, -358.0, -360.0, -362.0, 720.0, 1080.0] {
+                p["sweep_angle"] = json!(sweep);
+                let copies = placed(&mut s, &p);
+                assert_eq!(copies.len(), count);
+                assert_polar(copies[0], 50.0, 23.0);
+                let last = if count == 1 { 23.0 } else { 23.0 + sweep };
+                assert_polar(*copies.last().unwrap(), 50.0, last);
+                if count > 2 {
+                    let middle = count / 2;
+                    let fraction = middle as f32 / (count - 1) as f32;
+                    assert_polar(copies[middle], 50.0, 23.0 + sweep * fraction);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spiral_grows_or_shrinks_per_turn_in_both_directions_and_stops_at_the_centre() {
+        let mut s = radial_source();
+        let mut p = json!({"mode": "radial", "closed_loop": false, "center_x": 0, "center_y": 0,
+            "radius": 40, "start_angle": 0, "count": 7});
+        for sign in [-1.0, 1.0] {
+            for turns in [2.0, 3.0] {
+                for offset in [-20.0, 15.0] {
+                    let sweep = sign * 360.0 * turns;
+                    p["sweep_angle"] = json!(sweep);
+                    p["spiral_offset"] = json!(offset);
+                    for (i, at) in placed(&mut s, &p).into_iter().enumerate() {
+                        let t = i as f32 / 6.0;
+                        let expected = (40.0f32 + offset * turns * t).max(0.0);
+                        assert!(at.is_finite());
+                        assert_polar(at, expected, sweep * t);
+                    }
+                }
+            }
+        }
+        p["spiral_offset"] = json!(-40);
+        for sweep in [359.0f32, 360.0, 361.0] {
+            p["sweep_angle"] = json!(sweep);
+            let at = *placed(&mut s, &p).last().unwrap();
+            assert_polar(at, (40.0 - 40.0 * sweep / 360.0).max(0.0), sweep);
+        }
+    }
+
+    #[test]
+    fn spiral_rotation_uses_signed_travel_without_moving_the_registration_point() {
+        let mut s = radial_source();
+        let mut p = json!({"mode": "radial", "closed_loop": false, "center_x": 0, "center_y": 0,
+            "radius": 50, "start_angle": 0, "spiral_offset": 16, "count": 2});
+        for sweep in [-810.0f32, 810.0] {
+            p["sweep_angle"] = json!(sweep);
+            p["rotate"] = json!(false);
+            let fixed = placed(&mut s, &p)[1];
+            p["rotate"] = json!(true);
+            let turned = placed(&mut s, &p)[1];
+            assert_eq!(turned.translation(), fixed.translation());
+            assert!((turned.m[1] - sweep.signum()).abs() < 1e-5);
+            assert!(turned.m[0].abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn invalid_radial_topology_and_spiral_values_do_not_change_the_document() {
+        let mut s = radial_source();
+        let (doc, selection, steps) = (s.doc.clone(), s.selection.clone(), s.history_len());
+        for (key, value) in [("closed_loop", json!("false")), ("spiral_offset", json!("ten")), ("spiral_offset", json!(1e30))] {
+            let mut p = json!({"mode": "radial", "center_x": 0, "center_y": 0, "closed_loop": false});
+            p[key] = value;
+            assert!(s.execute("array.create", &p).is_err());
+            assert!(s.doc == doc && s.selection == selection && s.history_len() == steps);
+        }
     }
 
     #[test]

@@ -39,7 +39,8 @@ unavailable, rather than pretending they generate anything.
   with defaults anchored to the selected symbol's current position.
 - **Escape**, **Cancel**, or changing the dropdown to **None** abandons the
   preview and restores the pre-entry document and selection without an undo step.
-  These exits return the dropdown to None and retain the configuration for recovery.
+  These exits return the dropdown to None and retain the configuration while the original
+  instance stays selected.
 - A hidden, closed, or backgrounded Array panel must **not silently discard** an
   active session. Make the active operation discoverable; design safe navigation
   and explicit exit. Avoid hijacking Escape from an open child popup or text field:
@@ -51,9 +52,11 @@ unavailable, rather than pretending they generate anything.
 
 ### Remembering versus resetting
 
-Keep the unfinished configuration, including geometry for each array type and property stops,
-after Cancel, Escape or None. Commit clears it. Each new session binds to the current eligible
-selection. Dim Stage and gizmo visibility carry over across every exit.
+Keep one unfinished configuration, including geometry for each array type and property stops,
+after Cancel, Escape or None. Clear the draft as soon as the source selection changes or another
+document becomes active. Returning to the original instance then starts with fresh defaults.
+Commit clears the configuration. Dim Stage and gizmo visibility carry over across every exit
+and source change.
 
 Offer a distinct **Reset Settings to Defaults** action. This resets remembered
 stops and geometry and is separate from Cancel. Because it can erase elaborate
@@ -93,16 +96,38 @@ is required now.
   artwork and unaffected stage tiles where possible. Measure inside- and outside-stage drags at
   different counts before and after performance changes.
 
-**Radial:** extend the same direct manipulation metaphor:
+### Radial and spiral distribution
 
-- Draggable **Centre/Fulcrum** moves the orbit of all copies together.
-- Draggable **Start** on the circumference controls radius and starting angle.
-- Draggable **Arc End** controls sweep angle (and must distinguish arc direction
-  where appropriate). Show the circular arc and tick marks for instances.
-- Numeric Centre X/Y, Radius, Start Angle, and Sweep Angle remain synchronized.
-- A closed 360° array uses distinct positions, not an overlapping duplicate at
-  the start/end seam.
-- Keep each instance's *orbit* separate from its own *rotation*.
+**Closed Loop** starts on with a 360° sweep. It uses `N` intervals and limits Sweep to
+−360° through 360°. The first instance occupies Start and the final instance leaves one
+interval at the seam. With Closed Loop off, `N−1` intervals place the first and last instances
+at both endpoints. One instance always occupies Start. Editing Sweep keeps the chosen topology
+at every angle, including at full turns and across positive and negative sweep boundaries.
+
+Open distributions reveal **Spiral Offset** and accept multiple turns in either direction.
+For a fraction `t` of the distribution, angular travel is `Sweep × t` and radius is
+`max(0, Radius + Spiral Offset × abs(Sweep × t) / 360°)`. Spiral Offset is in pixels per turn.
+Positive offsets grow outward in either direction. Negative offsets shrink to the centre and
+stay there for the rest of the sweep. Zero offset keeps the radius constant. **Rotate instances**
+uses signed angular travel and leaves each instance's registration point on the curve.
+
+### Next milestone · Radial and spiral stage controller
+
+- Drag **Centre** to translate the whole arrangement. Drag **Start** to edit the starting
+  radius and angle. Drag **End** to edit the sweep and ending radius. In closed mode both endpoints
+  share a radius. In open mode, editing End radius updates Spiral Offset for the current turn count.
+- Link the handles with a circular arc or spiral guide. Dragging the guide translates the
+  arrangement like the Linear bar. Keep the guide visible even when copies fall short of End.
+- Synchronize Centre X/Y, Radius, Start angle, Sweep, and Spiral Offset immediately with the panel.
+  Keep the current instance-rotation option and show the controller through **Show/Hide Gizmo**.
+- Accumulate signed angular movement from one pointer sample to the next so the sweep retains
+  its winding count across 0°/360°. Let the artist add or remove turns by continuing to drag.
+- Keep coincident handles independently reachable, including at a full circle, zero sweep, or
+  the centre. Use a deterministic hit priority and visible offsets or rings as needed. At zero
+  travel, delay deriving an offset from the End radius until there is a nonzero sweep.
+
+The stage controller is planned for a separate interactive review. This increment adds the
+numeric distribution only.
 
 ### Gizmo visibility
 
@@ -184,9 +209,10 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
    editor-only **Dim Stage** checkbox.
 4. **Interaction polish** covers editable derived geometry, visible registration markers in both
    modes, foreground Dim Stage composition, and measured improvements to live Linear dragging.
-5. Later: Radial Centre/Start/Arc End, Grid, Path/node placement, spiral arrays, more stop
-   properties, filter interpolation, easing, Chaos,
-   multi-selection, optional grouping/merging.
+5. **Radial distribution and spiral foundations** covers explicit topology, signed sweep,
+   radial offset, and recovery tied to the selected source.
+6. Later: Radial and spiral stage controls, Grid, Path/node placement, more stop properties,
+   filter interpolation, easing, Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
 checks as prescribed by AGENTS.md. Add lifecycle regression tests for: an

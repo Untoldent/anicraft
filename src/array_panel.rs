@@ -6,8 +6,8 @@ use crate::array_gizmo::{Endpoints, GizmoDrag};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::Session;
-use anicraft_engine::doc::ElementKind;
+use anicraft_engine::{CLOSED_SWEEP_LIMIT, Session};
+use anicraft_engine::doc::{ElementId, ElementKind, LayerId};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
 
@@ -33,6 +33,8 @@ struct Radial {
     radius: f32,
     start: f32,
     sweep: f32,
+    closed_loop: bool,
+    spiral_offset: f32,
     rotate: bool,
 }
 
@@ -44,7 +46,10 @@ impl Settings {
             count: 10,
             // Keep the original 36 px default spacing across nine intervals.
             linear: Endpoints { start: [x, y], end: [x + 324.0, y] },
-            radial: Radial { centre: [x - radius, y], radius, start: 0.0, sweep: 360.0, rotate: false },
+            radial: Radial {
+                centre: [x - radius, y], radius, start: 0.0, sweep: CLOSED_SWEEP_LIMIT,
+                closed_loop: true, spiral_offset: 0.0, rotate: false,
+            },
             backwards: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
         }
@@ -73,7 +78,8 @@ impl Settings {
                 "mode": "radial", "count": self.count,
                 "center_x": self.radial.centre[0], "center_y": self.radial.centre[1],
                 "radius": self.radial.radius, "start_angle": self.radial.start,
-                "sweep_angle": self.radial.sweep, "rotate": self.radial.rotate,
+                "sweep_angle": self.radial.sweep, "closed_loop": self.radial.closed_loop,
+                "spiral_offset": self.radial.spiral_offset, "rotate": self.radial.rotate,
             }),
         };
         params["stacking"] = json!(if self.backwards { "front_to_back" } else { "back_to_front" });
@@ -91,6 +97,7 @@ struct Active {
 pub struct State {
     active: Option<Active>,
     settings: Option<Settings>,
+    draft_source: Option<(LayerId, ElementId)>,
     error: Option<String>,
     reset_pending: bool,
     stop_editor_epoch: u64,
@@ -104,6 +111,7 @@ impl Default for State {
         Self {
             active: None,
             settings: None,
+            draft_source: None,
             error: None,
             reset_pending: false,
             stop_editor_epoch: 0,
@@ -130,6 +138,7 @@ impl State {
     }
 
     fn select_mode(&mut self, s: &mut Session, mode: Option<Mode>) {
+        self.check_draft(s);
         if mode == self.mode() {
             return;
         }
@@ -147,6 +156,7 @@ impl State {
                 Ok(()) => {
                     self.active = Some(Active { mode, origin });
                     self.settings = Some(settings);
+                    self.draft_source = None;
                     self.error = None;
                 }
                 Err(error) => self.error = Some(error.to_string()),
@@ -165,14 +175,31 @@ impl State {
             return;
         }
         s.finish_array_preview(commit);
-        self.active = None;
+        let was_active = self.active.take().is_some();
         if commit {
-            self.settings = None;
-            self.stop_editor_epoch = self.stop_editor_epoch.wrapping_add(1);
+            self.discard_draft();
+        } else if was_active {
+            // The engine just restored the original, before any preview copies were selected.
+            self.draft_source = s.selection.first();
         }
         self.error = None;
         self.reset_pending = false;
         self.gizmo_drag = None;
+    }
+
+    pub(crate) fn discard_draft(&mut self) {
+        self.settings = None;
+        self.draft_source = None;
+        self.reset_pending = false;
+        self.stop_editor_epoch = self.stop_editor_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn check_draft(&mut self, s: &Session) {
+        if let Some(source) = self.draft_source
+            && (s.selection.len() != 1 || s.selection.first() != Some(source))
+        {
+            self.discard_draft();
+        }
     }
 
     fn customized(&self) -> bool {
@@ -180,9 +207,8 @@ impl State {
     }
 
     fn reset(&mut self, s: &mut Session) {
+        self.discard_draft();
         self.settings = self.active.as_ref().map(|active| Settings::at(active.origin));
-        self.reset_pending = false;
-        self.stop_editor_epoch = self.stop_editor_epoch.wrapping_add(1);
         self.gizmo_drag = None;
         self.refresh(s);
     }
@@ -270,6 +296,7 @@ pub(crate) fn remember_text_focus(ctx: &egui::Context) {
 }
 
 pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
+    app.array_panel.check_draft(&app.s);
     if !app.panel_visible(Panel::Array) {
         app.array_panel.reset_pending = false;
     }
@@ -278,10 +305,15 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 
 /// A live preview with a multi-stop alpha ramp and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
+    let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
+        let (sweep, offset) = setup.split_once(',')?;
+        Some((sweep.parse::<f32>().ok()?, offset.parse::<f32>().ok()?))
+    });
     app.perform("file.new", json!({"width": 640, "height": 400}));
     app.run("draw.rect", json!({"x": 72, "y": 72, "w": 125, "h": 60, "fill": "#376b93", "stroke": null}));
     app.run("draw.ellipse", json!({"x": 494, "y": 275, "w": 82, "h": 68, "fill": "#376b93", "stroke": null}));
-    app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": 56, "h": 56, "fill": "#ce523f", "stroke": null}));
+    let diameter = if open_radial.is_some() { 20 } else { 56 };
+    app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
     app.run("modify.convert_to_symbol", json!({"name": "Array sample"}));
     if matches!(view, "array-polish" | "array-polish-off" | "array-radial")
         && let Some((_, source)) = app.s.selection.first()
@@ -296,7 +328,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
-    let mode = if view == "array-radial" { Mode::Radial } else { Mode::Linear };
+    let mode = if view == "array-radial" || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
     app.array_panel.dim_stage = view != "array-polish-off";
@@ -305,8 +337,18 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         if mode == Mode::Radial {
             settings.radial.centre = [320.0, 200.0];
         }
-        settings.stops =
-            vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(2, 0.4, 1.0), PropertyStop::new(1, 1.0, 0.03)];
+        if let Some((sweep, offset)) = open_radial {
+            settings.radial.closed_loop = false;
+            settings.radial.sweep = sweep;
+            settings.radial.spiral_offset = offset;
+            if offset != 0.0 {
+                settings.count = 24;
+                settings.radial.radius = if offset > 0.0 { 38.0 } else { 140.0 };
+            }
+        } else {
+            settings.stops =
+                vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(2, 0.4, 1.0), PropertyStop::new(1, 1.0, 0.03)];
+        }
     }
     app.array_panel.refresh(&mut app.s);
 }
@@ -340,6 +382,7 @@ pub(crate) fn escape(app: &mut App, ctx: &egui::Context) {
 
 /// Called wherever the Array dock tab is drawn.
 pub fn panel(app: &mut App, ui: &mut Ui) {
+    app.array_panel.check_draft(&app.s);
     let eligible = app.s.array_preview_active() || source_origin(&app.s).is_some();
     let busy = app.playing
         || app.drag != Drag::None
@@ -478,16 +521,28 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
                 changed |= coordinates(ui, tr!("End"), [tr!("End X"), tr!("End Y")], &mut settings.linear.end);
                 changed |= linear_dimensions(ui, &mut settings.linear, settings.count);
             }
-            Mode::Radial => {
-                changed |= coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut settings.radial.centre);
-                changed |= field(ui, tr!("Radius"), &mut settings.radial.radius, " px", 0.0);
-                changed |= field(ui, tr!("Start angle"), &mut settings.radial.start, " °", -100_000.0);
-                changed |= field(ui, tr!("Sweep"), &mut settings.radial.sweep, " °", -100_000.0);
-                changed |= crate::theme::checkbox(ui, &mut settings.radial.rotate, tr!("Rotate instances")).changed();
-            }
+            Mode::Radial => changed |= radial_fields(ui, &mut settings.radial),
         }
         changed |= crate::theme::checkbox(ui, &mut settings.backwards, tr!("Stack first copy in front")).changed();
     });
+    changed
+}
+
+fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
+    let mut changed = coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut radial.centre);
+    changed |= field(ui, tr!("Radius"), &mut radial.radius, " px", 0.0..=100_000.0);
+    changed |= field(ui, tr!("Start angle"), &mut radial.start, " °", -100_000.0..=100_000.0);
+    let loop_changed = crate::theme::checkbox(ui, &mut radial.closed_loop, tr!("Closed Loop")).changed();
+    let limit = if radial.closed_loop { CLOSED_SWEEP_LIMIT } else { 100_000.0 };
+    if loop_changed && radial.closed_loop {
+        radial.sweep = radial.sweep.clamp(-limit, limit);
+    }
+    changed |= loop_changed;
+    changed |= field(ui, tr!("Sweep"), &mut radial.sweep, " °", -limit..=limit);
+    if !radial.closed_loop {
+        changed |= field(ui, tr!("Spiral Offset"), &mut radial.spiral_offset, tr!(" px/turn"), -100_000.0..=100_000.0);
+    }
+    changed |= crate::theme::checkbox(ui, &mut radial.rotate, tr!("Rotate instances")).changed();
     changed
 }
 
@@ -559,20 +614,20 @@ fn coordinates(ui: &mut Ui, label: &str, [x_name, y_name]: [&str; 2], [x, y]: &m
     })
 }
 
-fn field(ui: &mut Ui, label: &str, value: &mut f32, suffix: &'static str, min: f32) -> bool {
+fn field(ui: &mut Ui, label: &str, value: &mut f32, suffix: &str, range: std::ops::RangeInclusive<f32>) -> bool {
     ui.horizontal_wrapped(|ui| {
-        let label = ui.label(text(Type::Label, label));
+        ui.label(text(Type::Label, label));
         with_type(ui, Type::Data, |ui| {
             ui.add(
                 egui::DragValue::new(value)
-                    .range(min..=100_000.0)
+                    .range(range)
                     .clamp_existing_to_range(false)
                     .suffix(suffix)
                     .speed(1.0)
                     .max_decimals(1),
             )
         })
-        .labelled_by(label.id)
+        .named(label)
         .changed()
     })
     .inner
@@ -627,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn none_keeps_settings_but_the_next_preview_uses_the_new_selection() {
+    fn none_preserves_the_draft_for_the_same_source_and_starts_fresh_on_a_new_source() {
         let mut s = Session::default();
         instance(&mut s, 50.0, "First");
         let first = s.selection.first().unwrap();
@@ -642,14 +697,20 @@ mod tests {
         assert!(s.doc == doc && s.selection.first() == Some(first) && !s.in_gesture());
         assert_eq!(s.history_len(), steps);
         assert_eq!(state.settings, remembered);
+        state.select_mode(&mut s, Some(Mode::Linear));
+        assert_eq!(s.selection.len(), 3);
+        assert_eq!(state.settings, remembered);
+        state.select_mode(&mut s, None);
 
         instance(&mut s, 400.0, "Second");
         let second = s.selection.first().unwrap();
+        let origin = source_origin(&s).unwrap();
         let next_doc = s.doc.clone();
         state.select_mode(&mut s, Some(Mode::Radial));
         assert_eq!(s.selection.first(), Some(second));
-        assert_eq!(s.selection.len(), 3);
-        assert_eq!(state.settings, remembered);
+        assert_eq!(s.selection.len(), 10);
+        assert_eq!(state.settings.as_ref(), Some(&Settings::at(origin)));
+        state.settings.as_mut().unwrap().radial.spiral_offset = 30.0;
         assert!(state.customized());
         state.reset(&mut s);
         assert!(!state.customized());
@@ -791,6 +852,74 @@ mod tests {
         let point = |e: &(_, std::sync::Arc<anicraft_engine::doc::Element>)| [e.1.transform.m[4], e.1.transform.m[5]];
         near(point(selected.first().unwrap()), ends.start);
         near(point(selected.last().unwrap()), ends.end);
+    }
+
+    #[test]
+    fn changing_selection_discards_a_cancelled_draft_even_when_the_panel_is_closed() {
+        let (mut app, ctx) = linear_app();
+        let (_, first) = app.s.selection.first().unwrap();
+        let origin = source_origin(&app.s).unwrap();
+        instance(&mut app.s, 475.0, "Second");
+        let (_, second) = app.s.selection.first().unwrap();
+        app.s.select_only([first]);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let settings = app.array_panel.settings.as_mut().unwrap();
+        settings.count = 17;
+        settings.radial.closed_loop = false;
+        settings.radial.sweep = -720.0;
+        settings.radial.spiral_offset = 35.0;
+        app.array_panel.refresh(&mut app.s);
+        app.array_panel.dim_stage = false;
+        app.array_panel.show_gizmo = false;
+        let fields = nodes(&ctx, &mut app);
+        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.spiral_offset, 35.0);
+
+        crate::dock_ui::apply(&mut app, vec![crate::dock_ui::Act::Close(Panel::Array)]);
+        app.s.select_only([second]);
+        frame(&ctx, &mut app, vec![]);
+        assert!(app.array_panel.settings.is_none());
+        app.s.select_only([first]);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&Settings::at(origin)));
+        assert!(!app.array_panel.dim_stage() && !app.array_panel.shows_registrations());
+    }
+
+    #[test]
+    fn radial_panel_keeps_winding_in_open_mode_and_limits_a_closed_loop() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let set_field = |app: &mut App, label: &str, value: f64| {
+            let fields = nodes(&ctx, app);
+            let input = fields.iter().find(|(_, n)| n.role() == Role::SpinButton && n.label() == Some(label)).unwrap().0;
+            set_number(&ctx, app, input, value);
+        };
+        let toggle_loop = |app: &mut App| {
+            let shown = nodes(&ctx, app);
+            click(&ctx, app, &shown.iter().find(|(_, n)| n.label() == Some("Closed Loop")).unwrap().1);
+        };
+        let shows_offset = |app: &mut App| nodes(&ctx, app).iter().any(|(_, n)| n.value() == Some("Spiral Offset"));
+        assert!(app.array_panel.settings.as_ref().unwrap().radial.closed_loop);
+        assert!(!shows_offset(&mut app));
+        toggle_loop(&mut app);
+        assert!(shows_offset(&mut app));
+        set_field(&mut app, "Spiral Offset", 15.0);
+        for sweep in [358.0, 360.0, 362.0, -360.0, 720.0, -1080.0] {
+            set_field(&mut app, "Sweep", sweep);
+            let radial = &app.array_panel.settings.as_ref().unwrap().radial;
+            assert_eq!(radial.sweep, sweep as f32);
+            assert!(!radial.closed_loop);
+            let last = app.s.selected_elements().last().unwrap().1.transform.translation();
+            let radius = (last.x - radial.centre[0]).hypot(last.y - radial.centre[1]);
+            assert!((radius - radial.radius - 15.0 * radial.sweep.abs() / 360.0).abs() < 0.001);
+        }
+        toggle_loop(&mut app);
+        assert!(!shows_offset(&mut app));
+        let radial = &app.array_panel.settings.as_ref().unwrap().radial;
+        assert!(radial.closed_loop);
+        assert_eq!(radial.sweep, -360.0);
+        toggle_loop(&mut app);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.spiral_offset, 15.0);
     }
 
     #[test]

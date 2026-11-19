@@ -999,6 +999,7 @@ impl App {
         }
         match result {
             Ok(v) => {
+                self.array_panel.check_draft(&self.s);
                 if matches!(id, "edit.copy" | "edit.cut" | "timeline.copy_frames" | "timeline.cut_frames" | "frames.copy" | "frames.cut") {
                     self.copied = true;
                 }
@@ -2996,6 +2997,9 @@ impl App {
                 self.tool = Tool::Width;
             }
             Some(which @ ("array" | "array-hidden" | "array-polish" | "array-polish-off" | "array-radial")) => {
+                crate::array_panel::screenshot(self, which);
+            }
+            Some(which) if self.shot.is_some() && which.starts_with("array-radial-open:") => {
                 crate::array_panel::screenshot(self, which);
             }
             Some(which @ ("gradient" | "gradientbucket")) => {

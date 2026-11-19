@@ -547,14 +547,20 @@ in place and updates the spacing. The button beside **Dim Stage** shows or hides
 controls and the white instance pivot markers in both modes. **Dim Stage** brings the Array in front
 of the faded surroundings. Turn it off to see the document's stacking.
 
+**Closed Loop** is on by default for Radial arrays. It evenly spaces a full circle without
+doubling the first instance at the seam and limits Sweep to one turn in either direction.
+Turn it off to place instances at both ends of an arc or to make multiple turns. **Spiral Offset**
+changes the radius per turn. Positive values grow the spiral outward in either direction.
+Negative values shrink it to the centre. Zero keeps the radius constant.
+
 Click the property track to add a stop. Drag a stop to move it or enter its position as a
 percentage. Open **Colour Effect** to change Alpha at the selected stop. With a stop focused,
 use the arrow keys to nudge it, Shift for larger steps, or Delete to remove it.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
-original artwork and selection and retains the unfinished settings for recovery. Dim Stage and
-handle visibility carry over either way.
+original artwork and selection and retains the unfinished settings for the selected source.
+Picking another source clears those settings. Dim Stage and handle visibility carry over.
 If you hide the panel, use **Show Array** above the stage to return to the preview. Use
 **Reset Settings to Defaults** to clear the remembered geometry and stops.
 
