@@ -95,7 +95,7 @@ pub use anicraft_svg as svg;
 /// Whether a path is an Animate document (`.fla`, `.xfl`, or an XFL folder) that `file.open`
 /// imports.
 pub use cmds_file::is_animate;
-pub use cmds_array::{ArrayAlphaStop, CLOSED_SWEEP_LIMIT};
+pub use cmds_array::{ArrayAlphaStop, CLOSED_SWEEP_LIMIT, RadialDistribution};
 pub use cmds_modify::{Item as SelectedItem, transform_origins};
 
 #[derive(Debug, thiserror::Error)]
@@ -409,7 +409,7 @@ pub struct Session {
     gesture: Option<Snapshot>,
     /// Array owns its gesture until the artist explicitly commits or cancels it.
     array_preview: bool,
-    array_linear: Option<cmds_array::LinearPreview>,
+    array_positions: Option<cmds_array::PositionPreview>,
     /// Display list of `(state, scene, frame)`, shared by hit testing, bounds and overlays.
     dl_cache: RefCell<Option<CachedList>>,
     /// Copied elements (and the symbols they use), outside the document so undo leaves it alone.
@@ -570,7 +570,7 @@ impl Session {
             history: History::default(),
             gesture: None,
             array_preview: false,
-            array_linear: None,
+            array_positions: None,
             dl_cache: RefCell::new(None),
             clipboard: cmds_modify::Clipboard::default(),
             frame_clipboard: cmds_frames::FrameClipboard::default(),

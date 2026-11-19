@@ -104,30 +104,40 @@ interval at the seam. With Closed Loop off, `N−1` intervals place the first an
 at both endpoints. One instance always occupies Start. Editing Sweep keeps the chosen topology
 at every angle, including at full turns and across positive and negative sweep boundaries.
 
-Open distributions reveal **Spiral Offset** and accept multiple turns in either direction.
-For a fraction `t` of the distribution, angular travel is `Sweep × t` and radius is
-`max(0, Radius + Spiral Offset × abs(Sweep × t) / 360°)`. Spiral Offset is in pixels per turn.
-Positive offsets grow outward in either direction. Negative offsets shrink to the centre and
-stay there for the rest of the sweep. Zero offset keeps the radius constant. **Rotate instances**
-uses signed angular travel and leaves each instance's registration point on the curve.
+Open distributions reveal **Spiral Offset** and **Centre Drift X/Y** and accept multiple turns
+in either direction. At a fraction `t` of the distribution, angular travel is `Sweep × t` and
+the unsigned turn count is `abs(Sweep × t) / 360°`. The local centre is `Centre + Centre Drift × turns`.
+The radius around that centre is `max(0, Radius + Spiral Offset × turns)`. Both rates are in
+pixels per turn and default to zero. With zero offset, successive turns keep the same radius.
+After the radius reaches zero, the rest of an inward spiral follows the drifting centre.
+**Rotate instances** uses signed angular travel and places each registration point on the curve.
 
-### Next milestone · Radial and spiral stage controller
+### Radial and spiral stage controller
 
 - Drag **Centre** to translate the whole arrangement. Drag **Start** to edit the starting
   radius and angle. Drag **End** to edit the sweep and ending radius. In closed mode both endpoints
   share a radius. In open mode, editing End radius updates Spiral Offset for the current turn count.
 - Link the handles with a circular arc or spiral guide. Dragging the guide translates the
   arrangement like the Linear bar. Keep the guide visible even when copies fall short of End.
-- Synchronize Centre X/Y, Radius, Start angle, Sweep, and Spiral Offset immediately with the panel.
+- In open mode, a bar links **Centre** to the **Drift** grip at the local centre after one turn.
+  Drag Drift in either axis to steer the path without changing radius or Sweep. Drag the bar to
+  translate the arrangement. At zero drift, the Drift ring surrounds Centre and stays grabbable.
+- Synchronize Centre X/Y, Radius, Start angle, Sweep, Spiral Offset, and Centre Drift X/Y immediately with the panel.
   Keep the current instance-rotation option and show the controller through **Show/Hide Gizmo**.
 - Accumulate signed angular movement from one pointer sample to the next so the sweep retains
-  its winding count across 0°/360°. Let the artist add or remove turns by continuing to drag.
-- Keep coincident handles independently reachable, including at a full circle, zero sweep, or
-  the centre. Use a deterministic hit priority and visible offsets or rings as needed. At zero
-  travel, delay deriving an offset from the End radius until there is a nonzero sweep.
+  its winding count across 0°/360°. With drift active, place End under the drag point by solving
+  Sweep and Spiral Offset near the current winding. Hold the last valid placement if the local
+  solution cannot reach the pointer. The numeric Sweep field changes angular travel alone.
+- Closed Loop stops at ±360°, where Start and End share one geometric point. A drag past
+  that point holds the full turn until the pointer retraces the seam. The final instance still
+  sits one interval before Start.
+- Keep coincident handles independently reachable at a full circle, zero sweep, or the centre.
+  When Start and End overlap, drag Start from the inner disc and End from a broad annulus that
+  extends beyond its visible outline. Grips and their labels keep their own positions as they
+  pass each other. Ignore angular changes while the pointer is at the centre.
 
-The stage controller is planned for a separate interactive review. This increment adds the
-numeric distribution only.
+Position-only drags reuse existing instances and unaffected stage tiles where eligible. The
+preview uses the standard rendering path when instance rotation changes the artwork's footprint.
 
 ### Gizmo visibility
 
@@ -135,7 +145,7 @@ Place a compact circle–line–circle toggle beside **Dim Stage**. Use a rounde
 visible surface in both states and the theme's active treatment when on. Its tooltip follows
 the action, **Hide Array Handles** or **Show Array Handles**. It starts on in both modes. Hiding
 it removes the handles, guides and registration markers while live artwork and numeric controls
-remain available. Visibility is an editor setting. Radial handles belong to a later increment.
+remain available. Visibility is an editor setting shared by both controllers.
 
 ## Dim Stage
 
@@ -211,7 +221,9 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
    modes, foreground Dim Stage composition, and measured improvements to live Linear dragging.
 5. **Radial distribution and spiral foundations** covers explicit topology, signed sweep,
    radial offset, and recovery tied to the selected source.
-6. Later: Radial and spiral stage controls, Grid, Path/node placement, more stop properties,
+6. **Radial and spiral stage controls** covers Centre, Start, End and Drift, guide translation,
+   independent radial growth and centre displacement, and signed sweep winding during a drag.
+7. Later: Grid, Path/node placement, more stop properties,
    filter interpolation, easing, Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

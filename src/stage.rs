@@ -350,7 +350,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         None
     };
     let array_gizmo = if array_active { crate::array_gizmo::input(app, ui, canvas, array_projection) } else { None };
-    let array_generation = (!preview && edit_view.is_none()).then(|| app.s.linear_array_generation()).flatten();
+    let array_generation = (!preview && edit_view.is_none()).then(|| app.s.array_translation_generation()).flatten();
     let array_instances = if app.array_panel.shows_registrations() || array_generation.is_some() { app.s.selected_elements() } else { Vec::new() };
     // Library items dragged onto the stage land at the pointer (ADR 0053).
     if !array_active {

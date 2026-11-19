@@ -19,8 +19,8 @@ Linear arrays have draggable Start and End circles and a movable connecting line
 direction, length and spacing are editable in the panel. Both modes display white pivot markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only
 Linear edits reuse the instances and eligible stage tiles. Radial distribution supports an explicit
-Closed Loop and open arcs with a signed sweep and spiral offset. Radial and spiral stage controls
-are planned for the next increment.
+Closed Loop and open arcs with a signed sweep, spiral offset and two-axis centre drift. Its stage
+controller has Centre, Start, End and Drift handles, a draggable drift bar and a curved guide.
 
 | Dimension | Status |
 |---|---|

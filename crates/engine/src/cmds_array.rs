@@ -3,18 +3,71 @@
 //! A count of N produces N total instances, including the original (ID preserved).
 //! The first instance moves to the requested start location. Copies are ordinary
 //! symbol instances, not a new document object, so existing editors and exports work.
-//! A geometry-only Linear edit moves the existing preview instances in place.
+//! Geometry edits that only move instances reuse the existing preview.
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
 use anicraft_doc::{Element, ElementId, ElementKind};
-use anicraft_geom::Affine;
+use anicraft_geom::{Affine, Vec2};
 use serde_json::{Value, json};
 use std::ops::Range;
 use std::sync::Arc;
 
 const MAX_COPIES: u32 = 500;
 pub const CLOSED_SWEEP_LIMIT: f32 = 360.0;
+
+/// The same continuous curve used for Array placement and the editor's stage guide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialDistribution {
+    pub centre: [f32; 2],
+    pub radius: f32,
+    pub start: f32,
+    pub sweep: f32,
+    pub closed_loop: bool,
+    pub spiral_offset: f32,
+    pub centre_drift: [f32; 2],
+    pub rotate: bool,
+}
+
+impl RadialDistribution {
+    pub fn sweep_limit(self) -> f32 {
+        if self.closed_loop { CLOSED_SWEEP_LIMIT } else { f32::INFINITY }
+    }
+
+    fn travel(self, fraction: f64) -> f64 {
+        let limit = self.sweep_limit();
+        f64::from(self.sweep.clamp(-limit, limit)) * fraction
+    }
+
+    pub fn radius_at(self, fraction: f64) -> f64 {
+        let turns = self.travel(fraction).abs() / f64::from(CLOSED_SWEEP_LIMIT);
+        self.radius_after_turns(turns)
+    }
+
+    fn radius_after_turns(self, turns: f64) -> f64 {
+        let offset = if self.closed_loop { 0.0 } else { f64::from(self.spiral_offset) };
+        (f64::from(self.radius) + offset * turns).max(0.0)
+    }
+
+    /// Local centre after this many unsigned revolutions of an open distribution.
+    pub fn centre_after_turns(self, turns: f64) -> [f64; 2] {
+        let [x, y] = self.centre.map(f64::from);
+        let [dx, dy] = if self.closed_loop { [0.0, 0.0] } else { self.centre_drift.map(f64::from) };
+        [x + dx * turns, y + dy * turns]
+    }
+
+    pub fn point(self, fraction: f64) -> Vec2 {
+        let travel = self.travel(fraction);
+        let turns = travel.abs() / f64::from(CLOSED_SWEEP_LIMIT);
+        // Reduce whole turns before adding the start angle so the seam is exact.
+        let angle = f64::from(self.start) + travel % f64::from(CLOSED_SWEEP_LIMIT);
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let r = self.radius_after_turns(turns);
+        let [x, y] = self.centre_after_turns(turns);
+        Vec2::new((x + r * cos) as f32, (y + r * sin) as f32)
+    }
+}
+
 /// One property snapshot on the array's 0..1 progression.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArrayAlphaStop {
@@ -49,8 +102,8 @@ impl Session {
     }
 
     /// Shared by geometry-only previews with the same instances, source artwork and stacking.
-    pub fn linear_array_generation(&self) -> Option<crate::StateId> {
-        self.array_linear.as_ref().map(|linear| linear.generation)
+    pub fn array_translation_generation(&self) -> Option<crate::StateId> {
+        self.array_positions.as_ref().map(|preview| preview.generation)
     }
 
     pub(super) fn require_no_array_preview(&self) -> Result<()> {
@@ -60,13 +113,13 @@ impl Session {
         Ok(())
     }
 
-    /// Start a preview from the original artwork. Keep the same instances for a Linear move.
+    /// Start a preview from the original artwork. Reuse the instances for position-only edits.
     pub fn preview_array(&mut self, params: &Value) -> Result<()> {
         if self.array_preview {
-            if let Some(mut linear) = self.array_linear.take()
-                && linear.move_to(self, params)
+            if let Some(mut preview) = self.array_positions.take()
+                && preview.move_to(self, params)
             {
-                self.array_linear = Some(linear);
+                self.array_positions = Some(preview);
                 return Ok(());
             }
             self.restore_gesture();
@@ -79,7 +132,7 @@ impl Session {
         let result = self.execute_command("array.create", params).map(|_| ());
         if result.is_ok() {
             self.array_preview = true;
-            self.array_linear = LinearPreview::new(self, params);
+            self.array_positions = PositionPreview::new(self, params);
         } else if !self.array_preview {
             self.end_gesture();
         }
@@ -90,14 +143,14 @@ impl Session {
         if !std::mem::take(&mut self.array_preview) {
             return;
         }
-        let linear = self.array_linear.take();
+        let preview = self.array_positions.take();
         if !commit {
             self.revert_gesture();
-        } else if let Some(linear) = linear {
+        } else if let Some(preview) = preview {
             // Record the current parameters once, including moves made without replaying the
             // command. Replaying history still uses the public Array command.
             self.rec.truncate(self.gesture_rec);
-            self.rec.push(crate::history::Recorded::new("array.create", &linear.params));
+            self.rec.push(crate::history::Recorded::new("array.create", &preview.params));
         }
         self.end_gesture();
     }
@@ -105,7 +158,7 @@ impl Session {
 
 /// An existing stretch of baked preview instances whose topology stays unchanged on a move.
 /// Tweens with keyed motion and linked layers keep the general command path.
-pub(super) struct LinearPreview {
+pub(super) struct PositionPreview {
     generation: crate::StateId,
     key: usize,
     instances: Range<usize>,
@@ -114,16 +167,25 @@ pub(super) struct LinearPreview {
 }
 
 const LINEAR_COORDS: [&str; 4] = ["start_x", "start_y", "dx", "dy"];
+const RADIAL_COORDS: [&str; 8] = ["center_x", "center_y", "radius", "start_angle", "sweep_angle", "spiral_offset", "drift_x", "drift_y"];
 
-fn explicit_linear(p: &Value) -> Option<Layout> {
-    if p.get("mode")?.as_str()? != "linear" { return None; }
-    let [start_x, start_y, dx, dy] = LINEAR_COORDS.map(|key| opt_f32(p, key).ok().flatten());
-    Some(Layout::Linear { start_x: start_x?, start_y: start_y?, dx: dx?, dy: dy? })
+fn explicit_positions(p: &Value) -> Option<(Layout, &'static [&'static str])> {
+    match p.get("mode")?.as_str()? {
+        "linear" => {
+            let [start_x, start_y, dx, dy] = LINEAR_COORDS.map(|key| opt_f32(p, key).ok().flatten());
+            Some((Layout::Linear { start_x: start_x?, start_y: start_y?, dx: dx?, dy: dy? }, &LINEAR_COORDS))
+        }
+        "radial" if ["radius", "start_angle"].iter().all(|key| p.get(*key).is_some_and(Value::is_number)) => {
+            let radial = parse_radial(p, Vec2::ZERO).ok()?;
+            (!radial.rotate).then_some((Layout::Radial(radial), &RADIAL_COORDS))
+        }
+        _ => None,
+    }
 }
 
-impl LinearPreview {
+impl PositionPreview {
     fn new(s: &Session, p: &Value) -> Option<Self> {
-        explicit_linear(p)?;
+        explicit_positions(p)?;
         let tl = s.timeline();
         if tl.has_rig() { return None; }
         let layer = tl.layer(s.layer)?;
@@ -140,13 +202,14 @@ impl LinearPreview {
     }
 
     fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
-        let (Some(old), Some(new), Some(layout)) = (self.params.as_object(), params.as_object(), explicit_linear(params)) else { return false };
-        if old.len() != new.len() || old.iter().any(|(key, v)| !LINEAR_COORDS.contains(&key.as_str()) && new.get(key) != Some(v)) {
+        let (Some(old), Some(new), Some((layout, coords))) = (self.params.as_object(), params.as_object(), explicit_positions(params)) else { return false };
+        if old.len() != new.len() || old.iter().any(|(key, v)| !coords.contains(&key.as_str()) && new.get(key) != Some(v)) {
             return false;
         }
         if old == new { return true; }
         let count = self.instances.len() as u32;
-        // Checking the extremes also validates the points between them.
+        // Linear coordinates and nonrotating radial positions stay within finite bounds
+        // between their endpoints. The explicit inputs came through opt_f32.
         if ![0, count.saturating_sub(1)].into_iter().all(|i| layout.place(Affine::IDENTITY, i, count).0.is_finite()) {
             return false;
         }
@@ -177,7 +240,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals and applies spiral_offset (pixels per turn, default 0) along the sweep, stopping at zero radius. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -207,7 +270,7 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayAlphaStop>>> {
 #[derive(Clone, Copy, Debug)]
 enum Layout {
     Linear { start_x: f32, start_y: f32, dx: f32, dy: f32 },
-    Radial { cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, closed_loop: bool, spiral_offset: f32, rotate: bool },
+    Radial(RadialDistribution),
 }
 
 impl Layout {
@@ -220,22 +283,37 @@ impl Layout {
                 let t = if count <= 1 { 0.0 } else { index as f32 / (count - 1) as f32 };
                 (m, t)
             }
-            Layout::Radial { cx, cy, radius, start, sweep, closed_loop, spiral_offset, rotate } => {
-                let divisor = count.saturating_sub(u32::from(!closed_loop)).max(1);
+            Layout::Radial(radial) => {
+                let divisor = count.saturating_sub(u32::from(!radial.closed_loop)).max(1);
                 let t = f64::from(index) / f64::from(divisor);
-                let travel = f64::from(sweep) * t;
-                let angle = (f64::from(start) + travel).to_radians();
-                let (sin, cos) = angle.sin_cos();
-                let turns = travel.abs() / f64::from(CLOSED_SWEEP_LIMIT);
-                let r = (f64::from(radius) + f64::from(spiral_offset) * turns).max(0.0);
                 // Rotate the basis by the signed travel, then set the registration point.
-                let mut m = if rotate { Affine::rotate(travel.to_radians() as f32).mul(&source) } else { source };
-                m.m[4] = (f64::from(cx) + r * cos) as f32;
-                m.m[5] = (f64::from(cy) + r * sin) as f32;
+                let mut m = if radial.rotate { Affine::rotate(radial.travel(t).to_radians() as f32).mul(&source) } else { source };
+                let at = radial.point(t);
+                m.m[4] = at.x;
+                m.m[5] = at.y;
                 (m, t as f32)
             }
         }
     }
+}
+
+fn parse_radial(p: &Value, original: Vec2) -> Result<RadialDistribution> {
+    let x = opt_f32(p, "center_x")?.ok_or_else(|| EngineError::Param("radial requires center_x".into()))?;
+    let y = opt_f32(p, "center_y")?.ok_or_else(|| EngineError::Param("radial requires center_y".into()))?;
+    let delta = original - Vec2::new(x, y);
+    let radius = opt_f32(p, "radius")?.unwrap_or_else(|| delta.x.hypot(delta.y));
+    if !radius.is_finite() || radius < 0.0 {
+        return Err(EngineError::Param("radius must be finite and >= 0".into()));
+    }
+    Ok(RadialDistribution {
+        centre: [x, y], radius,
+        start: opt_f32(p, "start_angle")?.unwrap_or_else(|| delta.y.atan2(delta.x).to_degrees()),
+        sweep: opt_f32(p, "sweep_angle")?.unwrap_or(CLOSED_SWEEP_LIMIT),
+        closed_loop: opt_bool(p, "closed_loop")?.unwrap_or(true),
+        spiral_offset: opt_f32(p, "spiral_offset")?.unwrap_or(0.0),
+        centre_drift: [opt_f32(p, "drift_x")?.unwrap_or(0.0), opt_f32(p, "drift_y")?.unwrap_or(0.0)],
+        rotate: opt_bool(p, "rotate")?.unwrap_or(false),
+    })
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
@@ -267,25 +345,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             dx: opt_f32(p, "dx")?.unwrap_or(30.0),
             dy: opt_f32(p, "dy")?.unwrap_or(0.0),
         },
-        "radial" => {
-            let cx = opt_f32(p, "center_x")?.ok_or_else(|| EngineError::Param("radial requires center_x".into()))?;
-            let cy = opt_f32(p, "center_y")?.ok_or_else(|| EngineError::Param("radial requires center_y".into()))?;
-            let default_radius = (original_x - cx).hypot(original_y - cy);
-            let radius = opt_f32(p, "radius")?.unwrap_or(default_radius);
-            if !radius.is_finite() || radius < 0.0 {
-                return Err(EngineError::Param("radius must be finite and >= 0".into()));
-            }
-            let start = opt_f32(p, "start_angle")?.unwrap_or((original_y - cy).atan2(original_x - cx).to_degrees());
-            let sweep = opt_f32(p, "sweep_angle")?.unwrap_or(CLOSED_SWEEP_LIMIT);
-            let closed_loop = opt_bool(p, "closed_loop")?.unwrap_or(true);
-            let spiral_offset = opt_f32(p, "spiral_offset")?.unwrap_or(0.0);
-            Layout::Radial {
-                cx, cy, radius, start, closed_loop,
-                sweep: if closed_loop { sweep.clamp(-CLOSED_SWEEP_LIMIT, CLOSED_SWEEP_LIMIT) } else { sweep },
-                spiral_offset: if closed_loop { 0.0 } else { spiral_offset },
-                rotate: opt_bool(p, "rotate")?.unwrap_or(false),
-            }
-        }
+        "radial" => Layout::Radial(parse_radial(p, original.transform.translation())?),
         other => return Err(EngineError::Param(format!("unknown array mode '{other}' (linear, radial)"))),
     };
 
@@ -376,6 +436,44 @@ mod tests {
     }
 
     #[test]
+    fn closed_radial_full_turn_ends_exactly_at_start_without_placing_a_seam_copy() {
+        let mut s = radial_source();
+        for sweep in [-360.0, 360.0] {
+            let radial = RadialDistribution { centre: [0.0, 0.0], radius: 420.0, start: 0.0,
+                sweep, closed_loop: true, spiral_offset: 0.0, centre_drift: [60.0, -10.0], rotate: true };
+            assert_eq!(radial.point(0.0), radial.point(1.0));
+            let p = json!({"mode": "radial", "center_x": 0, "center_y": 0, "radius": 420,
+                "start_angle": 0, "sweep_angle": sweep, "count": 10, "closed_loop": true, "rotate": true,
+                "drift_x": 60, "drift_y": -10});
+            let copies = placed(&mut s, &p);
+            assert_eq!(copies.len(), 10);
+            assert_eq!(copies[0].translation(), radial.point(0.0));
+            assert!(copies.iter().skip(1).all(|copy| copy.translation() != radial.point(0.0)));
+        }
+    }
+
+    #[test]
+    fn centre_drift_accumulates_independently_of_radius_and_sweep_direction() {
+        let mut s = radial_source();
+        for sweep in [-720.0_f32, 720.0] {
+            for offset in [-40.0_f32, 0.0, 25.0] {
+                let p = json!({"mode": "radial", "center_x": 10, "center_y": 15, "radius": 40,
+                    "start_angle": 0, "sweep_angle": sweep, "count": 9, "closed_loop": false,
+                    "spiral_offset": offset, "drift_x": 30, "drift_y": -12});
+                let copies = placed(&mut s, &p);
+                assert_eq!(copies.len(), 9);
+                for (i, copy) in copies.into_iter().enumerate() {
+                    let turns = i as f32 / 4.0;
+                    let centre = Vec2::new(10.0 + 30.0 * turns, 15.0 - 12.0 * turns);
+                    let radius = (40.0 + offset * turns).max(0.0);
+                    let (sin, cos) = (sweep.signum() * turns * std::f32::consts::TAU).sin_cos();
+                    assert!(copy.translation().distance(centre + Vec2::new(cos, sin) * radius) < 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn open_radial_keeps_both_endpoints_through_positive_and_negative_turn_boundaries() {
         let mut s = radial_source();
         let mut p = json!({"mode": "radial", "closed_loop": false, "center_x": 0, "center_y": 0, "radius": 50, "start_angle": 23});
@@ -446,12 +544,44 @@ mod tests {
     fn invalid_radial_topology_and_spiral_values_do_not_change_the_document() {
         let mut s = radial_source();
         let (doc, selection, steps) = (s.doc.clone(), s.selection.clone(), s.history_len());
-        for (key, value) in [("closed_loop", json!("false")), ("spiral_offset", json!("ten")), ("spiral_offset", json!(1e30))] {
+        for (key, value) in [("closed_loop", json!("false")), ("spiral_offset", json!("ten")), ("spiral_offset", json!(1e30)),
+            ("drift_x", json!("right")), ("drift_y", json!(1e30))] {
             let mut p = json!({"mode": "radial", "center_x": 0, "center_y": 0, "closed_loop": false});
             p[key] = value;
             assert!(s.execute("array.create", &p).is_err());
             assert!(s.doc == doc && s.selection == selection && s.history_len() == steps);
         }
+    }
+
+    #[test]
+    fn nonrotating_spiral_edits_reuse_the_preview_and_commit_exactly_the_last_geometry() {
+        let mut s = radial_source();
+        let base = s.doc.clone();
+        let source = s.selection.clone();
+        let mut p = json!({"mode": "radial", "closed_loop": false, "center_x": 200, "center_y": 50,
+            "radius": 38, "start_angle": 15, "sweep_angle": 358, "spiral_offset": 15, "count": 20, "drift_x": 0, "drift_y": 0,
+            "stacking": "front_to_back", "alpha_stops": [{"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 0.2}]});
+        s.preview_array(&p).unwrap();
+        let generation = s.array_translation_generation();
+        assert!(generation.is_some());
+        let ids = s.selection.clone();
+        let first = s.selected_elements().last().unwrap().1.clone();
+        p["sweep_angle"] = json!(721);
+        p["spiral_offset"] = json!(-30);
+        p["drift_x"] = json!(46);
+        p["drift_y"] = json!(-20);
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.array_translation_generation(), generation);
+        assert_eq!(s.selection, ids);
+        assert!(Arc::ptr_eq(&first, &s.selected_elements().last().unwrap().1));
+        s.finish_array_preview(true);
+
+        let mut expected = Session::new(base);
+        expected.selection = source;
+        expected.execute("array.create", &p).unwrap();
+        assert!(s.doc == expected.doc && s.selection == expected.selection);
+        let (_, command) = s.history.steps().last().unwrap();
+        assert_eq!(command.unwrap(), &[crate::history::Recorded::new("array.create", &p)]);
     }
 
     #[test]
@@ -565,13 +695,13 @@ mod tests {
         let mut p = json!({"mode": "linear", "count": 5, "start_x": 50, "start_y": 40, "dx": 12, "dy": -5,
             "stacking": "front_to_back", "alpha_stops": [{"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 0.2}]});
         s.preview_array(&p).unwrap();
-        let generation = s.linear_array_generation().unwrap();
+        let generation = s.array_translation_generation().unwrap();
         let ids = s.selection.clone();
         let still = s.selected_elements().last().unwrap().1.clone();
         p["dx"] = json!(400);
         p["dy"] = json!(70);
         s.preview_array(&p).unwrap();
-        assert_eq!(s.linear_array_generation(), Some(generation));
+        assert_eq!(s.array_translation_generation(), Some(generation));
         assert_eq!(s.selection, ids);
         assert!(Arc::ptr_eq(&still, &s.selected_elements().last().unwrap().1));
 
@@ -580,7 +710,7 @@ mod tests {
         expected.execute("array.create", &p).unwrap();
         assert!(s.doc == expected.doc && s.selection == expected.selection);
         s.finish_array_preview(true);
-        assert!(s.linear_array_generation().is_none());
+        assert!(s.array_translation_generation().is_none());
         assert_eq!(s.history_len(), steps + 1);
         let (_, recorded) = s.history.steps().last().unwrap();
         assert_eq!(recorded.unwrap(), &[crate::history::Recorded::new("array.create", &p)]);

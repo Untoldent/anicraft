@@ -551,7 +551,13 @@ of the faded surroundings. Turn it off to see the document's stacking.
 doubling the first instance at the seam and limits Sweep to one turn in either direction.
 Turn it off to place instances at both ends of an arc or to make multiple turns. **Spiral Offset**
 changes the radius per turn. Positive values grow the spiral outward in either direction.
-Negative values shrink it to the centre. Zero keeps the radius constant.
+Negative values shrink it to the centre. Zero keeps the radius constant. **Centre Drift X/Y**
+moves the local centre by that many pixels per turn in either sweep direction.
+Drag **Centre** or the curved guide on the stage to move the array. Drag **Start** to set
+the radius and starting angle. Drag **End** to place the endpoint and add or remove turns. At a
+closed seam, grab Start from the middle and End from the surrounding ring, including just outside
+its outline. Drag **Drift** in any direction to steer successive turns. The distance from Centre
+to Drift indicates the displacement over one turn. Drag their connecting bar to move the array.
 
 Click the property track to add a stop. Drag a stop to move it or enter its position as a
 percentage. Open **Colour Effect** to change Alpha at the selected stop. With a stop focused,

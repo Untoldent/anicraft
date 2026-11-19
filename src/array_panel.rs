@@ -2,11 +2,11 @@
 
 use crate::a11y::Named;
 use crate::app::{App, Drag};
-use crate::array_gizmo::{Endpoints, GizmoDrag};
+use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{CLOSED_SWEEP_LIMIT, Session};
+use anicraft_engine::{CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ElementId, ElementKind, LayerId};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
@@ -27,17 +27,6 @@ struct Settings {
     stops: Vec<PropertyStop>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Radial {
-    centre: [f32; 2],
-    radius: f32,
-    start: f32,
-    sweep: f32,
-    closed_loop: bool,
-    spiral_offset: f32,
-    rotate: bool,
-}
-
 impl Settings {
     fn at([x, y]: [f32; 2]) -> Self {
         let radius = 120.0;
@@ -48,7 +37,7 @@ impl Settings {
             linear: Endpoints { start: [x, y], end: [x + 324.0, y] },
             radial: Radial {
                 centre: [x - radius, y], radius, start: 0.0, sweep: CLOSED_SWEEP_LIMIT,
-                closed_loop: true, spiral_offset: 0.0, rotate: false,
+                closed_loop: true, spiral_offset: 0.0, centre_drift: [0.0; 2], rotate: false,
             },
             backwards: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
@@ -79,7 +68,9 @@ impl Settings {
                 "center_x": self.radial.centre[0], "center_y": self.radial.centre[1],
                 "radius": self.radial.radius, "start_angle": self.radial.start,
                 "sweep_angle": self.radial.sweep, "closed_loop": self.radial.closed_loop,
-                "spiral_offset": self.radial.spiral_offset, "rotate": self.radial.rotate,
+                "spiral_offset": self.radial.spiral_offset,
+                "drift_x": self.radial.centre_drift[0], "drift_y": self.radial.centre_drift[1],
+                "rotate": self.radial.rotate,
             }),
         };
         params["stacking"] = json!(if self.backwards { "front_to_back" } else { "back_to_front" });
@@ -213,12 +204,18 @@ impl State {
         self.refresh(s);
     }
 
-    pub(crate) fn gizmo_endpoints(&self) -> Option<Endpoints> {
-        if self.show_gizmo && self.mode() == Some(Mode::Linear) {
-            self.settings.as_ref().map(|settings| settings.linear)
-        } else {
-            None
-        }
+    pub(crate) fn gizmo_geometry(&self) -> Option<Geometry> {
+        if !self.show_gizmo { return None; }
+        let settings = self.settings.as_ref()?;
+        Some(match self.mode()? {
+            Mode::Linear => Geometry::Linear(settings.linear),
+            Mode::Radial => Geometry::Radial(settings.radial),
+        })
+    }
+
+    #[cfg(test)]
+    fn gizmo_endpoints(&self) -> Option<Endpoints> {
+        match self.gizmo_geometry()? { Geometry::Linear(ends) => Some(ends), Geometry::Radial(_) => None }
     }
 
     pub(crate) fn shows_registrations(&self) -> bool {
@@ -229,14 +226,20 @@ impl State {
         !self.reset_pending
     }
 
-    pub(crate) fn set_endpoints(&mut self, s: &mut Session, endpoints: Endpoints) {
-        if self.mode() == Some(Mode::Linear)
-            && let Some(settings) = &mut self.settings
-            && settings.linear != endpoints
-        {
-            settings.linear = endpoints;
-            self.refresh(s);
+    pub(crate) fn set_gizmo_geometry(&mut self, s: &mut Session, geometry: Geometry) {
+        if self.gizmo_geometry().is_none_or(|old| old == geometry) { return; }
+        if let Some(settings) = &mut self.settings {
+            match geometry {
+                Geometry::Linear(ends) => settings.linear = ends,
+                Geometry::Radial(radial) => settings.radial = radial,
+            }
         }
+        self.refresh(s);
+    }
+
+    #[cfg(test)]
+    fn set_endpoints(&mut self, s: &mut Session, endpoints: Endpoints) {
+        self.set_gizmo_geometry(s, Geometry::Linear(endpoints));
     }
 
     pub(crate) fn dim_stage(&self) -> bool {
@@ -306,8 +309,14 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 /// A live preview with a multi-stop alpha ramp and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
-        let (sweep, offset) = setup.split_once(',')?;
-        Some((sweep.parse::<f32>().ok()?, offset.parse::<f32>().ok()?))
+        let mut values = setup.split(',');
+        let sweep = values.next()?.parse::<f32>().ok()?;
+        let offset = values.next()?.parse::<f32>().ok()?;
+        let mut drift = [0.0; 2];
+        if let Some(x) = values.next() {
+            drift = [x.parse::<f32>().ok()?, values.next()?.parse::<f32>().ok()?];
+        }
+        Some((sweep, offset, drift))
     });
     app.perform("file.new", json!({"width": 640, "height": 400}));
     app.run("draw.rect", json!({"x": 72, "y": 72, "w": 125, "h": 60, "fill": "#376b93", "stroke": null}));
@@ -337,13 +346,17 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         if mode == Mode::Radial {
             settings.radial.centre = [320.0, 200.0];
         }
-        if let Some((sweep, offset)) = open_radial {
+        if let Some((sweep, offset, drift)) = open_radial {
             settings.radial.closed_loop = false;
             settings.radial.sweep = sweep;
             settings.radial.spiral_offset = offset;
+            settings.radial.centre_drift = drift;
             if offset != 0.0 {
                 settings.count = 24;
                 settings.radial.radius = if offset > 0.0 { 38.0 } else { 140.0 };
+            } else if drift != [0.0; 2] {
+                settings.count = 36;
+                settings.radial.radius = 65.0;
             }
         } else {
             settings.stops =
@@ -517,8 +530,8 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
         });
         match mode {
             Mode::Linear => {
-                changed |= coordinates(ui, tr!("Start"), [tr!("Start X"), tr!("Start Y")], &mut settings.linear.start);
-                changed |= coordinates(ui, tr!("End"), [tr!("End X"), tr!("End Y")], &mut settings.linear.end);
+                changed |= coordinates(ui, tr!("Start"), [tr!("Start X"), tr!("Start Y")], &mut settings.linear.start, " px");
+                changed |= coordinates(ui, tr!("End"), [tr!("End X"), tr!("End Y")], &mut settings.linear.end, " px");
                 changed |= linear_dimensions(ui, &mut settings.linear, settings.count);
             }
             Mode::Radial => changed |= radial_fields(ui, &mut settings.radial),
@@ -529,18 +542,21 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
 }
 
 fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
-    let mut changed = coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut radial.centre);
-    changed |= field(ui, tr!("Radius"), &mut radial.radius, " px", 0.0..=100_000.0);
-    changed |= field(ui, tr!("Start angle"), &mut radial.start, " °", -100_000.0..=100_000.0);
+    let mut changed = coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut radial.centre, " px");
+    let range = -RADIAL_FIELD_LIMIT..=RADIAL_FIELD_LIMIT;
+    changed |= field(ui, tr!("Radius"), &mut radial.radius, " px", 0.0..=RADIAL_FIELD_LIMIT);
+    changed |= field(ui, tr!("Start angle"), &mut radial.start, " °", range.clone());
     let loop_changed = crate::theme::checkbox(ui, &mut radial.closed_loop, tr!("Closed Loop")).changed();
-    let limit = if radial.closed_loop { CLOSED_SWEEP_LIMIT } else { 100_000.0 };
+    let limit = radial.sweep_limit().min(RADIAL_FIELD_LIMIT);
     if loop_changed && radial.closed_loop {
         radial.sweep = radial.sweep.clamp(-limit, limit);
     }
     changed |= loop_changed;
     changed |= field(ui, tr!("Sweep"), &mut radial.sweep, " °", -limit..=limit);
     if !radial.closed_loop {
-        changed |= field(ui, tr!("Spiral Offset"), &mut radial.spiral_offset, tr!(" px/turn"), -100_000.0..=100_000.0);
+        changed |= field(ui, tr!("Spiral Offset"), &mut radial.spiral_offset, tr!(" px/turn"), range);
+        changed |= coordinates(ui, tr!("Centre Drift"), [tr!("Centre Drift X"), tr!("Centre Drift Y")],
+            &mut radial.centre_drift, tr!(" px/turn"));
     }
     changed |= crate::theme::checkbox(ui, &mut radial.rotate, tr!("Rotate instances")).changed();
     changed
@@ -601,13 +617,13 @@ fn dimension(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeIn
     }))
 }
 
-fn coordinates(ui: &mut Ui, label: &str, [x_name, y_name]: [&str; 2], [x, y]: &mut [f32; 2]) -> bool {
+fn coordinates(ui: &mut Ui, label: &str, [x_name, y_name]: [&str; 2], [x, y]: &mut [f32; 2], suffix: &str) -> bool {
     form_row(ui, FORM_LABEL_DOCK, label, |ui| {
         let mut changed = false;
         for (value, axis, name) in [(x, "X ", x_name), (y, "Y ", y_name)] {
             changed |= with_type(ui, Type::Data, |ui| {
                 ui.add(egui::DragValue::new(value).range(-100_000.0..=100_000.0).clamp_existing_to_range(false)
-                    .prefix(axis).suffix(" px").max_decimals(1))
+                    .prefix(axis).suffix(suffix).max_decimals(1))
             }).named(name).changed();
         }
         changed
@@ -828,6 +844,46 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "local spiral drag timing on the CPU stage"]
+    fn measure_radial_drag() {
+        use std::time::Instant;
+        for count in [10, 200] {
+            let (mut app, ctx) = linear_app();
+            screenshot(&mut app, "array-radial-open:720,18");
+            app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
+            app.view.fit = false;
+            app.view.zoom = 0.65;
+            for (region, x) in [("stage", 330.0), ("pasteboard", 690.0)] {
+                let settings = app.array_panel.settings.as_mut().unwrap();
+                settings.count = count;
+                settings.radial.centre[0] = x;
+                settings.radial.sweep = 700.0;
+                app.array_panel.refresh(&mut app.s);
+                nodes(&ctx, &mut app);
+                let end = app.array_panel.settings.as_ref().unwrap().radial.point(1.0);
+                let from = screen(&app, [end.x, end.y]);
+                assert!(app.stage_cache.canvas.contains(from));
+                frame(&ctx, &mut app, vec![Event::PointerMoved(from)]);
+                frame(&ctx, &mut app, vec![pointer_button(from, true)]);
+                let mut wall = Vec::new();
+                let mut to = from;
+                for i in 1..=12 {
+                    to = from + vec2(i as f32 * 2.5, i as f32 * 1.5);
+                    let timer = Instant::now();
+                    frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+                    wall.push(timer.elapsed().as_secs_f64() * 1_000.0);
+                }
+                assert!(app.array_panel.gizmo_drag.is_some());
+                let moved = app.array_panel.settings.as_ref().unwrap().radial;
+                assert_ne!(moved.sweep, 700.0);
+                frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+                wall.sort_by(f64::total_cmp);
+                eprintln!("Spiral {count:3} {region:10} median frame ms {:.3}", wall[wall.len() / 2]);
+            }
+        }
+    }
+
     fn drag_gizmo(ctx: &egui::Context, app: &mut App, from: Pos2, by: Vec2, finish: bool) {
         frame(ctx, app, vec![Event::PointerMoved(from)]);
         frame(ctx, app, vec![pointer_button(from, true)]);
@@ -904,22 +960,97 @@ mod tests {
         toggle_loop(&mut app);
         assert!(shows_offset(&mut app));
         set_field(&mut app, "Spiral Offset", 15.0);
+        set_field(&mut app, "Centre Drift X", 32.0);
+        set_field(&mut app, "Centre Drift Y", -18.0);
         for sweep in [358.0, 360.0, 362.0, -360.0, 720.0, -1080.0] {
             set_field(&mut app, "Sweep", sweep);
             let radial = &app.array_panel.settings.as_ref().unwrap().radial;
             assert_eq!(radial.sweep, sweep as f32);
             assert!(!radial.closed_loop);
             let last = app.s.selected_elements().last().unwrap().1.transform.translation();
-            let radius = (last.x - radial.centre[0]).hypot(last.y - radial.centre[1]);
+            let [x, y] = radial.centre_after_turns(f64::from(radial.sweep.abs()) / 360.0);
+            let radius = (last.x - x as f32).hypot(last.y - y as f32);
             assert!((radius - radial.radius - 15.0 * radial.sweep.abs() / 360.0).abs() < 0.001);
         }
         toggle_loop(&mut app);
         assert!(!shows_offset(&mut app));
+        assert!(!nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("Centre Drift X")));
         let radial = &app.array_panel.settings.as_ref().unwrap().radial;
         assert!(radial.closed_loop);
         assert_eq!(radial.sweep, -360.0);
         toggle_loop(&mut app);
         assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.spiral_offset, 15.0);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.centre_drift, [32.0, -18.0]);
+    }
+
+    #[test]
+    fn radial_stage_handles_update_fields_and_keep_cancel_commit_and_undo() {
+        use anicraft_engine::geom::Vec2 as Point;
+        let (mut app, ctx) = linear_app();
+        let doc = app.s.doc.clone();
+        let selection = app.s.selection.clone();
+        let steps = app.s.history_len();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let radial = Radial { centre: [260.0, 220.0], radius: 80.0, start: 0.0, sweep: 90.0,
+            closed_loop: false, spiral_offset: 0.0, centre_drift: [70.0, -90.0], rotate: false };
+        app.array_panel.set_gizmo_geometry(&mut app.s, Geometry::Radial(radial));
+        nodes(&ctx, &mut app);
+
+        let current = |app: &App| app.array_panel.settings.as_ref().unwrap().radial;
+        let drag_point = |app: &mut App, from: Point, delta: Vec2| {
+            let pos = screen(app, [from.x, from.y]);
+            let zoom = app.view.zoom;
+            drag_gizmo(&ctx, app, pos, delta * zoom, true);
+        };
+        drag_point(&mut app, Point::new(260.0, 220.0), vec2(28.0, -15.0));
+        let shifted = current(&app);
+        near(shifted.centre, [288.0, 205.0]);
+        drag_point(&mut app, shifted.point(0.5), vec2(20.0, 35.0));
+        let shifted = current(&app);
+        near(shifted.centre, [308.0, 240.0]);
+        drag_point(&mut app, shifted.point(0.0), vec2(0.0, -60.0));
+        let started = current(&app);
+        assert!((started.radius - 100.0).abs() < 0.01 && (started.start + 36.8699).abs() < 0.01);
+        assert_eq!(started.sweep, radial.sweep);
+
+        let [x, y] = started.centre_after_turns(1.0);
+        drag_point(&mut app, Point::new(x as f32, y as f32), vec2(25.0, 20.0));
+        let drifting = current(&app);
+        near(drifting.centre_drift, [95.0, -70.0]);
+        assert_eq!(drifting.spiral_offset, started.spiral_offset);
+        assert_eq!(drifting.sweep, started.sweep);
+
+        let [x, y] = drifting.centre_after_turns(0.5);
+        drag_point(&mut app, Point::new(x as f32, y as f32), vec2(-12.0, 16.0));
+        let translated = current(&app);
+        near(translated.centre, [296.0, 256.0]);
+        assert_eq!(translated.centre_drift, drifting.centre_drift);
+
+        let from = translated.point(1.0);
+        let target = Radial { sweep: 120.0, spiral_offset: 60.0, ..translated }.point(1.0);
+        drag_point(&mut app, from, vec2(target.x - from.x, target.y - from.y));
+        let ended = current(&app);
+        assert!((ended.sweep - 120.0).abs() < 0.01 && (ended.spiral_offset - 60.0).abs() < 0.05);
+        assert_eq!(ended.centre_drift, translated.centre_drift);
+        let last = app.s.selected_elements().last().unwrap().1.transform.translation();
+        near([last.x, last.y], [target.x, target.y]);
+
+        let fields = nodes(&ctx, &mut app);
+        let (_, offset) = fields.iter().find(|(_, n)| n.label() == Some("Spiral Offset")).unwrap();
+        assert!((offset.numeric_value().unwrap() - 60.0).abs() < 0.05);
+        let (_, drift_x) = fields.iter().find(|(_, n)| n.label() == Some("Centre Drift X")).unwrap();
+        assert!((drift_x.numeric_value().unwrap() - 95.0).abs() < 0.05);
+        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1);
+        assert!(app.s.doc == doc && app.s.selection == selection);
+        assert_eq!(app.s.history_len(), steps);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert_eq!(current(&app), ended);
+        let fields = nodes(&ctx, &mut app);
+        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1);
+        assert!(app.array_panel.gizmo_geometry().is_none());
+        assert_eq!(app.s.history_len(), steps + 1);
+        app.s.undo().unwrap();
+        assert!(app.s.doc == doc && app.s.selection == selection);
     }
 
     #[test]
@@ -1053,10 +1184,11 @@ mod tests {
         let (mut app, ctx) = linear_app();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
         let fields = nodes(&ctx, &mut app);
-        assert!(app.array_panel.shows_registrations() && app.array_panel.gizmo_endpoints().is_none());
+        assert!(app.array_panel.shows_registrations() && matches!(app.array_panel.gizmo_geometry(), Some(Geometry::Radial(_))));
         assert_eq!(app.s.selected_elements().len(), 10);
         click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Hide Array Handles")).unwrap().1);
         assert!(!app.array_panel.shows_registrations());
+        assert!(app.array_panel.gizmo_geometry().is_none());
         assert!(app.s.array_preview_active() && app.s.selected_elements().len() == 10);
     }
 
