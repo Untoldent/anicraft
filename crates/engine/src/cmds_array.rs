@@ -1,25 +1,173 @@
-//! Baked symbol arrays. This command is the engine entry point for a future Array panel.
+//! Baked symbol arrays and the editor's reversible preview of the same command.
 //!
 //! A count of N produces N total instances, including the original (ID preserved).
 //! The first instance moves to the requested start location. Copies are ordinary
 //! symbol instances, not a new document object, so existing editors and exports work.
-//! The UI's live preview can repeatedly execute the same command within a gesture.
+//! A geometry-only Linear edit moves the existing preview instances in place.
 
 use crate::params::{opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
 use anicraft_doc::{Element, ElementId, ElementKind};
 use anicraft_geom::Affine;
 use serde_json::{Value, json};
+use std::ops::Range;
 use std::sync::Arc;
 
 const MAX_COPIES: u32 = 500;
-const MAX_STOPS: usize = 15;
-
 /// One property snapshot on the array's 0..1 progression.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct AlphaStop {
-    offset: f32,
-    alpha: f32,
+pub struct ArrayAlphaStop {
+    pub offset: f32,
+    pub alpha: f32,
+}
+
+impl ArrayAlphaStop {
+    pub const LIMIT: usize = 15;
+
+    /// Hold the endpoint value outside the first or last stop, as gradients do.
+    /// Both the editor and command pass in stops sorted by position.
+    pub fn sample(stops: &[Self], t: f32) -> f32 {
+        let Some(first) = stops.first() else { return 1.0 };
+        if t <= first.offset { return first.alpha; }
+        for pair in stops.windows(2) {
+            let [a, b] = pair else { continue };
+            if t <= b.offset {
+                let span = b.offset - a.offset;
+                return if span <= f32::EPSILON { b.alpha } else {
+                    a.alpha + (b.alpha - a.alpha) * ((t - a.offset) / span).clamp(0.0, 1.0)
+                };
+            }
+        }
+        stops.last().map_or(first.alpha, |s| s.alpha)
+    }
+}
+
+impl Session {
+    pub fn array_preview_active(&self) -> bool {
+        self.array_preview
+    }
+
+    /// Shared by geometry-only previews with the same instances, source artwork and stacking.
+    pub fn linear_array_generation(&self) -> Option<crate::StateId> {
+        self.array_linear.as_ref().map(|linear| linear.generation)
+    }
+
+    pub(super) fn require_no_array_preview(&self) -> Result<()> {
+        if self.array_preview {
+            return Err(EngineError::State("commit or cancel the Array preview first".into()));
+        }
+        Ok(())
+    }
+
+    /// Start a preview from the original artwork. Keep the same instances for a Linear move.
+    pub fn preview_array(&mut self, params: &Value) -> Result<()> {
+        if self.array_preview {
+            if let Some(mut linear) = self.array_linear.take()
+                && linear.move_to(self, params)
+            {
+                self.array_linear = Some(linear);
+                return Ok(());
+            }
+            self.restore_gesture();
+        } else {
+            if self.in_gesture() || self.live_cut().is_some() {
+                return Err(EngineError::State("finish the current edit before starting an array".into()));
+            }
+            self.begin_gesture("Array");
+        }
+        let result = self.execute_command("array.create", params).map(|_| ());
+        if result.is_ok() {
+            self.array_preview = true;
+            self.array_linear = LinearPreview::new(self, params);
+        } else if !self.array_preview {
+            self.end_gesture();
+        }
+        result
+    }
+
+    pub fn finish_array_preview(&mut self, commit: bool) {
+        if !std::mem::take(&mut self.array_preview) {
+            return;
+        }
+        let linear = self.array_linear.take();
+        if !commit {
+            self.revert_gesture();
+        } else if let Some(linear) = linear {
+            // Record the current parameters once, including moves made without replaying the
+            // command. Replaying history still uses the public Array command.
+            self.rec.truncate(self.gesture_rec);
+            self.rec.push(crate::history::Recorded::new("array.create", &linear.params));
+        }
+        self.end_gesture();
+    }
+}
+
+/// An existing stretch of baked preview instances whose topology stays unchanged on a move.
+/// Tweens with keyed motion and linked layers keep the general command path.
+pub(super) struct LinearPreview {
+    generation: crate::StateId,
+    key: usize,
+    instances: Range<usize>,
+    reversed: bool,
+    params: Value,
+}
+
+const LINEAR_COORDS: [&str; 4] = ["start_x", "start_y", "dx", "dy"];
+
+fn explicit_linear(p: &Value) -> Option<Layout> {
+    if p.get("mode")?.as_str()? != "linear" { return None; }
+    let [start_x, start_y, dx, dy] = LINEAR_COORDS.map(|key| opt_f32(p, key).ok().flatten());
+    Some(Layout::Linear { start_x: start_x?, start_y: start_y?, dx: dx?, dy: dy? })
+}
+
+impl LinearPreview {
+    fn new(s: &Session, p: &Value) -> Option<Self> {
+        explicit_linear(p)?;
+        let tl = s.timeline();
+        if tl.has_rig() { return None; }
+        let layer = tl.layer(s.layer)?;
+        let key = layer.keyframe_index_at(s.frame)?;
+        let kf = layer.keyframes.get(key)?;
+        if kf.motion.is_some() { return None; }
+        let count = opt_u32(p, "count").ok()?.unwrap_or(10) as usize;
+        let first = kf.elements.iter().position(|e| s.selection.contains(s.layer, e.id))?;
+        let instances = first..first + count;
+        let reversed = p.get("stacking").and_then(Value::as_str) == Some("front_to_back");
+        let ids = kf.elements.get(instances.clone())?.iter().map(|e| e.id);
+        let in_order = if reversed { ids.rev().eq(s.selection.ids()) } else { ids.eq(s.selection.ids()) };
+        in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, params: p.clone() })
+    }
+
+    fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
+        let (Some(old), Some(new), Some(layout)) = (self.params.as_object(), params.as_object(), explicit_linear(params)) else { return false };
+        if old.len() != new.len() || old.iter().any(|(key, v)| !LINEAR_COORDS.contains(&key.as_str()) && new.get(key) != Some(v)) {
+            return false;
+        }
+        if old == new { return true; }
+        let count = self.instances.len() as u32;
+        // Checking the extremes also validates the points between them.
+        if ![0, count.saturating_sub(1)].into_iter().all(|i| layout.place(Affine::IDENTITY, i, count).0.is_finite()) {
+            return false;
+        }
+        let Some(instances) = s.layer_mut(None).ok().and_then(|layer| layer.keyframe_mut(self.key))
+            .and_then(|kf| kf.elements.get_mut(self.instances.clone())) else { return false };
+        let mut changed = false;
+        for (i, el) in instances.iter_mut().enumerate() {
+            let i = if self.reversed { count - 1 - i as u32 } else { i as u32 };
+            let (xf, _) = layout.place(el.transform, i, count);
+            if xf != el.transform {
+                Arc::make_mut(el).transform = xf;
+                changed = true;
+            }
+        }
+        self.params = params.clone();
+        if changed {
+            s.state = crate::history::fresh_state();
+            s.revision += 1;
+            s.dl_cache.replace(None);
+        }
+        true
+    }
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -34,11 +182,11 @@ pub fn specs() -> Vec<CommandSpec> {
     }]
 }
 
-fn parse_stops(p: &Value) -> Result<Option<Vec<AlphaStop>>> {
+fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayAlphaStop>>> {
     let Some(v) = p.get("alpha_stops") else { return Ok(None) };
     let stops = v.as_array().ok_or_else(|| EngineError::Param("alpha_stops must be an array".into()))?;
-    if !(2..=MAX_STOPS).contains(&stops.len()) {
-        return Err(EngineError::Param(format!("alpha_stops needs 2..={MAX_STOPS} stops")));
+    if !(2..=ArrayAlphaStop::LIMIT).contains(&stops.len()) {
+        return Err(EngineError::Param(format!("alpha_stops needs 2..={} stops", ArrayAlphaStop::LIMIT)));
     }
     let mut out = Vec::with_capacity(stops.len());
     for v in stops {
@@ -49,26 +197,10 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<AlphaStop>>> {
             }
             Ok(n as f32)
         };
-        out.push(AlphaStop { offset: number("offset")?, alpha: number("alpha")? });
+        out.push(ArrayAlphaStop { offset: number("offset")?, alpha: number("alpha")? });
     }
     out.sort_by(|a, b| a.offset.total_cmp(&b.offset));
     Ok(Some(out))
-}
-
-/// Hold the endpoint value outside the first or last stop, as gradients do.
-fn alpha_at(stops: &[AlphaStop], t: f32) -> f32 {
-    let Some(first) = stops.first() else { return 1.0 };
-    if t <= first.offset { return first.alpha; }
-    for pair in stops.windows(2) {
-        let [a, b] = pair else { continue };
-        if t <= b.offset {
-            let span = b.offset - a.offset;
-            return if span <= f32::EPSILON { b.alpha } else {
-                a.alpha + (b.alpha - a.alpha) * ((t - a.offset) / span).clamp(0.0, 1.0)
-            };
-        }
-    }
-    stops.last().map_or(first.alpha, |s| s.alpha)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -124,11 +256,10 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         Some(other) => return Err(EngineError::Param(format!("unknown stacking '{other}'"))),
     };
     let stops = parse_stops(p)?;
-    let chosen = s.selection.on(s.layer);
-    let [id] = chosen.as_slice() else {
+    let Some((_, id)) = s.selection.first().filter(|(layer, _)| *layer == s.layer && s.selection.len() == 1) else {
         return Err(EngineError::State("select exactly one symbol instance on the active layer".into()));
     };
-    let original = s.editable_keyframe()?.elements.iter().find(|e| e.id == *id)
+    let original = s.editable_keyframe()?.elements.iter().find(|e| e.id == id)
         .map(|e| (**e).clone())
         .ok_or_else(|| EngineError::State("selected instance is not in the editable keyframe".into()))?;
     if !matches!(&original.kind, ElementKind::Symbol { .. }) {
@@ -172,7 +303,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         if i > 0 { el.id = ElementId(s.doc.alloc_id()); }
         el.transform = transform;
         if let Some(stops) = stops.as_deref() {
-            el.color = el.color.with_alpha(alpha_at(stops, t));
+            el.color = el.color.with_alpha(ArrayAlphaStop::sample(stops, t));
         }
         ids.push(el.id);
         copies.push(Arc::new(el));
@@ -182,7 +313,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     // Only the relative order among the array copies is controlled by "stacking".
     if front_to_back { copies.reverse(); }
     let kf = s.editable_keyframe()?;
-    let at = kf.elements.iter().position(|e| e.id == *id)
+    let at = kf.elements.iter().position(|e| e.id == id)
         .ok_or_else(|| EngineError::State("original disappeared from the keyframe".into()))?;
     kf.elements.remove(at);
     kf.elements.splice(at..at, copies);
@@ -194,14 +325,14 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
 mod tests {
     use super::*;
 
-    fn st(p: f32, alpha: f32) -> AlphaStop { AlphaStop { offset: p, alpha } }
+    fn st(p: f32, alpha: f32) -> ArrayAlphaStop { ArrayAlphaStop { offset: p, alpha } }
 
     #[test]
     fn independent_stops_can_fade_out_then_back_in() {
         let stops = [st(0.0, 1.0), st(0.5, 0.0), st(1.0, 1.0)];
-        assert!((alpha_at(&stops, 0.25) - 0.5).abs() < 1e-6);
-        assert!((alpha_at(&stops, 0.75) - 0.5).abs() < 1e-6);
-        assert_eq!(alpha_at(&stops, 0.5), 0.0);
+        assert!((ArrayAlphaStop::sample(&stops, 0.25) - 0.5).abs() < 1e-6);
+        assert!((ArrayAlphaStop::sample(&stops, 0.75) - 0.5).abs() < 1e-6);
+        assert_eq!(ArrayAlphaStop::sample(&stops, 0.5), 0.0);
     }
 
     #[test]
@@ -263,5 +394,89 @@ mod tests {
         assert_eq!(parsed[0].alpha, 0.75);
         assert_eq!(parsed[1].offset, 0.4);
         assert!(parse_stops(&json!({"alpha_stops": [{"offset": 2, "alpha": 0.5}, {"offset": 1, "alpha": 0.4}]})).is_err());
+    }
+
+    #[test]
+    fn preview_owns_its_gesture_and_recovery_sees_the_committed_document() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 10, "y": 10, "w": 24, "h": 14})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        s.mark_saved();
+        let (doc, selection, state, steps) = (s.doc.clone(), s.selection.clone(), s.state, s.history_len());
+
+        s.begin_gesture("Other edit");
+        assert!(s.preview_array(&json!({"count": 3})).is_err());
+        assert!(s.in_gesture() && !s.array_preview_active());
+        s.end_gesture();
+        s.preview_array(&json!({"count": 3})).unwrap();
+        let shown = s.doc.clone();
+        s.end_gesture();
+        s.revert_gesture();
+        assert!(s.undo().is_err());
+        assert!(s.redo().is_err());
+        assert!(s.execute("edit.deselect", &json!({})).is_err());
+        assert!(s.execute("file.save", &json!({})).is_err());
+        assert!(s.doc == shown && s.array_preview_active() && s.in_gesture());
+        assert_eq!(s.selection.len(), 3);
+        assert_eq!(s.history_len(), steps);
+        assert!(!s.is_dirty());
+        assert!(s.committed_document() == (&doc, state));
+
+        assert!(s.preview_array(&json!({"count": 0})).is_err());
+        assert!(s.array_preview_active() && s.doc == doc && s.selection == selection);
+        s.preview_array(&json!({"count": 2})).unwrap();
+        s.finish_array_preview(false);
+        assert!(s.doc == doc && s.selection == selection && !s.in_gesture());
+        assert_eq!(s.history_len(), steps);
+    }
+
+    #[test]
+    fn array_requires_the_entire_selection_to_be_one_instance_on_the_active_layer() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 10, "y": 10, "w": 24, "h": 14})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        let (layer, source) = s.selection.first().unwrap();
+        s.execute("layer.new", &json!({"name": "Others"})).unwrap();
+        s.execute("draw.rect", &json!({"x": 50, "y": 20, "w": 10, "h": 10})).unwrap();
+        let (other_layer, other) = s.selection.first().unwrap();
+        s.selection.insert(layer, source);
+        s.layer = layer;
+        assert!(s.execute("array.create", &json!({})).is_err());
+        assert!(s.selection.contains(other_layer, other));
+        s.select_only([source]);
+        assert!(s.execute("array.create", &json!({"count": 1})).is_ok());
+        assert_eq!(s.selection.first(), Some((layer, source)));
+    }
+
+    #[test]
+    fn moving_linear_preview_reuses_instances_and_commits_the_same_document_as_the_command() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 10, "y": 10, "w": 24, "h": 14})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        let (base, selected, steps) = (s.doc.clone(), s.selection.clone(), s.history_len());
+        let mut p = json!({"mode": "linear", "count": 5, "start_x": 50, "start_y": 40, "dx": 12, "dy": -5,
+            "stacking": "front_to_back", "alpha_stops": [{"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 0.2}]});
+        s.preview_array(&p).unwrap();
+        let generation = s.linear_array_generation().unwrap();
+        let ids = s.selection.clone();
+        let still = s.selected_elements().last().unwrap().1.clone();
+        p["dx"] = json!(400);
+        p["dy"] = json!(70);
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.linear_array_generation(), Some(generation));
+        assert_eq!(s.selection, ids);
+        assert!(Arc::ptr_eq(&still, &s.selected_elements().last().unwrap().1));
+
+        let mut expected = Session::new(base.clone());
+        expected.selection = selected.clone();
+        expected.execute("array.create", &p).unwrap();
+        assert!(s.doc == expected.doc && s.selection == expected.selection);
+        s.finish_array_preview(true);
+        assert!(s.linear_array_generation().is_none());
+        assert_eq!(s.history_len(), steps + 1);
+        let (_, recorded) = s.history.steps().last().unwrap();
+        assert_eq!(recorded.unwrap(), &[crate::history::Recorded::new("array.create", &p)]);
+        s.undo().unwrap();
+        assert!(s.doc == base && s.selection == selected);
     }
 }

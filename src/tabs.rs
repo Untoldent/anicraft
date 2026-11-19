@@ -324,6 +324,9 @@ pub fn activate(app: &mut App, to: usize) -> bool {
     if to >= app.tabs.len() {
         return false;
     }
+    if crate::array_panel::blocked(app) {
+        return false;
+    }
     if let Some(why) = busy(app) {
         app.status_err(why);
         return false;
@@ -409,6 +412,9 @@ fn gives_way(app: &App) -> bool {
 /// When the command fails, the tab made for it goes again and the document that was shown is
 /// back.
 pub fn open(app: &mut App, id: &str, params: Value) -> Option<Value> {
+    if crate::array_panel::blocked(app) {
+        return None;
+    }
     if let Some(i) = already_open(app, id, &params) {
         if activate(app, i) {
             app.start = None;
@@ -516,7 +522,7 @@ fn close_now(app: &mut App, id: u64) -> bool {
 /// File › Close, a tab's × or middle click: closes these tabs, asking about each one that has
 /// unsaved changes (ADR 0004).
 pub fn close(app: &mut App, ids: Vec<u64>) {
-    if app.tabs.closing.is_some() || ids.is_empty() {
+    if app.tabs.closing.is_some() || ids.is_empty() || crate::array_panel::blocked(app) {
         return;
     }
     app.playing = false;
@@ -541,7 +547,7 @@ pub fn close_all(app: &mut App) {
 
 /// The window is closing with unsaved changes somewhere: one question for all of them.
 pub fn quit(app: &mut App) {
-    if app.tabs.closing.as_ref().is_some_and(|f| f.quit) {
+    if app.tabs.closing.as_ref().is_some_and(|f| f.quit) || crate::array_panel::blocked(app) {
         return;
     }
     app.playing = false;

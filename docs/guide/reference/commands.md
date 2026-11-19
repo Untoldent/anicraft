@@ -1,6 +1,6 @@
 # Command reference
 
-Everything you can do in AniCraft is a command: the menus, the shortcuts, the command palette (**Ctrl+K**, macOS **⌘K**), `anicraft-cli` and AI assistants over MCP all run the same 381 commands, listed here by menu. The id is what scripts and [working headless](../working-headless.md) use; the parameters are what a command takes as JSON. Commands that change the document are one undo step each. Your own shortcuts (**Help › Keyboard Shortcuts**) replace the defaults shown here; see the [shortcut reference](shortcuts.md).
+Everything you can do in AniCraft is a command: the menus, the shortcuts, the command palette (**Ctrl+K**, macOS **⌘K**), `anicraft-cli` and AI assistants over MCP all run the same 382 commands, listed here by menu. The id is what scripts and [working headless](../working-headless.md) use; the parameters are what a command takes as JSON. Commands that change the document are one undo step each. Your own shortcuts (**Help › Keyboard Shortcuts**) replace the defaults shown here; see the [shortcut reference](shortcuts.md).
 
 This page is generated from the command registry, so it always matches the version of AniCraft it came with.
 
@@ -547,6 +547,8 @@ These commands have no menu item: the panels, the stage and the timeline use the
   Parameters: `{name}`
 - **Place on Stage** `library.place` · changes the document
   Parameters: `{symbol | bitmap | sound: id, x?, y?} or {items: [{symbol | bitmap | sound: id}, ..], x?, y?} → {element, elements, sound?}: symbols and bitmaps centred on x, y (default: the stage centre; inside an open symbol, in its space) in the active layer's keyframe at the playhead, selected; a sound goes onto that keyframe, its span grown to fit (one sound per keyframe). One undo step`
+- **Create Array** `array.create` · changes the document
+  Parameters: `{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, rotate? (radial), stacking?: back_to_front|front_to_back, alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15)}. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.`
 - **Move Guide** `view.guide_move` · changes the document
   Parameters: ``{index, at} moves this scene's guide `index` (as view.aids lists them) to `at`; refused while guides are locked``
 - **Delete Guide** `view.guide_delete` · changes the document

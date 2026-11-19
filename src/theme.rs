@@ -747,6 +747,11 @@ pub const RULER: f32 = 18.0;
 pub const TOOL_BUTTON: f32 = 36.0;
 pub const TOOL_ICON: f32 = 18.0;
 
+/// The stage's registration point, visible against both light and dark artwork.
+pub(crate) fn registration_mark(painter: &egui::Painter, at: egui::Pos2) {
+    painter.circle(at, 3.5, Color32::WHITE, Stroke::new(1.0, Color32::BLACK));
+}
+
 /// Depth for floating surfaces: tight and downward, so a window lifts off the work without a
 /// glow around it.
 fn depth(y: i8, blur: u8, alpha: u8) -> Shadow {

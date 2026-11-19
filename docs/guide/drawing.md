@@ -534,6 +534,30 @@ things evenly. Tick **To stage** in the Align panel (or press **Ctrl+Alt+8**) to
 stage instead of the selection. A single shape always aligns to the stage. Align works across
 layers.
 
+### Arrays
+
+Select one symbol instance on the active layer and open **Window › Array**. Choose **Linear**
+or **Radial** from **Array type** to see the preview. The instance count includes the original.
+Switch types to compare arrangements while keeping each type's positions and the property stops.
+
+In a Linear array, drag the **Start** or **End** circle on the stage, or drag the line to move
+both. Drag or type values in the panel to edit the coordinates, direction, length, and X/Y
+spacing. Editing a derived value moves End. Changing the instance count keeps both endpoints
+in place and updates the spacing. The button beside **Dim Stage** shows or hides the stage
+controls and the white instance pivot markers in both modes. **Dim Stage** brings the Array in front
+of the faded surroundings. Turn it off to see the document's stacking.
+
+Click the property track to add a stop. Drag a stop to move it or enter its position as a
+percentage. Open **Colour Effect** to change Alpha at the selected stop. With a stop focused,
+use the arrow keys to nudge it, Shift for larger steps, or Delete to remove it.
+
+**Commit** creates independent instances in one undo step. The next Array starts with defaults
+at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
+original artwork and selection and retains the unfinished settings for recovery. Dim Stage and
+handle visibility carry over either way.
+If you hide the panel, use **Show Array** above the stage to return to the preview. Use
+**Reset Settings to Defaults** to clear the remembered geometry and stops.
+
 ### Grouping
 
 Select some artwork and choose **Modify › Group** (**Ctrl+G**) to keep it together. A group

@@ -31,6 +31,7 @@ mod brush_panel;
 mod brushtool;
 mod colour;
 mod colour_panel;
+mod array_gizmo;
 mod array_panel;
 mod envelope;
 mod find_panel;
@@ -304,7 +305,7 @@ const HELP: &str = "anicraft [file.anicraft|file.fla|file.xfl] [--version] [--sc
      --renderer   the window's graphics (also ANICRAFT_RENDERER); default automatic, falling back to OpenGL\n\
      --theme      a built-in look, or a theme file of your own, for this run only\n\
      --check-theme  says whether a theme file would be used (exit 0) or why it is refused (exit 1)\n\
-     --open       shows a panel at start (handy with --screenshot for visual checks)\n\
+     --open       shows a panel at start (try --open array with --screenshot)\n\
      --shot-width scales the screenshot down to this width (the user guide's pictures)\n\
      ANICRAFT_STAGE_RENDERER=gpu|cpu  stage renderer (default gpu, falling back to cpu; ADR 0032)\n\
      --theme      the interface palette for this run (not saved)\n\

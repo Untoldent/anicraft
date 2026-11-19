@@ -10,6 +10,16 @@ Streaming WAV headers and PCM sample blocks now delegate to `craft_audio::wav_st
 AniCraft retains mixing, frame-range limits, temporary-file cleanup and VFS writes.
 This integration depends on craft-libs #1962 and still requires hosted parity validation.
 
+The experimental [Array panel](array-panel-design.md) previews Linear and Radial arrays of
+one symbol instance, with a neutral property track for Alpha stops. Array mode stays active
+when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
+next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
+configuration. A selected-stop card holds its Alpha editor.
+Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
+direction, length and spacing are editable in the panel. Both modes display white pivot markers with
+the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only
+Linear edits reuse the instances and eligible stage tiles.
+
 | Dimension | Status |
 |---|---|
 | Architecture | M0 skeleton in place: geom → doc → render → engine → cli → shell, layering enforced by `cargo test` (`src/architecture_tests.rs`: lower layers only, no UI crates below the shell, and the AGENTS.md map must match). |

@@ -71,11 +71,12 @@ pub struct Cache {
     pub drawn_by: Option<(bool, Option<String>)>,
     /// The selection pattern's texture and the colour it was made in (`selection_pattern`).
     pattern: Option<(Color32, egui::TextureHandle)>,
+    array_tiles: Option<crate::array_gizmo::TileBounds>,
 }
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), laid_out: false, service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None }
+        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), laid_out: false, service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None }
     }
 }
 
@@ -94,6 +95,7 @@ impl Cache {
     /// memory.
     pub fn forget_document(&mut self) {
         self.tiles.clear();
+        self.array_tiles = None;
         self.shown_state = None;
         self.ready = (0, 0);
         if let Some(s) = &self.service {
@@ -231,6 +233,7 @@ fn to_v(p: Pos2) -> Vec2 {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    let array_active = app.s.array_preview_active();
     // View › Rulers along the top and the left (ADR 0076); the stage view in what is left.
     let (canvas, bars) = crate::rulers::layout(app, ui.max_rect());
     let now = ui.input(|i| i.time);
@@ -242,7 +245,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // While a colour picker popup is open the stage is its eyedropper (ADR 0109): a click
     // picks the colour there instead of using the tool, so the tools get no presses.
     let picker = crate::colour::picking(ui.ctx());
-    let resp = ui.allocate_rect(canvas, if picker.is_some() { Sense::hover() } else { Sense::click_and_drag() });
+    let resp = ui.allocate_rect(canvas, if array_active || picker.is_some() { Sense::hover() } else { Sense::click_and_drag() });
     // The drawing surface: Ctrl+F6 lands here, and screen readers hear the tool in hand.
     crate::a11y::anchor(ui, crate::a11y::Region::Stage, canvas, &resp);
     let ppp = ui.ctx().pixels_per_point();
@@ -271,13 +274,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // ---- camera input -------------------------------------------------------------------
-    if resp.hovered() {
+    if resp.hovered() || (array_active && resp.contains_pointer()) {
         let (zoom_delta, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
-        if let Some(p) = resp.hover_pos() {
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
             if (zoom_delta - 1.0).abs() > 1e-4 {
                 let z = app.view.zoom * zoom_delta;
                 app.zoom_about(canvas, p, z);
-            } else if app.tool == Tool::Camera && scroll.y != 0.0 {
+            } else if !array_active && app.tool == Tool::Camera && scroll.y != 0.0 {
                 // With the Camera tool the wheel zooms the camera, not the view.
                 crate::camera_tool::wheel(app, scroll.y, now);
             } else if scroll != egui::Vec2::ZERO {
@@ -336,10 +339,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // stage space, not where it shows).
     let preview = crate::camera_tool::previewing(app);
     let cam_geo = crate::camera_tool::Geo { origin: st_origin, zoom: st_zoom, stage_rect, preview };
+    let array_projection = if array_active {
+        let stage_to_screen = Affine::translate(origin.x, origin.y).mul(&Affine::scale(zoom, zoom));
+        if preview && app.s.editing.is_empty() && app.s.timeline().camera_at(app.s.frame, &app.s.doc.stage).is_some() {
+            app.s.camera_view(app.s.layer).map(|camera| stage_to_screen.mul(&camera))
+        } else {
+            Some(stage_to_screen)
+        }
+    } else {
+        None
+    };
+    let array_gizmo = if array_active { crate::array_gizmo::input(app, ui, canvas, array_projection) } else { None };
+    let array_generation = (!preview && edit_view.is_none()).then(|| app.s.linear_array_generation()).flatten();
+    let array_instances = if app.array_panel.shows_registrations() || array_generation.is_some() { app.s.selected_elements() } else { Vec::new() };
     // Library items dragged onto the stage land at the pointer (ADR 0053).
-    crate::library::stage_drop(app, ui, &resp, to_stage, preview);
-    // Files dropped from the desktop land here too (ADR 0059).
-    app.drop.stage = Some(crate::drop::StageGeo { canvas, origin, zoom, paused: preview });
+    if !array_active {
+        crate::library::stage_drop(app, ui, &resp, to_stage, preview);
+        // Files dropped from the desktop land here too (ADR 0059).
+        app.drop.stage = Some(crate::drop::StageGeo { canvas, origin, zoom, paused: preview });
+    }
 
 
     // ---- tools ----------------------------------------------------------------------------
@@ -351,7 +369,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // The Selection tool on the movie's picture: points there are the picture's (ADR 0082).
     let through = preview && !panning && app.tool == Tool::Select;
     // A drag from a ruler makes a guide (ADR 0076).
-    crate::rulers::input(app, ui, &bars, geo, preview);
+    if !array_active {
+        crate::rulers::input(app, ui, &bars, geo, preview);
+    }
     let guide_hot = if app.drag == Drag::None && !panning && !preview { pointer.and_then(|p| crate::rulers::guide_at(app, geo, p)) } else { None };
     if paused && (resp.drag_started() || resp.clicked()) {
         app.status_ok(tr!("Previewing through the camera: the Selection tool picks and moves artwork here; other tools wait. Turn off View › Preview Through Camera to draw."));
@@ -364,10 +384,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // the transformation point (ADR 0111).
     crate::xform::sync(app);
     let xf_frame = if app.tool == Tool::Transform && !multi && !preview { crate::xform::frame(app) } else { None };
-    let sel_bounds = if multi { crate::onion::selection_bounds(app) } else { bounds_arr(app.s.selection_bounds()) };
+    let sel_bounds = if array_active { None } else if multi { crate::onion::selection_bounds(app) } else { bounds_arr(app.s.selection_bounds()) };
     let sel_rect = sel_bounds.map(|b| Rect::from_min_max(to_screen(Vec2::new(b[0], b[1])), to_screen(Vec2::new(b[2], b[3]))));
     // Shape hint markers take the pointer first with the selection tools (ADR 0023).
-    let hint_tools = matches!(app.tool, Tool::Select | Tool::Transform | Tool::Subselect) && !panning && !preview;
+    let hint_tools = !array_active && matches!(app.tool, Tool::Select | Tool::Transform | Tool::Subselect) && !panning && !preview;
     let hint_marks = if hint_tools { crate::shape_hints::markers(app) } else { Vec::new() };
     let hint_at = |p: Pos2| crate::shape_hints::hit(&hint_marks, p, to_screen);
     let hint_hot = pointer.and_then(hint_at);
@@ -380,7 +400,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let now = ui.input(|i| i.time);
     // The motion path takes the pointer with the selection tools (ADR 0030): its ends and
     // handles before the object under them, the path itself only where no object is.
-    let mp_tools = matches!(app.tool, Tool::Select | Tool::Subselect) && !panning && !preview;
+    let mp_tools = !array_active && matches!(app.tool, Tool::Select | Tool::Subselect) && !panning && !preview;
     let mp_grab = |app: &App, p: Pos2| {
         let shown = crate::motion_path::shown(app)?;
         let open = app.s.hit_test(to_v(to_stage(p)), 3.0 / zoom).is_none();
@@ -393,7 +413,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let pen_hot = if app.tool == Tool::Pen && alt && !panning && !preview && app.drag == Drag::None { pointer.and_then(|p| crate::motion_path::pen_hot(app, p, xf)) } else { None };
     // The open symbol's 9-slice guides take the Selection tool's press first (ADR 0055).
     let slice_hot = if app.drag == Drag::None && !panning && !preview { pointer.and_then(|p| crate::scale_grid::hit(app, p, xf)) } else { None };
-    if resp.hovered() {
+    if resp.hovered() && !array_active {
         let icon = match app.tool {
             _ if panning => CursorIcon::Grab,
             _ if let Drag::Guide { index, .. } = app.drag => crate::rulers::cursor(app, index),
@@ -1028,8 +1048,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // Render jobs take movie frames: the current scene starts at `start`.
         let start = app.s.doc.scene_start(app.s.scene);
         let frame = app.s.frame;
+        let dim = array_active && app.array_panel.dim_stage();
+        let focus = if dim {
+            let mut ids: Vec<_> = app.s.selection.ids().collect();
+            ids.sort_unstable();
+            Some(std::sync::Arc::from(ids))
+        } else {
+            None
+        };
+        let tile_generation = array_generation.filter(|_| onion.is_none_or(|o| !o.shows()));
+        if let Some(generation) = tile_generation
+            && app.stage_cache.array_tiles.is_none_or(|bounds| bounds.generation != generation)
+        {
+            app.stage_cache.array_tiles = Some(crate::array_gizmo::TileBounds::new(generation, &app.s.display_list(), &array_instances));
+        }
+        let array_tiles = app.stage_cache.array_tiles.filter(|bounds| Some(bounds.generation) == tile_generation);
         // Inside a symbol open in place, onion skin composes the symbol's own frames (ADR 0051).
-        let jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = make_job_for(raster, state, &pic.doc, pic.frame, t.view, onion).through_camera(preview).inside(pic.front.clone()); (t, j) }).collect();
+        let tile_job = |t: &TileSpec| {
+            let mut job = make_job_for(raster, state, &pic.doc, pic.frame, t.view, onion)
+                .through_camera(preview).inside(pic.front.clone()).dim_around(focus.clone());
+            if let Some(bounds) = array_tiles {
+                job.key = bounds.key(&job, t.rect, z.recip(), dim, &array_instances);
+            }
+            job
+        };
+        let jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = tile_job(&t); (t, j) }).collect();
         let keys: Vec<u64> = jobs.iter().map(|(_, j)| j.key).collect();
         let missing: Vec<usize> = (0..jobs.len()).filter(|&i| !app.stage_cache.has(keys[i])).collect();
 
@@ -1074,7 +1117,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f32;
                 let tiles = missing.len().max(1) as f32;
                 let batch_ms = if immediate { wall } else { ms / cores.min(tiles) };
-                app.stage_cache.ms = batch_ms * keys.len() as f32 / tiles;
+                app.stage_cache.ms = if array_active { batch_ms } else { batch_ms * keys.len() as f32 / tiles };
             }
             if let Some(e) = error {
                 app.status_err(crate::i18n::t_dyn(&e).into_owned());
@@ -1096,8 +1139,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let f = (frame + d) % n;
                     ahead.extend(jobs.iter().map(|(t, _)| make_job_for(raster, state, &app.s.doc, start + f, t.view, None).through_camera(preview)));
                 }
-            } else {
-                ahead.extend(tiles_for(z, stage_px, px, 1, bg, pasteboard).into_iter().filter(|t| !jobs.iter().any(|(v, _)| v.rect == t.rect)).map(|t| make_job_for(raster, state, &pic.doc, pic.frame, t.view, onion).through_camera(preview)));
+            } else if !array_active {
+                ahead.extend(tiles_for(z, stage_px, px, 1, bg, pasteboard).into_iter().filter(|t| !jobs.iter().any(|(v, _)| v.rect == t.rect)).map(|t| tile_job(&t)));
             }
             svc.prefetch(ahead);
         }
@@ -1107,17 +1150,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let view_rect = [(vis.min.x - st_origin.x) / st_zoom, (vis.min.y - st_origin.y) / st_zoom, (vis.max.x - st_origin.x) / st_zoom, (vis.max.y - st_origin.y) / st_zoom];
         let overlaps = |r: &[f32; 4]| r[0] < view_rect[2] && r[2] > view_rect[0] && r[1] < view_rect[3] && r[3] > view_rect[1];
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        let mut stale: Vec<&TileTex> = app.stage_cache.tiles.iter().filter(|t| !keys.contains(&t.key) && overlaps(&t.rect)).collect();
-        if ready < keys.len() {
+        let paint_tile = |t: &TileTex| {
+            let r = Rect::from_min_max(st_screen(Vec2::new(t.rect[0], t.rect[1])), st_screen(Vec2::new(t.rect[2], t.rect[3])));
+            painter.image(t.tex.id(), r, uv, Color32::WHITE);
+        };
+        if ready < keys.len() && array_active {
+            // A transparent pasteboard tile cannot cover stale artwork. Draw at most one
+            // placeholder for each missing tile, and remove it when that tile becomes current.
+            for (spec, job) in &jobs {
+                if !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
+                    && let Some(old) = app.stage_cache.tiles.iter().filter(|t| t.rect == spec.rect).max_by_key(|t| t.used)
+                {
+                    paint_tile(old);
+                }
+            }
+        } else if ready < keys.len() {
+            let mut stale: Vec<&TileTex> = app.stage_cache.tiles.iter().filter(|t| !keys.contains(&t.key) && overlaps(&t.rect)).collect();
             stale.sort_by_key(|t| t.used);
             for t in stale.iter().rev().take(96).rev() {
-                let r = Rect::from_min_max(st_screen(Vec2::new(t.rect[0], t.rect[1])), st_screen(Vec2::new(t.rect[2], t.rect[3])));
-                painter.image(t.tex.id(), r, uv, Color32::WHITE);
+                paint_tile(t);
             }
         }
         for t in app.stage_cache.tiles.iter().filter(|t| keys.contains(&t.key)) {
-            let r = Rect::from_min_max(st_screen(Vec2::new(t.rect[0], t.rect[1])), st_screen(Vec2::new(t.rect[2], t.rect[3])));
-            painter.image(t.tex.id(), r, uv, Color32::WHITE);
+            paint_tile(t);
         }
 
         // While a background render catches up with a drag, outline where the selection is now,
@@ -1144,6 +1199,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // ---- overlays -------------------------------------------------------------------------
+    if array_active {
+        if let Some(gizmo) = array_gizmo {
+            gizmo.paint(&painter);
+        }
+        if app.array_panel.shows_registrations() && let Some(projection) = array_projection {
+            crate::array_gizmo::paint_registrations(&painter, projection, &array_instances);
+        }
+        let badge = format!("{:.0}%", st_zoom * 100.0);
+        painter.text(canvas.right_bottom() + vec2(-10.0, -8.0), egui::Align2::RIGHT_BOTTOM, badge, crate::theme::font(crate::theme::Type::Data), T.text_dim);
+        crate::a11y::surface(ui, &resp, tr!("Stage · Array preview"));
+        crate::rulers::paint(ui, &bars, geo, ui.input(|i| i.pointer.latest_pos()));
+        return;
+    }
     // The camera frame (or, previewing, the Camera tool's handle) comes first, under the
     // selection.
     crate::camera_tool::draw(app, &painter, &cam_geo, pointer);
@@ -1345,7 +1413,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         // registration point
         let o = to_screen(e.transform.translation());
-        painter.circle(o, 3.5, Color32::WHITE, Stroke::new(1.0, Color32::BLACK));
+        crate::theme::registration_mark(&painter, o);
     }
     // Free transform box: recomputed every frame so it follows the artwork while you drag.
     // One element shows its own box, turned, scaled and skewed as it is (ADR 0111, #175);

@@ -17,7 +17,7 @@
 use crate::editing::Front;
 use crate::history::StateId;
 use crate::onion::OnionSkin;
-use anicraft_doc::{DisplayList, Document, evaluate_scene, evaluate_scene_camera};
+use anicraft_doc::{ColorTransform, DisplayList, Document, ElementId, evaluate_scene, evaluate_scene_camera};
 use anicraft_render::{RenderStats, View, render};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -45,6 +45,8 @@ pub struct FrameJob {
     /// A symbol open in place, in front of the picture (ADR 0045): onion skin composes its own
     /// frames (ADR 0051). Set with [`FrameJob::inside`].
     pub front: Option<Arc<Front>>,
+    /// Editor-only focus. IDs are sorted so membership is cheap while evaluating the picture.
+    focus: Option<Arc<[ElementId]>>,
 }
 
 impl FrameJob {
@@ -82,15 +84,119 @@ impl FrameJob {
         self
     }
 
+    /// Foreground the preview instances (sorted by ID) over dimmed surroundings. Focused tiles
+    /// have their own cache keys.
+    pub fn dim_around(mut self, focus: Option<Arc<[ElementId]>>) -> FrameJob {
+        if let Some(ids) = focus.filter(|ids| !ids.is_empty()) {
+            let mix = |k: u64| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (k, "dim around", ids.as_ref()).hash(&mut h);
+                h.finish()
+            };
+            self.key = mix(self.key);
+            self.scene = mix(self.scene);
+            self.focus = Some(ids);
+        }
+        self
+    }
+
     /// What the job draws: its frame with what its onion settings add (ADR 0047), on the open
     /// symbol's own timeline when there is one (ADR 0051).
     pub fn display_list(&self) -> DisplayList {
         let onion = self.onion.as_ref().filter(|o| o.shows());
-        match (&self.front, onion) {
-            (Some(front), Some(skin)) => display_list_inside(&self.doc, self.frame, front, skin),
+        let mut list = match (&self.front, onion) {
+            (Some(front), skin) if skin.is_some() || self.focus.is_some() => {
+                compose_inside(&self.doc, self.frame, front, skin)
+            }
             _ => display_list_for(&self.doc, self.frame, self.onion.as_ref(), self.camera),
+        };
+        if let Some(focus) = &self.focus {
+            foreground_array(&mut list, focus);
+            dim_surroundings(&mut list, focus);
+        }
+        list
+    }
+}
+
+/// Fade the largest whole groups that exclude the preview and any mask artwork. A group
+/// containing both preview and unrelated artwork keeps its opacity, so only its unrelated
+/// children are dimmed. Stack order, clipping and the document itself are unchanged.
+fn dim_surroundings(list: &mut DisplayList, focus: &[ElementId]) {
+    const DIM: f32 = 0.28;
+    let preserve = |item: &anicraft_doc::DisplayItem| item.masks.is_some() || focus.binary_search(&item.element).is_ok();
+    let mut contains_focus = vec![false; list.groups.len()];
+    for item in list.items.iter().filter(|i| preserve(i)) {
+        let mut parent = item.group;
+        while let Some(id) = parent {
+            let Some(keep) = contains_focus.get_mut(id as usize) else { break };
+            if std::mem::replace(keep, true) {
+                break;
+            }
+            parent = list.groups.get(id as usize).and_then(|g| g.parent).filter(|p| *p < id);
         }
     }
+    let kept = |id: Option<u32>| id.and_then(|id| contains_focus.get(id as usize)).copied().unwrap_or(true);
+    for (group, has_focus) in list.groups.iter_mut().zip(&contains_focus) {
+        if !has_focus && kept(group.parent) {
+            group.alpha *= DIM;
+        }
+    }
+    for item in list.items.iter_mut().filter(|i| !preserve(i) && kept(i.group)) {
+        if let Some(outline) = &mut item.outline {
+            outline.a *= DIM;
+        } else {
+            item.color = ColorTransform::alpha(DIM).concat(&item.color);
+        }
+    }
+}
+
+/// Move the preview to the front without changing its internal order, clip references or
+/// compositing. If a group contains both kinds of artwork, give each pass its own group run.
+fn foreground_array(list: &mut DisplayList, focus: &[ElementId]) {
+    let front = |item: &anicraft_doc::DisplayItem| usize::from(focus.binary_search(&item.element).is_ok());
+    let mut uses = vec![0; list.groups.len()];
+    for item in &list.items {
+        if let Some(bits) = item.group.and_then(|g| uses.get_mut(g as usize)) {
+            *bits |= 1 << front(item);
+        }
+    }
+    for (id, group) in list.groups.iter().enumerate().rev() {
+        let bits = uses.get(id).copied().unwrap_or(0);
+        if let Some(parent) = group.parent.and_then(|p| uses.get_mut(p as usize)) {
+            *parent |= bits;
+        }
+    }
+    let mut remap = vec![[None; 2]; list.groups.len()];
+    let mut groups = Vec::with_capacity(list.groups.len());
+    for (old, (group, bits)) in list.groups.iter().zip(uses).enumerate() {
+        for pass in 0..2 {
+            if bits & (1 << pass) != 0 {
+                let parent = group.parent.and_then(|p| remap.get(p as usize)).and_then(|set| set[pass]);
+                if let Some(set) = remap.get_mut(old) {
+                    set[pass] = Some(groups.len() as u32);
+                }
+                groups.push(anicraft_doc::Group { parent, ..group.clone() });
+            }
+        }
+    }
+    let mut forward = Vec::new();
+    let mut moved = Vec::new();
+    let mut links = std::mem::take(&mut list.links).into_iter().peekable();
+    for (old, mut item) in std::mem::take(&mut list.items).into_iter().enumerate() {
+        let pass = front(&item);
+        item.group = item.group.and_then(|g| remap.get(g as usize)).and_then(|set| set[pass]);
+        let (items, link_out) = if pass == 0 { (&mut list.items, &mut list.links) } else { (&mut forward, &mut moved) };
+        while links.peek().is_some_and(|(i, _)| *i == old as u32) {
+            if let Some((_, url)) = links.next() {
+                link_out.push((items.len() as u32, url));
+            }
+        }
+        items.push(item);
+    }
+    let base = list.items.len() as u32;
+    list.links.extend(moved.into_iter().map(|(i, url)| (i + base, url)));
+    list.items.append(&mut forward);
+    list.groups = groups;
 }
 
 /// A stage picture's frame with the open symbol in front composed by `skin`: the timelines around
@@ -98,15 +204,19 @@ impl FrameJob {
 /// onion skin on (not Edit Multiple Frames), the timeline the symbol was opened from shows its
 /// own onion frames too, dimmed with it (ADR 0061).
 pub fn display_list_inside(doc: &Document, frame: u32, front: &Front, skin: &OnionSkin) -> DisplayList {
+    compose_inside(doc, frame, front, Some(skin))
+}
+
+fn compose_inside(doc: &Document, frame: u32, front: &Front, skin: Option<&OnionSkin>) -> DisplayList {
     let (scene, local) = doc.locate(frame);
     let tl = &front.timeline;
-    let parent = front.parent.as_ref().filter(|_| skin.ghosts && !skin.edit_multiple);
+    let parent = front.parent.as_ref().zip(skin.filter(|s| s.ghosts && !s.edit_multiple));
     let mut dl = DisplayList::default();
     // Back to front: the picture's layers from the bottom up, each its own timeline.
     for l in doc.timeline(scene).layers.iter().rev() {
         if l.id == front.layer {
-            dl.append(crate::onion::compose_timeline(tl, front.frame, Some(skin), |f| anicraft_doc::evaluate_timeline_at(doc, tl, f, front.at)));
-        } else if let Some(p) = parent.filter(|p| p.layer == l.id) {
+            dl.append(crate::onion::compose_timeline(tl, front.frame, skin, |f| anicraft_doc::evaluate_timeline_at(doc, tl, f, front.at)));
+        } else if let Some((p, skin)) = parent.filter(|(p, _)| p.layer == l.id) {
             dl.append(parent_onion(doc, p, front, skin));
         } else {
             dl.append(anicraft_doc::evaluate_timeline(doc, &anicraft_doc::Timeline { layers: vec![l.clone()] }, local));
@@ -207,7 +317,7 @@ pub fn frame_key(state: StateId, frame: u32, view: &View, onion: Option<&OnionSk
 /// A job whose `scene` is derived from the same inputs as its key.
 pub fn make_job(state: StateId, doc: &Document, frame: u32, view: View, onion: Option<&OnionSkin>) -> FrameJob {
     let onion = onion.filter(|o| o.shows()).copied();
-    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None }
+    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, focus: None }
 }
 
 /// A job for rasterizer `raster` (from [`RenderService::raster_id`]; 0 is the CPU oracle, and
@@ -677,6 +787,65 @@ mod tests {
     fn job(doc: &Document, state: u64, frame: u32) -> FrameJob {
         let view = View { transform: Affine::scale(0.25, 0.25), width: 320, height: 180, background: Some(doc.stage.background) };
         make_job(state, doc, frame, view, None)
+    }
+
+    #[test]
+    fn array_focus_dims_unrelated_artwork_in_a_shared_layer_group() {
+        use serde_json::json;
+        let mut session = crate::Session::default();
+        session.execute("draw.rect", &json!({"x": 20, "y": 20, "w": 60, "h": 60, "fill": "#0000ff", "stroke": null})).unwrap();
+        let unrelated = session.selection.first().unwrap().1;
+        session.execute("draw.rect", &json!({"x": 160, "y": 20, "w": 60, "h": 60, "fill": "#ff0000", "stroke": null})).unwrap();
+        session.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        session.execute("layer.set_opacity", &json!({"opacity": 60})).unwrap();
+        session.preview_array(&json!({"count": 3, "dx": 75})).unwrap();
+        let mut ids: Vec<_> = session.selection.ids().collect();
+        ids.sort_unstable();
+        let preview = session.doc.clone();
+        let plain = job(&preview, session.state, 0);
+        let dimmed = plain.clone().dim_around(Some(Arc::from(ids.clone())));
+        assert_ne!((plain.key, plain.scene), (dimmed.key, dimmed.scene));
+        let plain_list = plain.display_list();
+        let dimmed_list = dimmed.display_list();
+        let opacity = |list: &DisplayList, id| {
+            let item = list.items.iter().find(|item| item.element == id).unwrap();
+            list.effective_alpha(item)
+        };
+        assert!(opacity(&dimmed_list, unrelated) < opacity(&plain_list, unrelated) * 0.5);
+        for id in ids {
+            assert_eq!(opacity(&dimmed_list, id), opacity(&plain_list, id));
+        }
+        assert!(session.doc == preview && session.array_preview_active());
+    }
+
+    #[test]
+    fn array_focus_foregrounds_preview_without_changing_baked_or_export_pixels() {
+        use serde_json::json;
+        let mut s = crate::Session::default();
+        s.execute("draw.rect", &json!({"x": 10, "y": 10, "w": 40, "h": 40, "fill": "#ff0000", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        let (_, source) = s.selection.first().unwrap();
+        s.execute("draw.rect", &json!({"x": 20, "y": 20, "w": 80, "h": 40, "fill": "#0000ff", "stroke": null})).unwrap();
+        let (_, cover) = s.selection.first().unwrap();
+        s.select_only([source]);
+        s.preview_array(&json!({"count": 2, "dx": 45})).unwrap();
+        let ids: Vec<_> = s.selection.ids().collect();
+        let view = View { transform: Affine::IDENTITY, width: 112, height: 66, background: Some(s.doc.stage.background) };
+        let plain = make_job(s.state, &s.doc, 0, view, None);
+        let focused = plain.clone().dim_around(Some(Arc::from(ids.clone())));
+        let order = |job: &FrameJob| job.display_list().items.iter().map(|item| item.element).collect::<Vec<_>>();
+        assert_eq!(order(&plain), [ids[0], ids[1], cover]);
+        assert_eq!(order(&focused), [cover, ids[0], ids[1]]);
+        let ordinary = render_job(&plain).rgba_premul;
+        let foreground = render_job(&focused).rgba_premul;
+        for x in [30, 70] {
+            let at = (30 * 112 + x) * 4;
+            assert_eq!(&ordinary[at..at + 4], &[0, 0, 255, 255]);
+            assert_eq!(&foreground[at..at + 4], &[255, 0, 0, 255]);
+        }
+        s.finish_array_preview(true);
+        let exported = render(&anicraft_doc::evaluate(&s.doc, 0), &view).unwrap().0.to_premul_rgba8();
+        assert_eq!(exported, ordinary);
     }
 
     #[test]

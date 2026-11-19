@@ -415,6 +415,9 @@ impl MenuKeys {
 }
 
 fn enabled(app: &App, id: &str) -> bool {
+    if app.s.array_preview_active() {
+        return false;
+    }
     // With Edit Multiple Frames on, the selection is on several keyframes (ADR 0051).
     if let Some(on) = crate::onion::enabled(app, id) {
         return on;

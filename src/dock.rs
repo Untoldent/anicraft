@@ -689,7 +689,8 @@ impl Layout {
 fn default_home(p: Panel) -> Home {
     let (side, near) = match p {
         Panel::Properties => (Side::Right, Some(Panel::Align)),
-        Panel::Align | Panel::Colour | Panel::Array => (Side::Right, Some(Panel::Align)),
+        Panel::Align | Panel::Colour => (Side::Right, Some(Panel::Align)),
+        Panel::Array => (Side::Right, Some(Panel::Properties)),
         // Beside the Colour panel when it is open, as Animate tabs them together.
         Panel::Swatches => (Side::Right, Some(Panel::Colour)),
         Panel::Library | Panel::MovieExplorer => (Side::Right, Some(Panel::Library)),

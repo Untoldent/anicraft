@@ -988,6 +988,9 @@ impl App {
     }
 
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
+        if crate::array_panel::blocked(self) {
+            return None;
+        }
         let result = self.s.execute(id, &params);
         if platform::WEB && id.starts_with("file.") {
             // In a browser, what a save or an export wrote is in memory: hand it to the
@@ -2992,6 +2995,9 @@ impl App {
                 }
                 self.tool = Tool::Width;
             }
+            Some(which @ ("array" | "array-hidden" | "array-polish" | "array-polish-off" | "array-radial")) => {
+                crate::array_panel::screenshot(self, which);
+            }
             Some(which @ ("gradient" | "gradientbucket")) => {
                 // The gradient tools (ADR 0074): a reflecting linear gradient turned on a panel,
                 // and an oval with a stretched radial gradient and its focal point off centre,
@@ -3263,6 +3269,9 @@ impl App {
     /// The single entry point for user-initiated commands: asks first when the engine says the
     /// command needs confirmation (ADR 0004), otherwise runs it.
     pub fn request(&mut self, id: &str, mut params: Value) {
+        if crate::array_panel::blocked(self) {
+            return;
+        }
         // A saved command from a file goes into the user's commands folder (ADR 0097).
         if id == "macro.import"
             && params.get("folder").is_none()
@@ -3297,6 +3306,9 @@ impl App {
 
     /// [`App::perform`] on the document being edited, whatever the command.
     pub(crate) fn perform_here(&mut self, id: &str, params: Value) -> Option<Value> {
+        if crate::array_panel::blocked(self) {
+            return None;
+        }
         if id == "file.publish" {
             // File › Publish runs in the background, with its own progress view (ADR 0060).
             crate::publish_panel::start(self, &params);
@@ -3498,6 +3510,9 @@ impl App {
     /// Invokes a command from a menu, shortcut, palette or context menu, asking for a path or
     /// name first when it needs one.
     pub fn invoke(&mut self, id: &'static str) {
+        if crate::array_panel::blocked(self) {
+            return;
+        }
         // Ctrl+X/C/V act on frames when the timeline was used last and has frames to act on
         // (Animate's Ctrl+Alt+X/C/V work anywhere).
         let id: &'static str = match id {
@@ -3794,6 +3809,9 @@ impl App {
     }
 
     pub fn toggle_play(&mut self) {
+        if crate::array_panel::blocked(self) {
+            return;
+        }
         self.playing = !self.playing;
         self.play_acc = 0.0;
         if self.playing && self.s.frame + 1 >= self.s.frame_count() {
@@ -3995,6 +4013,14 @@ impl App {
         if keys == crate::a11y::Keyboard::Text || self.palette.is_some() {
             return;
         }
+        // Array's controls keep the arrows and Delete. A conflicting command shortcut still
+        // gives the same feedback as a document action from a menu.
+        if self.s.array_preview_active() {
+            if ctx.input_mut(|i| self.shortcuts.iter().any(|(m, k, _)| m.any() && i.consume_key(*m, *k))) {
+                crate::array_panel::blocked(self);
+            }
+            return;
+        }
         // The Test Movie window's movie has the keyboard (ADR 0052): its keys are the
         // movie's; only shortcuts with Ctrl (⌘) or Alt reach the app (Restart is Ctrl+Enter).
         if self.test_movie.is_some() && crate::test_movie::has_keys(ctx) {
@@ -4017,6 +4043,7 @@ impl App {
             return;
         }
         let control = keys == crate::a11y::Keyboard::Control;
+        let stop_has_focus = control && crate::colour_panel::stop_has_focus(ctx);
         if !control {
             crate::motion_path::consume_keys(self, ctx);
             pathtools::consume_keys(self, ctx);
@@ -4037,6 +4064,9 @@ impl App {
         let (mut frame_step, mut layer_step) = (0i64, 0i64);
         ctx.input_mut(|i| {
             for (m, k, id) in &self.shortcuts {
+                if stop_has_focus && !m.any() && matches!(k, Key::Delete | Key::Backspace) {
+                    continue;
+                }
                 if i.consume_key(*m, *k) {
                     fire.push(id);
                 }
@@ -4527,6 +4557,7 @@ impl App {
             self.glyph_check = false;
         }
         self.press_scripted_key(&ctx);
+        crate::array_panel::escape(self, &ctx);
         // The colour pickers show the document's swatches (ADR 0078).
         crate::swatches_panel::publish_to_pickers(&ctx, self);
         self.handle_shortcuts(&ctx);
@@ -4570,9 +4601,7 @@ impl App {
             self.workspace(ui);
         }
         self.windows(&ctx);
-        // A live Array preview must not keep an editing gesture open when its panel
-        // is closed or hidden by a different dock tab.
-        crate::array_panel::cancel_when_hidden(self);
+        crate::array_panel::finish_frame(self, &ctx);
     }
 
     /// The editor's panels (ADR 0075): the edit bar and status bar, then the tools, the docks
@@ -4581,7 +4610,13 @@ impl App {
         let bar = |fill| egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(8, 2));
         // The open documents' tabs, above the edit bar of the one shown (ADR 0112).
         egui::Panel::top("document_tabs").exact_size(crate::tabs::BAR_HEIGHT).frame(egui::Frame::NONE.fill(T.chrome)).show(ui, |ui| crate::tabs::bar(self, ui));
-        egui::Panel::top("edit_bar").exact_size(theme::TARGET + 8.0).frame(bar(T.panel)).show(ui, |ui| panels::edit_bar(self, ui));
+        egui::Panel::top("edit_bar").exact_size(theme::TARGET + 8.0).frame(bar(T.panel)).show(ui, |ui| {
+            if self.s.array_preview_active() {
+                crate::array_panel::edit_bar(self, ui);
+            } else {
+                panels::edit_bar(self, ui);
+            }
+        });
         egui::Panel::bottom("status_bar").exact_size(28.0).frame(bar(T.chrome)).show(ui, |ui| panels::status_bar(self, ui));
         crate::dock_ui::workspace(self, ui);
     }
@@ -4615,7 +4650,7 @@ impl App {
 
         // Never lose work on close: intercept it while any open document has unsaved changes,
         // and ask once for all of them (ADR 0004, ADR 0112).
-        if !self.allow_close && ctx.input(|i| i.viewport().close_requested()) && self.shot.is_none() && crate::tabs::any_dirty(self) {
+        if !self.allow_close && ctx.input(|i| i.viewport().close_requested()) && self.shot.is_none() && (self.s.array_preview_active() || crate::tabs::any_dirty(self)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             crate::tabs::quit(self);
         }
@@ -4624,9 +4659,9 @@ impl App {
         self.files_window(&ctx);
 
         // Close a coalesced edit (property drags) once nothing is being dragged or typed.
-        // (A plug-in dialog and Convert Audio to Keyframes keep their preview gesture open
-        // until OK or Cancel.)
-        if self.s.in_gesture() && self.plugin_dialog.is_none() && self.audio_keys.is_none() && self.drag == Drag::None && !ctx.egui_is_using_pointer() && ctx.memory(|m| m.focused().is_none()) {
+        // Array, plug-ins and Convert Audio to Keyframes keep their preview open until an
+        // explicit exit.
+        if self.s.in_gesture() && !self.s.array_preview_active() && self.plugin_dialog.is_none() && self.audio_keys.is_none() && self.drag == Drag::None && !ctx.egui_is_using_pointer() && ctx.memory(|m| m.focused().is_none()) {
             self.s.end_gesture();
         }
 

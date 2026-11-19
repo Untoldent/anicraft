@@ -889,6 +889,9 @@ pub(crate) fn panel_menu(ui: &mut egui::Ui, at: Where, p: Panel, layout: &Layout
 
 /// The shown panel's contents, wherever it is.
 pub fn panel_body(app: &mut App, ui: &mut egui::Ui, p: Panel) {
+    if p != Panel::Array && app.s.array_preview_active() {
+        ui.disable();
+    }
     // A vertical scroll area grows to its widest row and remembers it; held to the panel's
     // width, a row that can't fit can't widen every other one (ADR 0087).
     let width = ui.available_width();
@@ -1094,7 +1097,8 @@ fn flyout(app: &mut App, ctx: &egui::Context, auto: (f32, f32), layout: &Layout,
     });
     // Esc closes it (after a drag's own Esc), focus going back to its icon.
     let popup = egui::Popup::is_any_open(ctx);
-    if app.dock_view.drag.is_none() && !popup && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+    let text_escape = app.s.array_preview_active() && crate::array_panel::text_had_escape(ctx);
+    if app.dock_view.drag.is_none() && !popup && !text_escape && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         acts.push(Act::Flyout(None));
         let icon = Id::new(("dock_icon", p.id()));
         ctx.memory_mut(|m| m.request_focus(icon));
