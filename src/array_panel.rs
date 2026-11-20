@@ -6,8 +6,8 @@ use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
-use anicraft_engine::doc::{ElementId, ElementKind, LayerId};
+use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
+use anicraft_engine::doc::{Easing, ElementId, ElementKind, LayerId};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -26,6 +26,7 @@ struct Settings {
     radial: Radial,
     backwards: bool,
     stops: Vec<PropertyStop>,
+    easing: ArrayEasing,
 }
 
 impl Settings {
@@ -42,6 +43,7 @@ impl Settings {
             },
             backwards: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
+            easing: ArrayEasing::default(),
         }
     }
 
@@ -53,6 +55,7 @@ impl Settings {
                 json!({
                     "offset": s.value.offset, "alpha": s.value.alpha,
                     "scale_x": s.value.scale[0], "scale_y": s.value.scale[1], "rotation": s.value.rotation,
+                    "outbound_ease": anicraft_engine::params::easing_json(s.value.outbound.as_ref().unwrap_or(&Easing::Linear)),
                 })
             })
             .collect();
@@ -77,6 +80,11 @@ impl Settings {
         };
         params["stacking"] = json!(if self.backwards { "front_to_back" } else { "back_to_front" });
         params["property_stops"] = json!(property_stops);
+        params["easing"] = json!({
+            "mode": self.easing.mode.key(), "preset": anicraft_engine::params::easing_json(&self.easing.preset),
+            "distribution": self.easing.distribution, "transform": self.easing.transform,
+            "colour_effect": self.easing.colour_effect,
+        });
         params
     }
 }
@@ -190,6 +198,8 @@ impl State {
             match s.preview_array(&settings.params(mode)) {
                 Ok(()) => {
                     self.active = Some(Active { mode, origin, history: EditHistory::default() });
+                    self.selected_stop = self.selected_stop.filter(|id| settings.stops.iter().any(|stop| stop.marker_id() == *id))
+                        .or_else(|| settings.stops.first().map(PropertyStop::marker_id));
                     self.settings = Some(settings);
                     self.draft_source = None;
                     self.error = None;
@@ -246,6 +256,7 @@ impl State {
         let before = self.before_edit(None);
         self.discard_draft();
         self.settings = self.active.as_ref().map(|active| Settings::at(active.origin));
+        self.selected_stop = self.settings.as_ref().and_then(|settings| settings.stops.first()).map(PropertyStop::marker_id);
         self.gizmo_drag = None;
         self.record_edit(before, None);
         self.refresh(s);
@@ -458,6 +469,18 @@ fn finish_buttons(state: &mut State, s: &mut Session, ui: &mut Ui) {
     }
 }
 
+pub(crate) fn can_apply_on_quit(app: &App) -> bool {
+    app.array_panel.error.is_none()
+}
+
+pub(crate) fn finish_for_quit(app: &mut App, apply: bool) {
+    app.array_panel.finish(&mut app.s, apply);
+    if !app.s.array_preview_active() {
+        app.array_quit_pending = false;
+        crate::tabs::quit(app);
+    }
+}
+
 fn text_focus_id(ctx: &egui::Context) -> Id {
     Id::new(("array_text_focus", ctx.viewport_id()))
 }
@@ -483,7 +506,8 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 
 /// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
-    let transform_sample = matches!(view, "array-transform" | "array-transform-radial");
+    let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
+    let transform_sample = segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
         let sweep = values.next()?.parse::<f32>().ok()?;
@@ -517,7 +541,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
-    let mode = if matches!(view, "array-radial" | "array-transform-radial") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
+    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
     app.array_panel.dim_stage = view != "array-polish-off";
@@ -561,6 +585,23 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                 settings.radial.centre_drift = [40.0, 12.0];
                 settings.radial.rotate = true;
             }
+        }
+        match view {
+            "array-easing-global" => settings.easing.preset = Easing::BackOut,
+            _ if segment_sample => {
+                settings.easing.mode = ArrayEaseMode::PerSegment;
+                settings.easing.colour_effect = false;
+                for (stop, preset) in settings.stops.iter_mut().zip([Easing::QuadOut, Easing::SineIn]) {
+                    stop.value.outbound = Some(preset);
+                }
+                let selected = match view {
+                    "array-easing-segment-middle" => 1,
+                    "array-easing-segment-end" => 2,
+                    _ => 0,
+                };
+                app.array_panel.selected_stop = settings.stops.get(selected).map(PropertyStop::marker_id);
+            }
+            _ => {}
         }
     }
     app.array_panel.refresh(&mut app.s);
@@ -679,7 +720,7 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
 
     ui.add_space(8.0);
     if state.reset_pending {
-        ui.label(text(Type::Body, tr!("Reset the remembered Array geometry and property stops?")));
+        ui.label(text(Type::Body, tr!("Reset the remembered Array settings?")));
         ui.horizontal_wrapped(|ui| {
             if ui.button(tr!("Reset Settings")).clicked() {
                 state.reset(&mut app.s);
@@ -730,19 +771,27 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
 }
 
 fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64, selected_stop: &mut Option<usize>, scale_lock: &mut bool) -> bool {
-    let mut changed = false;
+    let easing_open = settings.easing != ArrayEasing::default();
+    let mut changed = crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
+        let index = settings.stops.iter().position(|stop| Some(stop.marker_id()) == *selected_stop).unwrap_or(0);
+        let has_successor = index + 1 < settings.stops.len();
+        easing_fields(ui, &mut settings.easing, settings.stops.get_mut(index), has_successor)
+    }).unwrap_or(false);
+    ui.add_space(4.0);
     section(ui, "array_stops", Section::Rule, tr!("Property stops"), None, |ui| {
         let id = ui.make_persistent_id(("array_stop_bar", stop_editor_epoch));
+        let before = *selected_stop;
         changed |= crate::colour_panel::array_stop_bar(ui, id, &mut settings.stops, selected_stop, |ui, stop| {
             stop_properties(ui, stop, scale_lock)
         });
+        if *selected_stop != before { ui.ctx().request_repaint(); }
     });
     ui.add_space(4.0);
     section(ui, "array_distribution", Section::Rule, tr!("Distribution"), None, |ui| {
         ui.horizontal_wrapped(|ui| {
-            let label = ui.label(text(Type::Label, tr!("Instances")));
+            ui.label(text(Type::Label, tr!("Instances")));
             changed |= with_type(ui, Type::Data, |ui| ui.add(egui::DragValue::new(&mut settings.count).range(1..=500)))
-                .labelled_by(label.id)
+                .named(tr!("Instances"))
                 .changed();
         });
         match mode {
@@ -756,6 +805,79 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
         changed |= crate::theme::checkbox(ui, &mut settings.backwards, tr!("Stack first copy in front")).changed();
     });
     changed
+}
+
+fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut PropertyStop>, has_successor: bool) -> bool {
+    fn mode_label(mode: ArrayEaseMode) -> &'static str {
+        match mode {
+            ArrayEaseMode::Global => tr!("Global"),
+            ArrayEaseMode::PerSegment => tr!("Per Segment"),
+        }
+    }
+    let before = easing.clone();
+    let mut local_changed = false;
+    form_row(ui, FORM_LABEL_DOCK, tr!("Mode"), |ui| {
+        egui::ComboBox::from_id_salt("array_ease_mode")
+            .width(144.0).truncate().selected_text(mode_label(easing.mode))
+            .show_ui(ui, |ui| {
+                for mode in [ArrayEaseMode::Global, ArrayEaseMode::PerSegment] {
+                    ui.selectable_value(&mut easing.mode, mode, mode_label(mode));
+                }
+            }).response.named(tr!("Easing mode"));
+    });
+    form_row(ui, FORM_LABEL_DOCK, tr!("Ease"), |ui| {
+        match easing.mode {
+            ArrayEaseMode::Global => {
+                if let Some(preset) = crate::ease_editor::named_picker(ui, "array_ease_preset", &easing.preset, 144.0, tr!("Ease")) {
+                    easing.preset = preset;
+                }
+            }
+            ArrayEaseMode::PerSegment => {
+                let marker = selected.as_ref().map(|stop| stop.marker_id());
+                let current = selected.as_ref().and_then(|stop| stop.value.outbound.as_ref()).unwrap_or(&Easing::Linear);
+                let pick = ui.add_enabled_ui(has_successor, |ui| {
+                    ui.push_id(marker, |ui| crate::ease_editor::named_picker(ui, "array_segment_preset", current, 144.0, tr!("Ease"))).inner
+                });
+                pick.response.on_disabled_hover_text(tr!("The final stop has no outgoing segment."));
+                if let Some(preset) = pick.inner
+                    && let Some(stop) = selected
+                {
+                    let next = (preset != Easing::Linear).then_some(preset);
+                    local_changed = stop.value.outbound != next;
+                    stop.value.outbound = next;
+                }
+            }
+        }
+    });
+    ui.label(text(Type::Label, tr!("Apply to")));
+    let labels = [tr!("Distribution"), tr!("Transform"), tr!("Colour Effect"), tr!("Filters")];
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let longest = labels.iter().map(|label| {
+        ui.painter().layout_no_wrap((*label).into(), font.clone(), ui.visuals().text_color()).size().x
+    }).fold(0.0, f32::max);
+    let gap = ui.spacing().item_spacing.x;
+    let columns = if 2.0 * (longest + crate::theme::TARGET) + gap <= ui.available_width() { 2 } else { 1 };
+    let width = (ui.available_width() - (columns - 1) as f32 * gap) / columns as f32;
+    let mut filters = false;
+    egui::Grid::new("array_ease_targets").num_columns(columns).min_col_width(width).max_col_width(width)
+        .show(ui, |ui| {
+            let targets = [
+                (&mut easing.distribution, true), (&mut easing.transform, true),
+                (&mut easing.colour_effect, true), (&mut filters, false),
+            ];
+            for (index, (label, (target, enabled))) in labels.into_iter().zip(targets).enumerate() {
+                if enabled {
+                    crate::theme::checkbox(ui, target, label);
+                } else {
+                    ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, target, label))
+                        .inner.on_disabled_hover_text(tr!("Available when filter stops support interpolation."));
+                }
+                if (index + 1).is_multiple_of(columns) {
+                    ui.end_row();
+                }
+            }
+        });
+    local_changed || *easing != before
 }
 
 fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
@@ -1320,6 +1442,226 @@ mod tests {
     }
 
     #[test]
+    fn easing_controls_preview_and_follow_session_history_and_draft_lifecycle() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let original = app.array_panel.settings.clone().unwrap();
+        let steps = app.s.history_len();
+        let node = |app: &mut App, label: &str| {
+            nodes(&ctx, app).into_iter().find(|(_, node)| node.label() == Some(label))
+                .unwrap_or_else(|| panic!("missing Array control {label}")).1
+        };
+        let choose = |app: &mut App, control, option| {
+            let combo = nodes(&ctx, app).into_iter().find(|(_, node)| {
+                node.role() == Role::ComboBox && node.label() == Some(control)
+            }).unwrap().1;
+            click(&ctx, app, &combo);
+            let option = node(app, option);
+            click(&ctx, app, &option);
+            nodes(&ctx, app);
+        };
+        let sampled_x = |app: &App| app.s.selected_elements()[3].1.transform.m[4];
+        let line_x = sampled_x(&app);
+        let header = node(&mut app, "Easing");
+        click(&ctx, &mut app, &header);
+        assert!(node(&mut app, "Filters").is_disabled());
+        choose(&mut app, "Ease", "Sine Out");
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().easing.preset, Easing::SineOut);
+        assert!(sampled_x(&app) > line_x);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(sampled_x(&app), line_x);
+        choose(&mut app, "Ease", "Back Out");
+        assert!(sampled_x(&app) > line_x);
+        choose(&mut app, "Easing mode", "Per Segment");
+        assert_eq!(sampled_x(&app), line_x);
+        choose(&mut app, "Ease", "Quad Out");
+        let target = nodes(&ctx, &mut app).into_iter().find(|(_, n)| {
+            n.role() == Role::CheckBox && n.label() == Some("Distribution")
+        }).unwrap().1;
+        click(&ctx, &mut app, &target);
+        assert_eq!(sampled_x(&app), line_x);
+        let draft = app.array_panel.settings.clone().unwrap();
+        assert_eq!(draft.stops[0].value.outbound, Some(Easing::QuadOut));
+        assert_eq!(draft.stops[1], original.stops[1]);
+        assert_eq!(draft.easing, ArrayEasing {
+            mode: ArrayEaseMode::PerSegment, preset: Easing::BackOut, distribution: false, ..ArrayEasing::default()
+        });
+        assert_eq!(app.array_panel.active.as_ref().unwrap().history.undo.len(), 4);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert!(sampled_x(&app) > line_x);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&draft));
+        assert_eq!(sampled_x(&app), line_x);
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&draft));
+        app.array_panel.select_mode(&mut app.s, None);
+        assert_eq!(app.s.history_len(), steps);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&draft));
+        assert!(!app.array_panel.can_step(false));
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.history_len(), steps + 1);
+        let baked = app.s.selection.ids().next().unwrap();
+        app.s.select_only([baked]);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().easing, ArrayEasing::default());
+        app.array_panel.finish(&mut app.s, false);
+    }
+
+    #[test]
+    fn outbound_picker_follows_the_selected_stop_and_history() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(app.array_panel.selected_stop, Some(0));
+        let named = |app: &mut App, label: &str| {
+            nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label))
+                .unwrap_or_else(|| panic!("missing {label}")).1
+        };
+        let picker = |app: &mut App, label: &str| {
+            nodes(&ctx, app).into_iter().find(|(_, n)| n.role() == Role::ComboBox && n.label() == Some(label)).unwrap().1
+        };
+        let choose = |app: &mut App, control, option| {
+            let combo = picker(app, control);
+            click(&ctx, app, &combo);
+            let option = named(app, option);
+            click(&ctx, app, &option);
+        };
+        let select = |app: &mut App, number| {
+            let prefix = format!("Array stop {number} of");
+            let stop = nodes(&ctx, app).into_iter().find(|(_, n)| n.label().is_some_and(|label| label.starts_with(&prefix))).unwrap().1;
+            click(&ctx, app, &stop);
+        };
+        let check = |app: &mut App, value, disabled| {
+            let picker = picker(app, "Ease");
+            assert_eq!(picker.value(), Some(value));
+            assert_eq!(picker.is_disabled(), disabled);
+        };
+        let header = named(&mut app, "Easing");
+        click(&ctx, &mut app, &header);
+        choose(&mut app, "Ease", "Back Out");
+        choose(&mut app, "Easing mode", "Per Segment");
+        check(&mut app, "Linear", false);
+        choose(&mut app, "Ease", "Quad Out");
+
+        let track = named(&mut app, "Array: add a property stop");
+        click(&ctx, &mut app, &track);
+        let inserted = app.array_panel.settings.clone().unwrap();
+        let marker = inserted.stops[1].marker_id();
+        assert_eq!(app.array_panel.selected_stop, Some(marker));
+        assert_eq!(inserted.stops[1].value.outbound, Some(Easing::QuadOut));
+        check(&mut app, "Quad Out", false);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops.len(), 2);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&inserted));
+        choose(&mut app, "Ease", "Sine In");
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        check(&mut app, "Quad Out", false);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        check(&mut app, "Sine In", false);
+        select(&mut app, 1);
+        check(&mut app, "Quad Out", false);
+        select(&mut app, 3);
+        check(&mut app, "Linear", true);
+        assert!(!named(&mut app, "Alpha").is_disabled());
+        choose(&mut app, "Easing mode", "Global");
+        check(&mut app, "Back Out", false);
+        choose(&mut app, "Ease", "Bounce Out");
+        choose(&mut app, "Easing mode", "Per Segment");
+        check(&mut app, "Linear", true);
+        select(&mut app, 2);
+        check(&mut app, "Sine In", false);
+        let remove = named(&mut app, "Remove array stop");
+        click(&ctx, &mut app, &remove);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.outbound, Some(Easing::QuadOut));
+        check(&mut app, "Linear", true);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.selected_stop, Some(marker));
+        check(&mut app, "Sine In", false);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        check(&mut app, "Linear", true);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().easing.preset, Easing::BounceOut);
+    }
+
+    #[test]
+    fn quitting_resolves_array_before_the_normal_document_save_flow() {
+        for (choice, dirty, apply, cancel_save) in [
+            ("Keep Editing", false, false, false),
+            ("Discard Array and Quit", false, false, false),
+            ("Discard Array and Quit", true, false, true),
+            ("Apply Array and Quit", false, true, true),
+            ("Apply Array and Quit", false, true, false),
+        ] {
+            let (mut app, ctx) = linear_app();
+            if !dirty { app.s.mark_saved(); }
+            let (original, steps) = (app.s.doc.clone(), app.s.history_len());
+            app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+            let mut ends = app.array_panel.gizmo_endpoints().unwrap();
+            ends.end[0] += 40.0;
+            app.array_panel.set_endpoints(&mut app.s, ends);
+            let (preview, draft) = (app.s.doc.clone(), app.array_panel.settings.clone());
+            nodes(&ctx, &mut app);
+            if choice == "Keep Editing" {
+                app.shot = None;
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 940.0))),
+                    ..Default::default()
+                };
+                input.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+                let mut output = ctx.run_ui(input, |ui| app.frame(ui));
+                output.textures_delta.clear();
+                assert!(output.viewport_output.values().any(|viewport| viewport.commands.contains(&egui::ViewportCommand::CancelClose)));
+            } else if apply {
+                history_key(&ctx, &mut app, Key::Q, Modifiers::NONE);
+            } else if dirty && crate::platform::OS != crate::platform::Os::Mac && !crate::platform::WEB {
+                frame(&ctx, &mut app, vec![Event::Key {
+                    key: Key::F, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::ALT,
+                }]);
+                let menu = nodes(&ctx, &mut app);
+                let exit = menu.iter().find(|(_, n)| n.label().is_some_and(|label| label.starts_with("Exit")))
+                    .unwrap_or_else(|| panic!("Exit menu item missing: {:?}", menu.iter().filter_map(|(_, n)| n.label()).collect::<Vec<_>>())).1.clone();
+                click(&ctx, &mut app, &exit);
+            } else {
+                app.system_request(crate::platform::SystemRequest::Quit);
+            }
+            assert!(app.array_quit_pending && app.s.array_preview_active() && !app.tabs.asking());
+            let button = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some(choice)).unwrap().1;
+            click(&ctx, &mut app, &button);
+            assert!(!app.array_quit_pending);
+            if choice == "Keep Editing" {
+                assert!(app.s.array_preview_active() && app.array_panel.can_step(false));
+                assert!(app.s.doc == preview && app.array_panel.settings == draft);
+                assert!(!app.allow_close && app.tabs.closing.is_none());
+                continue;
+            }
+            assert!(!app.s.array_preview_active());
+            assert_eq!(app.s.history_len(), steps + usize::from(apply));
+            assert!(app.s.doc == if apply { preview } else { original });
+            if dirty || apply {
+                assert!(app.tabs.asking() && !app.allow_close);
+                if !cancel_save {
+                    let discard = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Don't Save")).unwrap().1;
+                    click(&ctx, &mut app, &discard);
+                    assert!(app.allow_close && app.tabs.closing.is_none());
+                    continue;
+                }
+                let cancel = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1;
+                click(&ctx, &mut app, &cancel);
+                assert!(!app.allow_close && app.tabs.closing.is_none() && !app.modal_open());
+                assert!(!app.s.array_preview_active());
+                if apply {
+                    assert!(app.array_panel.settings.is_none());
+                } else {
+                    assert_eq!(app.array_panel.settings, draft);
+                }
+            } else {
+                assert!(app.allow_close);
+            }
+        }
+    }
+
+    #[test]
     fn array_history_exits_keep_the_draft_and_leave_document_redo_intact() {
         let (mut app, ctx) = linear_app();
         app.s.execute("element.translate", &json!({"dx": 10, "dy": 0})).unwrap();
@@ -1364,7 +1706,7 @@ mod tests {
         let field = |app: &mut App, label: &str| {
             nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label)).unwrap()
         };
-        let value = |app: &App, i: usize| app.array_panel.settings.as_ref().unwrap().stops.get(i).unwrap().value;
+        let value = |app: &App, i: usize| app.array_panel.settings.as_ref().unwrap().stops.get(i).unwrap().value.clone();
         let last = |app: &App| app.s.selected_elements().last().unwrap().1.transform;
         assert_eq!(value(&app, 0), ArrayPropertyStop::new(0.0, 1.0));
         let before = last(&app);
@@ -1606,9 +1948,13 @@ mod tests {
         assert_eq!(typed.end[0], 620.0);
         preview_ends(&app, typed);
 
+        // Leave room for the full distribution section in this dock viewport.
+        let stops = fields.iter().find(|(_, node)| node.label() == Some("Property stops")).unwrap().1.clone();
+        click(&ctx, &mut app, &stops);
         let fields = nodes(&ctx, &mut app);
-        let count_label = fields.iter().find(|(_, n)| n.value() == Some("Instances")).unwrap().0;
-        let count = fields.iter().find(|(_, n)| n.role() == Role::SpinButton && n.labelled_by().contains(&count_label)).unwrap().0;
+        let count = fields.iter().find(|(_, n)| n.label() == Some("Instances") && n.numeric_value() == Some(10.0))
+            .unwrap_or_else(|| panic!("Instances control missing from Array accessibility tree: {:?}", fields.iter()
+                .filter_map(|(_, n)| n.label().map(|label| (n.role(), label, n.numeric_value()))).collect::<Vec<_>>())).0;
         set_number(&ctx, &mut app, count, 1.0);
         assert_eq!(app.s.selection.len(), 1);
         assert_eq!(app.array_panel.gizmo_endpoints(), Some(typed));

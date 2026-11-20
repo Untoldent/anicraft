@@ -323,7 +323,7 @@ fn gradient(ui: &mut egui::Ui, popup: Id, stops: &[GradientStop], spread: Spread
     out
 }
 
-trait TrackStop: Copy + PartialEq {
+trait TrackStop: Clone + PartialEq {
     const ARRAY: bool;
     const LIMIT: usize;
     fn offset(&self) -> f32;
@@ -345,7 +345,7 @@ impl TrackStop for GradientStop {
 }
 
 /// An Array stop has a stable marker so it stays grabbed when it crosses another stop.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PropertyStop {
     marker: usize,
     pub value: ArrayPropertyStop,
@@ -368,7 +368,14 @@ impl TrackStop for PropertyStop {
     fn colour(&self) -> Option<Rgba> { None }
     fn sample(stops: &[Self], offset: f32) -> Self {
         let marker = (0..Self::LIMIT).find(|i| stops.iter().all(|s| s.marker != *i)).unwrap_or(Self::LIMIT);
-        Self { marker, value: ArrayPropertyStop::sample(stops.iter().map(|s| s.value), offset) }
+        let mut value = ArrayPropertyStop::sample(stops.iter().map(|s| &s.value), offset);
+        let next = stops.partition_point(|s| s.offset() <= offset);
+        value.outbound = if next < stops.len() {
+            next.checked_sub(1).and_then(|i| stops.get(i)).and_then(|s| s.value.outbound.clone())
+        } else {
+            None
+        };
+        Self { marker, value }
     }
     fn marker(&self, _: usize) -> usize { self.marker }
 }
@@ -464,7 +471,7 @@ fn stop_bar_with<S: TrackStop>(
     let mut tearing: Option<usize> = ui.data(|d| d.get_temp(tear_id));
     let count = stops.len();
     for i in 0..count {
-        let Some(st) = stops.get(i).copied() else { continue };
+        let Some(st) = stops.get(i).cloned() else { continue };
         let off = st.offset();
         let marker = st.marker(i);
         let x = strip.left() + off.clamp(0.0, 1.0) * strip.width();
@@ -578,7 +585,7 @@ fn stop_bar_with<S: TrackStop>(
         changed = Some((if array { tr_noop!("Remove array stop") } else { tr_noop!("Remove colour stop") }, false));
     }
     // Typed positions and Array drags can pass a neighbour. The pick follows its stop.
-    if let Some(picked) = stops.get(sel).copied() {
+    if let Some(picked) = stops.get(sel).cloned() {
         stops.sort_by(|a, b| a.offset().total_cmp(&b.offset()));
         sel = stops.iter().position(|s| *s == picked).unwrap_or(sel);
     }
@@ -680,6 +687,24 @@ mod tests {
     }
 
     #[test]
+    fn a_property_stop_inherits_only_when_it_splits_an_outbound_segment() {
+        use anicraft_engine::doc::Easing;
+        let mut stops = vec![PropertyStop::new(0, 0.2, 1.0), PropertyStop::new(1, 0.8, 1.0)];
+        stops[0].value.outbound = Some(Easing::QuadOut);
+        stops[1].value.outbound = Some(Easing::BounceOut);
+        assert_eq!(add_stop(&mut stops, 0.5), Some(1));
+        assert_eq!(stops[1].value.outbound, Some(Easing::QuadOut));
+        stops[1].value.outbound = Some(Easing::QuadIn);
+        assert!(remove_stop(&mut stops, 1));
+        assert_eq!(stops[0].value.outbound, Some(Easing::QuadOut));
+        assert_eq!(add_stop(&mut stops, 1.0), Some(2));
+        assert!(stops[2].value.outbound.is_none());
+        assert_eq!(stops[1].value.outbound, Some(Easing::BounceOut));
+        assert_eq!(add_stop(&mut stops, 0.0), Some(0));
+        assert!(stops[0].value.outbound.is_none());
+    }
+
+    #[test]
     fn property_track_samples_all_values_and_keeps_a_dragged_stop_through_reordering() {
         let ctx = egui::Context::default();
         let id = Id::new("property_stop_test");
@@ -693,7 +718,7 @@ mod tests {
         track_frame(&ctx, id, &mut stops, vec![egui::Event::PointerMoved(at), track_click(at, true)]);
         track_frame(&ctx, id, &mut stops, vec![track_click(at, false)]);
         track_frame(&ctx, id, &mut stops, vec![]);
-        let picked = stops[1];
+        let picked = stops[1].clone();
         assert!((picked.value.offset - 0.4).abs() < 1e-4);
         assert!((picked.value.alpha - (0.75 + 0.25 * 0.4 / 0.7)).abs() < 1e-4);
         assert!((picked.value.scale[0] - 1.4).abs() < 1e-4);

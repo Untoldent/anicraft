@@ -33,7 +33,7 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.separator();
                 if ui_item(ui, tr!("Quit AniCraft"), "Ctrl+Q", None) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    crate::tabs::quit(app);
                 }
             });
         }
@@ -617,7 +617,7 @@ pub(crate) fn menu_contents(app: &mut App, ui: &mut egui::Ui, top: &str, cmds: &
         "File" if platform::OS != Os::Mac && !platform::WEB => {
             ui.separator();
             if ui_item(ui, tr!("Exit"), "Ctrl+Q", None) {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                crate::tabs::quit(app);
             }
         }
         "Edit" if platform::OS != Os::Mac => {

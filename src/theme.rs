@@ -1135,11 +1135,20 @@ pub fn section<R>(ui: &mut egui::Ui, id: &str, style: Section, title: &str, deta
     section_with_header(ui, id, style, title, detail, add).1
 }
 
+/// A section whose initial state can differ from the standard open state.
+pub fn section_with_default<R>(ui: &mut egui::Ui, id: &str, style: Section, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    section_body(ui, id, style, title, None, open, add).1
+}
+
 /// [`section`], also returning its header (a panel's keyboard anchor, `a11y::anchor`).
 pub fn section_with_header<R>(ui: &mut egui::Ui, id: &str, style: Section, title: &str, detail: Option<&str>, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, Option<R>) {
+    section_body(ui, id, style, title, detail, true, add)
+}
+
+fn section_body<R>(ui: &mut egui::Ui, id: &str, style: Section, title: &str, detail: Option<&str>, default_open: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, Option<R>) {
     use egui::{Sense, StrokeKind, pos2, vec2};
     let key = ui.make_persistent_id(("section", id));
-    let mut open = ui.data_mut(|d| *d.get_temp_mut_or(key, true));
+    let mut open = ui.data_mut(|d| *d.get_temp_mut_or(key, default_open));
     let height = if style == Section::Band { 32.0 } else { TARGET };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     if resp.clicked() {

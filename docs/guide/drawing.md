@@ -559,6 +559,14 @@ closed seam, grab Start from the middle and End from the surrounding ring, inclu
 its outline. Drag **Drift** in any direction to steer successive turns. The distance from Centre
 to Drift indicates the displacement over one turn. Drag their connecting bar to move the array.
 
+Use **Easing** above the property track to change how values progress along the Array. **Global**
+applies across the whole track. **Per Segment** lets you select a stop and set how the next
+segment eases. The final stop's Ease picker is disabled. Inserting a stop between two stops
+copies the ease from the stop on its left. Choose which families to ease under **Apply to**.
+The curve thumbnails use the same named presets as Classic and Motion Tweens.
+Distribution changes the placement along the path. **Back Out** can place copies past End
+or across a closed loop's seam.
+
 Click the property track to add a stop. Drag a stop to move it or enter its position as a
 percentage. In **Transform**, drag a Scale or Rotation value horizontally or click it to type.
 Scale multiplies the original instance's size on each axis. **Lock scale** keeps the selected stop's

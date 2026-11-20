@@ -578,6 +578,7 @@ pub struct App {
     /// The open documents (ADR 0112): the one being edited is `s`, the others wait in their
     /// tabs. Closing one, or the window, with unsaved changes asks first (`tabs::CloseFlow`).
     pub tabs: crate::tabs::Tabs,
+    pub(crate) array_quit_pending: bool,
     /// The window may close: every document's unsaved changes were saved or given up.
     pub allow_close: bool,
     /// The file dialog a command asked for (command, parameter, title, file name), shown at the
@@ -874,6 +875,7 @@ impl App {
             ease: None,
             show_shortcuts: false,
             tabs: crate::tabs::Tabs::new(placeholder),
+            array_quit_pending: false,
             allow_close: false,
             #[cfg(not(target_arch = "wasm32"))]
             file_request: None,
@@ -1019,10 +1021,10 @@ impl App {
     /// Something the system asked of the app outside its windows (ADR 0062): documents open as
     /// a drop on the window does, through the unsaved-changes guard; a quit goes through the
     /// close guard.
-    pub fn system_request(&mut self, ctx: &egui::Context, r: platform::SystemRequest) {
+    pub fn system_request(&mut self, r: platform::SystemRequest) {
         match r {
             platform::SystemRequest::Open(files) => crate::drop::open_from_system(self, &files),
-            platform::SystemRequest::Quit => ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close),
+            platform::SystemRequest::Quit => crate::tabs::quit(self),
         }
     }
 
@@ -3013,8 +3015,13 @@ impl App {
                 }
                 self.script_keys([(Key::E, Modifiers::ALT)]);
             }
+            Some("array-quit") if self.shot.is_some() => {
+                crate::array_panel::screenshot(self, "array-transform");
+                crate::tabs::quit(self);
+            }
             Some(which) if self.shot.is_some()
-                && (which.starts_with("array-radial-open:") || matches!(which, "array-transform" | "array-transform-radial")) => {
+                && (which.starts_with("array-radial-open:") || matches!(which, "array-transform" | "array-transform-radial"
+                    | "array-easing-global" | "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end")) => {
                 crate::array_panel::screenshot(self, which);
             }
             Some(which @ ("gradient" | "gradientbucket")) => {
@@ -3282,6 +3289,10 @@ impl App {
 
     /// Any modal (prompt, confirmation, close guard) is open: global shortcuts pause.
     pub fn modal_open(&self) -> bool {
+        self.array_quit_pending || self.document_modal_open()
+    }
+
+    pub(crate) fn document_modal_open(&self) -> bool {
         self.prompt.is_some() || self.convert.is_some() || self.shape_dialog.is_some() || self.audio_keys.is_some() || self.confirm.is_some() || self.tabs.asking() || self.plugin_dialog.is_some() || self.templates.save.is_some()
     }
 
@@ -4003,7 +4014,7 @@ impl App {
         }
         if quit {
             // Goes through the close guard, so unsaved work is never lost.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            crate::tabs::quit(self);
         }
         if palette {
             self.palette = if self.palette.is_some() { None } else { Some(dialogs::Palette::default()) };
@@ -4568,7 +4579,15 @@ impl App {
                 platform::push_request(r);
                 continue;
             }
-            self.system_request(&ctx, r);
+            self.system_request(r);
+        }
+        // Cancel the native close before drawing either question. The close flow sends another
+        // Close once all decisions are made.
+        if !self.allow_close && self.shot.is_none() && ctx.input(|i| i.viewport().close_requested())
+            && (self.s.array_preview_active() || self.tabs.closing.is_some() || crate::tabs::any_dirty(self))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            crate::tabs::quit(self);
         }
         if self.glyph_check {
             // Fonts installed last frame are live now: can they draw the macOS key symbols?
@@ -4668,12 +4687,6 @@ impl App {
         crate::envelope::show(self, &ctx);
         crate::ease_editor::show(self, &ctx);
 
-        // Never lose work on close: intercept it while any open document has unsaved changes,
-        // and ask once for all of them (ADR 0004, ADR 0112).
-        if !self.allow_close && ctx.input(|i| i.viewport().close_requested()) && self.shot.is_none() && (self.s.array_preview_active() || crate::tabs::any_dirty(self)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            crate::tabs::quit(self);
-        }
         // Closing tabs, or the window: the next step once a question is answered or a save done.
         crate::tabs::tick(self, &ctx);
         self.files_window(&ctx);

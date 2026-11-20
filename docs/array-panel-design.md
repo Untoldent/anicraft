@@ -54,8 +54,8 @@ unavailable, rather than pretending they generate anything.
 
 Use **Undo** and **Redo** from the Edit menu or its shortcuts to move through edits in the
 current Array session. Ctrl+Shift+Z also invokes Redo while Array mode is active. Each history
-step restores the distribution type, both sets of geometry, count, stacking, every property
-stop, and the corresponding stop selection. The preview is regenerated from the same source.
+step restores the distribution type, both sets of geometry, count, stacking, easing, every
+property stop, and the corresponding stop selection. The preview is regenerated from the same source.
 
 Stage, stop, and numeric drags each make one step when the pointer is released. A drag of the
 Spiral End handle groups Sweep and Spiral Offset into that step. Numeric typing previews live
@@ -68,9 +68,21 @@ result in one document-level step. Cancel, Escape, and None keep the current dra
 source remains selected, then discard the session history. Reopening the draft starts a fresh
 Array history. Only the compact Array settings are stored per step.
 
+### Quitting with an Array preview
+
+The window close button, application menu and Quit shortcut open the same Array question.
+**Apply Array and Quit** commits the preview in one document undo step.
+**Discard Array and Quit** restores the original artwork without a document undo step.
+**Keep Editing** or Escape dismisses the question and keeps the preview and its session history.
+An invalid preview leaves Discard and Keep Editing available.
+
+After Apply or Discard, the regular document close flow checks for unsaved changes across all tabs.
+Cancelling that second question leaves AniCraft open with the Array already applied or discarded,
+according to the earlier choice. A discarded draft can still be reopened while its source remains selected.
+
 ### Remembering versus resetting
 
-Keep one unfinished configuration, including geometry for each array type and property stops,
+Keep one unfinished configuration, including geometry for each array type, easing and property stops,
 after Cancel, Escape or None. Clear the draft as soon as the source selection changes or another
 document becomes active. Returning to the original instance then starts with fresh defaults.
 Commit clears the configuration. Dim Stage and gizmo visibility carry over across every exit
@@ -100,6 +112,7 @@ is required now.
   but without dividing by zero.
 - Start and End are authoritative in the panel and on stage. Coordinates, Direction, Length,
   Spacing X and Spacing Y use the same draggable and typeable fields as Instances.
+  With Distribution easing, Spacing X/Y show the nominal spacing across the full span.
   Derived edits hold Start fixed and move End. Direction preserves length, Length preserves
   direction, and a spacing component changes only its corresponding axis. At zero length a
   new length extends along +X and Direction becomes available again. Changing count keeps both
@@ -206,12 +219,47 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   Future stops may alter those existing filter values but do not add/delete
   filter types. Give each filter a rounded container within the Filters section, following
   AniCraft's Filters UI. Filter interpolation is a later increment.
-- Future multiple-property stops share one set of stop positions; optional
-  easing applies between stops.
+- Property families share one set of stop positions.
 - Future z-order interpolation can sample numeric depths and then sort copies
   stably, since visual stacking is discrete.
 - A radial alpha progression of 100% -> 0% -> 100% can be achieved with three
   stops. Do not impose aesthetic loop-correction rules.
+
+### Easing
+
+The Easing section above the track offers **Global** and **Per Segment**. The Ease picker shares
+the named presets and curve thumbnails used by Classic and Motion Tweens
+([ADR 0081](adr/0081-ease-presets-and-custom-eases.md)). New named families appear in Array
+automatically. The default is Global with Linear, and the default section starts collapsed to
+keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
+Distribution, Transform and Colour Effect start checked and can each use
+ordinary linear progression when unchecked. Filters is disabled until filter interpolation exists.
+
+- **Global** remaps the complete 0–100% progression before looking up values along the track.
+  Intermediate values can be reached sooner or later while the authored stops stay in place.
+- **Per Segment** uses the outbound preset on each stop for the interval up to the next stop.
+  Exactly one stop is selected. Its preset appears in the picker, which is disabled on the
+  final stop while its properties remain editable. Reordering carries each preset with its
+  stop. Global and outbound presets are independent and survive mode changes.
+- Inserting a stop between two stops copies the left stop's preset to the new stop. A new
+  first or last stop starts with Linear. Deleting a stop leaves the surviving curves intact.
+  The new stop is selected on insertion. After deletion the next available stop is selected.
+- Segment boundaries stay fixed. When stops are inset, Distribution uses Linear between
+  the track edge and the first or last authored stop. Transform and Colour Effect hold the
+  nearest stop outside the authored range.
+  Exactly coincident stops keep the stop track's existing sampling order. Spans no wider than
+  floating-point epsilon avoid a division.
+- Distribution easing changes where the instances sample the path. The path, the guide, the
+  numeric settings and the closed-loop interval count stay fixed. **Rotate instances** follows
+  the eased angular position when Distribution is checked.
+- Curves with overshoot, such as **Back Out** and **Elastic In**, can travel beyond an interval
+  or either end of the path. Closed radial curves wrap across the seam. Open arcs and spirals
+  extend their sweep, radial offset and Centre Drift beyond the guide. A one-instance array
+  stays at Start.
+- In Per Segment mode, a property that overshoots continues the current segment's interpolation.
+  Global overshoot continues from the track endpoint's value using the nearest usable stop span.
+  Alpha and Scale remain in their valid ranges. Rotation uses the unwrapped authored degrees.
+  Adding a stop samples the authored values at its track position.
 
 ## Future distribution modes (not in this milestone)
 
@@ -250,8 +298,11 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
    independent radial growth and centre displacement, and signed sweep winding during a drag.
 7. **Transform property stops** adds independent scale axes, the Scale lock and additive rotation.
 8. **Session undo and redo** covers coalesced gestures, numeric edits, and the single-step Commit.
-9. Later: Grid, Path/node placement, more stop properties,
-   filter interpolation, easing, Chaos, multi-selection, optional grouping/merging.
+9. **Easing** covers global and per-segment presets, independent family assignment, and overshoot.
+10. **Independent outbound easing and Quit** covers stop-owned presets, insertion inheritance,
+    and resolving a preview before the normal Save/Discard/Cancel question.
+11. Later: Grid, Path/node placement, more stop properties, filter interpolation, custom easing,
+    Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
 checks as prescribed by AGENTS.md. Add lifecycle regression tests for: an

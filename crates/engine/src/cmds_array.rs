@@ -7,7 +7,7 @@
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
-use anicraft_doc::{Element, ElementId, ElementKind};
+use anicraft_doc::{Easing, Element, ElementId, ElementKind};
 use anicraft_geom::{Affine, Vec2};
 use serde_json::{Value, json};
 use std::ops::Range;
@@ -15,6 +15,123 @@ use std::sync::Arc;
 
 const MAX_COPIES: u32 = 500;
 pub const CLOSED_SWEEP_LIMIT: f32 = 360.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArrayEaseMode {
+    #[default]
+    Global,
+    PerSegment,
+}
+
+impl ArrayEaseMode {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::PerSegment => "per_segment",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArrayEasing {
+    pub mode: ArrayEaseMode,
+    pub preset: Easing,
+    pub distribution: bool,
+    pub transform: bool,
+    pub colour_effect: bool,
+}
+
+impl Default for ArrayEasing {
+    fn default() -> Self {
+        Self {
+            mode: ArrayEaseMode::Global, preset: Easing::Linear,
+            distribution: true, transform: true, colour_effect: true,
+        }
+    }
+}
+
+impl ArrayEasing {
+    fn parse(params: &Value) -> Result<Self> {
+        let defaults = Self::default();
+        let Some(easing) = params.get("easing") else { return Ok(defaults) };
+        if !easing.is_object() {
+            return Err(EngineError::Param("easing must be an object".into()));
+        }
+        let mode = match opt_str(easing, "mode")? {
+            None | Some("global") => ArrayEaseMode::Global,
+            Some("per_segment") => ArrayEaseMode::PerSegment,
+            Some(other) => return Err(EngineError::Param(format!("unknown Array easing mode '{other}'"))),
+        };
+        let preset = opt_named_ease(easing, "preset")?.unwrap_or(defaults.preset);
+        Ok(Self {
+            mode, preset,
+            distribution: opt_bool(easing, "distribution")?.unwrap_or(defaults.distribution),
+            transform: opt_bool(easing, "transform")?.unwrap_or(defaults.transform),
+            colour_effect: opt_bool(easing, "colour_effect")?.unwrap_or(defaults.colour_effect),
+        })
+    }
+
+    // A single Per Segment preset remains valid for command recordings without stop curves.
+    fn segment_default(&self, stops: &[ArrayPropertyStop]) -> &Easing {
+        if stops.iter().any(|stop| stop.outbound.is_some()) { &Easing::Linear } else { &self.preset }
+    }
+
+    fn eases_distribution(&self, stops: &[ArrayPropertyStop]) -> bool {
+        self.distribution && match self.mode {
+            ArrayEaseMode::Global => self.preset != Easing::Linear,
+            ArrayEaseMode::PerSegment => *self.segment_default(stops) != Easing::Linear
+                || stops.iter().take(stops.len().saturating_sub(1))
+                    .any(|stop| stop.outbound.as_ref().is_some_and(|ease| *ease != Easing::Linear)),
+        }
+    }
+
+    fn eased_position(&self, stops: &[ArrayPropertyStop], t: f64) -> f64 {
+        let progress = t as f32;
+        if self.mode == ArrayEaseMode::Global {
+            return f64::from(self.preset.apply(progress));
+        }
+        // The path always has boundaries at 0 and 1, even when the authored stops don't.
+        let next = stops.partition_point(|stop| stop.offset <= progress);
+        let left = next.checked_sub(1).and_then(|i| stops.get(i));
+        let right = stops.get(next);
+        let a = left.map_or(0.0, |stop| stop.offset);
+        let b = right.map_or(1.0, |stop| stop.offset);
+        let span = b - a;
+        if span <= f32::EPSILON || progress == a {
+            return t;
+        }
+        let outbound = left.filter(|_| right.is_some()).and_then(|stop| stop.outbound.as_ref())
+            .unwrap_or_else(|| self.segment_default(stops));
+        if *outbound == Easing::Linear { return t; }
+        f64::from(a + span * outbound.apply((progress - a) / span))
+    }
+
+    fn properties(&self, stops: &[ArrayPropertyStop], t: f32) -> ArrayPropertyStop {
+        let linear = || ArrayPropertyStop::sample(stops.iter(), t);
+        if !(self.transform || self.colour_effect) || (self.mode == ArrayEaseMode::Global && self.preset == Easing::Linear) {
+            return linear();
+        }
+        let mut eased = match self.mode {
+            ArrayEaseMode::Global => ArrayPropertyStop::sample_global(stops, self.preset.apply(t)),
+            ArrayEaseMode::PerSegment => ArrayPropertyStop::sample_segments(stops.iter(), t, Some(self.segment_default(stops))),
+        };
+        if !self.transform {
+            let base = linear();
+            eased.scale = base.scale;
+            eased.rotation = base.rotation;
+        } else if !self.colour_effect {
+            eased.alpha = linear().alpha;
+        }
+        eased
+    }
+}
+
+fn opt_named_ease(p: &Value, key: &str) -> Result<Option<Easing>> {
+    opt_str(p, key)?.map(|name| {
+        Easing::from_name(name).filter(|ease| ease.name().is_some())
+            .ok_or_else(|| EngineError::Param(format!("unknown Array easing preset '{name}'")))
+    }).transpose()
+}
 
 /// The same continuous curve used for Array placement and the editor's stage guide.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,12 +186,14 @@ impl RadialDistribution {
 }
 
 /// One property snapshot on the array's 0..1 progression.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ArrayPropertyStop {
     pub offset: f32,
     pub alpha: f32,
     pub scale: [f32; 2],
     pub rotation: f32,
+    /// None denotes a stop from a command with no authored outbound preset.
+    pub outbound: Option<Easing>,
 }
 
 impl ArrayPropertyStop {
@@ -83,34 +202,66 @@ impl ArrayPropertyStop {
     pub const ROTATION_LIMIT: f32 = 100_000.0;
 
     pub const fn new(offset: f32, alpha: f32) -> Self {
-        Self { offset, alpha, scale: [1.0; 2], rotation: 0.0 }
+        Self { offset, alpha, scale: [1.0; 2], rotation: 0.0, outbound: None }
     }
 
     /// Hold the endpoint value outside the first or last stop, as gradients do.
     /// Both the editor and command pass in stops sorted by position.
-    pub fn sample(stops: impl IntoIterator<Item = Self>, t: f32) -> Self {
+    pub fn sample<'a>(stops: impl IntoIterator<Item = &'a Self>, t: f32) -> Self {
+        Self::sample_segments(stops, t, None)
+    }
+
+    fn sample_segments<'a>(stops: impl IntoIterator<Item = &'a Self>, t: f32, segment_default: Option<&Easing>) -> Self {
         let mut stops = stops.into_iter();
         let Some(mut a) = stops.next() else { return Self::new(t, 1.0) };
-        if t <= a.offset { return Self { offset: t, ..a }; }
+        if t <= a.offset { return Self { offset: t, ..a.clone() }; }
         for b in stops {
             if t <= b.offset {
                 let span = b.offset - a.offset;
-                if span <= f32::EPSILON || t == b.offset { return Self { offset: t, ..b }; }
-                let f = ((t - a.offset) / span).clamp(0.0, 1.0);
-                let blend = |a, b| a + (b - a) * f;
-                return Self {
-                    offset: t,
-                    alpha: blend(a.alpha, b.alpha),
-                    scale: [blend(a.scale[0], b.scale[0]), blend(a.scale[1], b.scale[1])],
-                    rotation: blend(a.rotation, b.rotation),
-                };
+                if span <= f32::EPSILON || t == b.offset { return Self { offset: t, ..b.clone() }; }
+                let ease = segment_default.map_or(&Easing::Linear, |default| a.outbound.as_ref().unwrap_or(default));
+                return a.blend(b, t, ease.apply((t - a.offset) / span));
             }
             a = b;
         }
-        Self { offset: t, ..a }
+        Self { offset: t, ..a.clone() }
     }
 
-    fn apply_transform(self, base: Affine, pivot: Option<Vec2>) -> Affine {
+    fn sample_global(stops: &[Self], t: f32) -> Self {
+        if (0.0..=1.0).contains(&t) {
+            return Self::sample(stops.iter(), t);
+        }
+        // Continue from the value at the edge of the track using the nearest usable
+        // stop span. A held margin inside the track keeps its original value.
+        let (boundary, end, other) = if t < 0.0 {
+            let Some(end) = stops.first() else { return Self::new(t, 1.0) };
+            (0.0, end, stops.iter().find(|stop| stop.offset - end.offset > f32::EPSILON))
+        } else {
+            // At a coincident endpoint, match the value that sampling exactly 1 returns.
+            let end = stops.get(stops.partition_point(|stop| stop.offset < 1.0)).or_else(|| stops.last());
+            let Some(end) = end else { return Self::new(t, 1.0) };
+            (1.0, end, stops.iter().rev().find(|stop| end.offset - stop.offset > f32::EPSILON))
+        };
+        other.map_or_else(|| Self { offset: t, ..end.clone() }, |other| {
+            end.blend(other, t, (t - boundary) / (other.offset - end.offset))
+        })
+    }
+
+    fn blend(&self, other: &Self, t: f32, f: f32) -> Self {
+        let blend = |a, b| a + (b - a) * f;
+        Self {
+            offset: t,
+            alpha: blend(self.alpha, other.alpha).clamp(0.0, 1.0),
+            scale: [
+                blend(self.scale[0], other.scale[0]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
+                blend(self.scale[1], other.scale[1]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
+            ],
+            rotation: blend(self.rotation, other.rotation),
+            outbound: None,
+        }
+    }
+
+    fn apply_transform(&self, base: Affine, pivot: Option<Vec2>) -> Affine {
         let [sx, sy] = self.scale;
         // Wrap after interpolation so full turns affect the intermediate copies.
         let degrees = self.rotation % CLOSED_SWEEP_LIMIT;
@@ -190,6 +341,7 @@ pub(super) struct PositionPreview {
     key: usize,
     instances: Range<usize>,
     reversed: bool,
+    eased_progress: Option<Vec<f64>>,
     params: Value,
 }
 
@@ -212,7 +364,8 @@ fn explicit_positions(p: &Value) -> Option<(Layout, &'static [&'static str])> {
 
 impl PositionPreview {
     fn new(s: &Session, p: &Value) -> Option<Self> {
-        explicit_positions(p)?;
+        let (layout, _) = explicit_positions(p)?;
+        let easing = ArrayEasing::parse(p).ok()?;
         let tl = s.timeline();
         if tl.has_rig() { return None; }
         let layer = tl.layer(s.layer)?;
@@ -224,16 +377,20 @@ impl PositionPreview {
         let instances = first..first + count;
         let reversed = p.get("stacking").and_then(Value::as_str) == Some("front_to_back");
         let copies = kf.elements.get(instances.clone())?;
+        let custom_pivot = copies.first()?.pivot().is_some() && p.get("property_stops").is_some();
+        let stops = parse_stops(p).ok()?.unwrap_or_default();
         // A transformed custom pivot can offset the copy from its layout position.
         // Replay from the source so those offsets stay exact after a move.
-        if copies.first()?.pivot().is_some() && p.get("property_stops").is_some()
-            && parse_stops(p).ok()?.is_some_and(|stops| stops.iter().any(|stop| stop.scale != [1.0; 2] || stop.rotation != 0.0))
-        {
+        if custom_pivot && stops.iter().any(|stop| stop.scale != [1.0; 2] || stop.rotation != 0.0) {
             return None;
         }
+        let eased_progress = easing.eases_distribution(&stops).then(|| {
+            let count = count as u32;
+            (0..count).map(|i| easing.eased_position(&stops, layout.progress(i, count))).collect()
+        });
         let ids = copies.iter().map(|e| e.id);
         let in_order = if reversed { ids.rev().eq(s.selection.ids()) } else { ids.eq(s.selection.ids()) };
-        in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, params: p.clone() })
+        in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, eased_progress, params: p.clone() })
     }
 
     fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
@@ -243,19 +400,31 @@ impl PositionPreview {
         }
         if old == new { return true; }
         let count = self.instances.len() as u32;
-        // Linear coordinates and nonrotating radial positions stay within finite bounds
-        // between their endpoints. The explicit inputs came through opt_f32.
-        if ![0, count.saturating_sub(1)].into_iter().all(|i| layout.place(Affine::IDENTITY, i, count).0.is_finite()) {
-            return false;
-        }
+        let place = |i, fraction| layout.place(Affine::IDENTITY, i, count, fraction).translation();
+        // Check every eased sample before changing anything. Back Out can exceed both the
+        // requested span and the nominal last sample, so checking endpoints isn't enough.
+        let eased_positions = if let Some(progress) = &self.eased_progress {
+            let positions: Vec<_> = progress.iter().enumerate().map(|(i, &t)| place(i as u32, Some(t))).collect();
+            if !positions.iter().all(|at| at.x.is_finite() && at.y.is_finite()) { return false; }
+            Some(positions)
+        } else {
+            if ![0, count.saturating_sub(1)].into_iter().all(|i| {
+                let at = place(i, None);
+                at.x.is_finite() && at.y.is_finite()
+            }) { return false; }
+            None
+        };
         let Some(instances) = s.layer_mut(None).ok().and_then(|layer| layer.keyframe_mut(self.key))
             .and_then(|kf| kf.elements.get_mut(self.instances.clone())) else { return false };
         let mut changed = false;
         for (i, el) in instances.iter_mut().enumerate() {
             let i = if self.reversed { count - 1 - i as u32 } else { i as u32 };
-            let (xf, _) = layout.place(el.transform, i, count);
-            if xf != el.transform {
-                Arc::make_mut(el).transform = xf;
+            let at = eased_positions.as_ref().and_then(|positions| positions.get(i as usize)).copied()
+                .unwrap_or_else(|| place(i, None));
+            if at != el.transform.translation() {
+                let xf = &mut Arc::make_mut(el).transform;
+                xf.m[4] = at.x;
+                xf.m[5] = at.y;
                 changed = true;
             }
         }
@@ -275,7 +444,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative)}. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?}}. Easing defaults to Global Linear with all three families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -310,6 +479,7 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
             let rotation = ArrayPropertyStop::ROTATION_LIMIT;
             stop.scale = [number("scale_x", -scale, scale, Some(1.0))?, number("scale_y", -scale, scale, Some(1.0))?];
             stop.rotation = number("rotation", -rotation, rotation, Some(0.0))?;
+            stop.outbound = opt_named_ease(v, "outbound_ease")?;
         }
         out.push(stop);
     }
@@ -324,24 +494,29 @@ enum Layout {
 }
 
 impl Layout {
-    fn place(self, source: Affine, index: u32, count: u32) -> (Affine, f32) {
+    fn progress(self, index: u32, count: u32) -> f64 {
+        let closed_loop = matches!(self, Layout::Radial(radial) if radial.closed_loop);
+        let divisor = count.saturating_sub(u32::from(!closed_loop)).max(1);
+        f64::from(index) / f64::from(divisor)
+    }
+
+    fn place(self, source: Affine, index: u32, count: u32, eased: Option<f64>) -> Affine {
         match self {
             Layout::Linear { start_x, start_y, dx, dy } => {
                 let mut m = source;
-                m.m[4] = start_x + index as f32 * dx;
-                m.m[5] = start_y + index as f32 * dy;
-                let t = if count <= 1 { 0.0 } else { index as f32 / (count - 1) as f32 };
-                (m, t)
+                let step = eased.map_or(index as f32, |t| (t * f64::from(count.saturating_sub(1))) as f32);
+                m.m[4] = start_x + step * dx;
+                m.m[5] = start_y + step * dy;
+                m
             }
             Layout::Radial(radial) => {
-                let divisor = count.saturating_sub(u32::from(!radial.closed_loop)).max(1);
-                let t = f64::from(index) / f64::from(divisor);
+                let t = eased.unwrap_or_else(|| self.progress(index, count));
                 // Rotate the basis by the signed travel, then set the registration point.
                 let mut m = if radial.rotate { Affine::rotate(radial.travel(t).to_radians() as f32).mul(&source) } else { source };
                 let at = radial.point(t);
                 m.m[4] = at.x;
                 m.m[5] = at.y;
-                (m, t as f32)
+                m
             }
         }
     }
@@ -378,6 +553,8 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         Some(other) => return Err(EngineError::Param(format!("unknown stacking '{other}'"))),
     };
     let stops = parse_stops(p)?;
+    let easing = ArrayEasing::parse(p)?;
+    let eased_distribution = easing.eases_distribution(stops.as_deref().unwrap_or_default());
     let Some((_, id)) = s.selection.first().filter(|(layer, _)| *layer == s.layer && s.selection.len() == 1) else {
         return Err(EngineError::State("select exactly one symbol instance on the active layer".into()));
     };
@@ -402,9 +579,11 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let mut copies: Vec<Arc<Element>> = Vec::with_capacity(count as usize);
     let mut ids: Vec<ElementId> = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let (base, t) = layout.place(original.transform, i, count);
-        let stop = stops.as_deref().map(|stops| ArrayPropertyStop::sample(stops.iter().copied(), t));
-        let transform = stop.map_or(base, |stop| stop.apply_transform(base, original.pivot()));
+        let t = layout.progress(i, count);
+        let eased = eased_distribution.then(|| easing.eased_position(stops.as_deref().unwrap_or_default(), t));
+        let base = layout.place(original.transform, i, count, eased);
+        let stop = stops.as_deref().map(|stops| easing.properties(stops, t as f32));
+        let transform = stop.as_ref().map_or(base, |stop| stop.apply_transform(base, original.pivot()));
         if !transform.is_finite() {
             return Err(EngineError::Param("array positions exceeded finite coordinate range".into()));
         }
@@ -440,9 +619,217 @@ mod tests {
     #[test]
     fn independent_stops_can_fade_out_then_back_in() {
         let stops = [st(0.0, 1.0), st(0.5, 0.0), st(1.0, 1.0)];
-        assert!((ArrayPropertyStop::sample(stops, 0.25).alpha - 0.5).abs() < 1e-6);
-        assert!((ArrayPropertyStop::sample(stops, 0.75).alpha - 0.5).abs() < 1e-6);
-        assert_eq!(ArrayPropertyStop::sample(stops, 0.5).alpha, 0.0);
+        assert!((ArrayPropertyStop::sample(&stops, 0.25).alpha - 0.5).abs() < 1e-6);
+        assert!((ArrayPropertyStop::sample(&stops, 0.75).alpha - 0.5).abs() < 1e-6);
+        assert_eq!(ArrayPropertyStop::sample(&stops, 0.5).alpha, 0.0);
+    }
+
+    #[test]
+    fn array_easing_accepts_the_shared_named_catalogue_and_command_names() {
+        for preset in Easing::named() {
+            let name = crate::params::easing_json(&preset);
+            let easing = ArrayEasing::parse(&json!({"easing": {"preset": name}})).unwrap();
+            assert_eq!(easing.preset, preset);
+            for t in [0.0, 0.25, 0.75, 1.0] {
+                assert_eq!(easing.eased_position(&[], t), f64::from(preset.apply(t as f32)));
+            }
+        }
+        let alias = ArrayEasing::parse(&json!({"easing": {"preset": "elastic-in-out"}})).unwrap();
+        assert_eq!(alias.preset, Easing::ElasticInOut);
+    }
+
+    #[test]
+    fn array_easing_modes_and_families_sample_the_authored_stops_independently() {
+        let stops = [
+            st(0.0, 0.2),
+            ArrayPropertyStop { scale: [2.0, 0.5], rotation: 360.0, ..st(0.5, 0.6) },
+            ArrayPropertyStop { scale: [3.0, 0.25], rotation: 720.0, ..st(1.0, 0.4) },
+        ];
+        let easing = ArrayEasing { preset: Easing::QuadIn, ..ArrayEasing::default() };
+        let per_segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..easing.clone() };
+        for (easing, at, angle) in [(&easing, 0.0625, 45.0), (&per_segment, 0.125, 90.0)] {
+            assert_eq!(easing.eased_position(&stops, 0.25), at);
+            let eased = easing.properties(&stops, 0.25);
+            assert_eq!(eased.rotation, angle);
+            assert_eq!(eased.scale, [1.0 + at as f32 * 2.0, 1.0 - at as f32]);
+            let linear = ArrayPropertyStop::sample(&stops, 0.25);
+            let colour_only = ArrayEasing { transform: false, ..easing.clone() }.properties(&stops, 0.25);
+            assert_eq!(colour_only.scale, linear.scale);
+            assert_eq!(colour_only.rotation, linear.rotation);
+            assert_eq!(colour_only.alpha, eased.alpha);
+            let transform_only = ArrayEasing { colour_effect: false, ..easing.clone() }.properties(&stops, 0.25);
+            assert_eq!(transform_only.scale, eased.scale);
+            assert_eq!(transform_only.alpha, linear.alpha);
+        }
+        assert_eq!(per_segment.properties(&stops, 0.5), stops[1]);
+        assert_eq!(per_segment.eased_position(&stops, 0.5), 0.5);
+        assert_eq!(per_segment.properties(&stops, 1.0), stops[2]);
+        assert_ne!(easing.properties(&stops, 0.5), stops[1]);
+        let interior = [st(0.25, 0.2), st(0.75, 0.8)];
+        assert_eq!(per_segment.eased_position(&interior, 0.125), 0.0625);
+        assert_eq!(per_segment.eased_position(&interior, 0.875), 0.8125);
+        assert_eq!(per_segment.properties(&interior, 0.125).alpha, 0.2);
+        assert_eq!(per_segment.properties(&interior, 0.875).alpha, 0.8);
+    }
+
+    #[test]
+    fn array_back_overshoots_using_the_current_segment_and_handles_coincident_stops() {
+        let stops = [
+            st(0.0, 0.0),
+            ArrayPropertyStop { scale: [1.5, 0.5], rotation: 360.0, ..st(0.5, 1.0) },
+            ArrayPropertyStop { scale: [2.0, 0.25], rotation: 720.0, ..st(1.0, 0.0) },
+        ];
+        let global = ArrayEasing { preset: Easing::BackOut, ..ArrayEasing::default() };
+        let per_segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        assert!(global.eased_position(&stops, 0.625) > 1.0);
+        let overshoot = global.properties(&stops, 0.625);
+        assert!(overshoot.rotation > 720.0 && overshoot.scale[0] > 2.0 && overshoot.scale[1] < 0.25);
+        assert_eq!(overshoot.alpha, 0.0);
+        let local = per_segment.properties(&stops, 0.3125);
+        assert!(per_segment.eased_position(&stops, 0.3125) > 0.5);
+        assert!(local.rotation > 360.0 && local.scale[0] > 1.5 && local.scale[1] < 0.5);
+        assert_eq!(local.alpha, 1.0);
+
+        let end = ArrayPropertyStop { rotation: -90.0, ..st(1.0, 0.25) };
+        let near = ArrayPropertyStop { offset: 1.0 - f32::EPSILON / 2.0, ..end.clone() };
+        let crowded = [stops[0].clone(), stops[1].clone(), near, stops[2].clone(), end.clone()];
+        assert_eq!(ArrayPropertyStop::sample_global(&crowded, 1.0).rotation, 720.0);
+        assert!(ArrayPropertyStop::sample_global(&crowded, 1.001).rotation > 720.0);
+        let coincident = [end, stops[2].clone()];
+        assert_eq!(per_segment.properties(&coincident, 0.95).rotation, -90.0);
+        assert_eq!(global.properties(&coincident, 0.625).rotation, -90.0);
+
+        let back_in = ArrayEasing { preset: Easing::BackIn, ..global };
+        assert!(back_in.eased_position(&stops, 0.375) < 0.0);
+        let before_start = back_in.properties(&stops, 0.375);
+        assert!(before_start.rotation < 0.0 && before_start.scale[0] < 1.0);
+        assert_eq!(before_start.alpha, 0.0);
+        let local = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..back_in };
+        assert!(local.eased_position(&stops, 0.6875) < 0.5);
+        assert!(local.properties(&stops, 0.6875).rotation < 360.0);
+    }
+
+    #[test]
+    fn authored_outbound_presets_are_independent_and_follow_stop_order() {
+        let params = json!({
+            "easing": {"mode": "per_segment", "preset": "BackOut"},
+            "property_stops": [
+                {"offset": 1, "rotation": 720, "alpha": 1, "outbound_ease": "ElasticIn"},
+                {"offset": 0.5, "rotation": 360, "alpha": 0.5, "outbound_ease": "QuadOut", "scale_y": 2},
+                {"offset": 0, "rotation": 0, "alpha": 0, "outbound_ease": "QuadIn"},
+            ],
+        });
+        let stops = parse_stops(&params).unwrap().unwrap();
+        let easing = ArrayEasing::parse(&params).unwrap();
+        assert!(easing.eases_distribution(&stops));
+        for (input, output, rotation, scale_y) in [(0.25, 0.125, 90.0, 1.25), (0.75, 0.875, 630.0, 1.25)] {
+            assert_eq!(easing.eased_position(&stops, input), output);
+            let props = easing.properties(&stops, input as f32);
+            assert_eq!((props.alpha, props.rotation, props.scale[1]), (output as f32, rotation, scale_y));
+        }
+        assert_eq!(easing.eased_position(&stops, 0.5), 0.5);
+        let mut inset = stops;
+        inset[2].offset = 0.875;
+        assert_eq!(easing.eased_position(&inset, 0.9375), 0.9375, "the terminal margin uses Linear");
+        assert_eq!(easing.properties(&inset, 0.9375).rotation, 720.0);
+        let global = ArrayEasing { mode: ArrayEaseMode::Global, ..easing };
+        assert!(global.eased_position(&inset, 0.5) > 1.0);
+    }
+
+    #[test]
+    fn array_easing_bakes_the_same_path_as_the_position_preview() {
+        for mode in ["linear", "radial"] {
+            for closed in [false, true] {
+                let mut s = radial_source();
+                let base = s.doc.clone();
+                let source = s.selection.clone();
+                let mut params = json!({
+                    "mode": mode, "count": 9, "stacking": "front_to_back",
+                    "start_x": 20, "start_y": 40, "dx": 12, "dy": 3,
+                    "center_x": 140, "center_y": 100, "radius": 75, "start_angle": 20,
+                    "closed_loop": closed, "sweep_angle": -720, "spiral_offset": -20, "drift_x": 35, "drift_y": -10,
+                    "easing": {"mode": "global", "preset": "BackOut", "transform": false, "colour_effect": false},
+                    "property_stops": [{"offset": 0.0, "alpha": 1}, {"offset": 0.5, "alpha": 0.5}, {"offset": 1, "alpha": 0}],
+                });
+                s.preview_array(&params).unwrap();
+                let generation = s.array_translation_generation().unwrap();
+                if mode == "linear" { params["dx"] = json!(20); } else { params["center_x"] = json!(150); }
+                s.preview_array(&params).unwrap();
+                assert_eq!(s.array_translation_generation(), Some(generation));
+
+                let mut expected = Session::new(base);
+                expected.selection = source;
+                expected.execute("array.create", &params).unwrap();
+                assert!(s.doc == expected.doc && s.selection == expected.selection);
+                let copies = s.selected_elements();
+                let t = 5.0 / if mode == "radial" && closed { 9.0 } else { 8.0 };
+                let position = f64::from(Easing::BackOut.apply(t));
+                assert!(position > 1.0);
+                let at = if mode == "radial" {
+                    parse_radial(&params, Vec2::ZERO).unwrap().point(position)
+                } else {
+                    Vec2::new(20.0 + 20.0 * (8.0 * position) as f32, 40.0 + 3.0 * (8.0 * position) as f32)
+                };
+                let copy = &copies[copies.len() - 1 - 5].1;
+                assert_eq!(copy.transform.translation(), at);
+                assert!((copy.color.alpha() - (1.0 - t)).abs() < 1e-6);
+                s.finish_array_preview(true);
+                let (_, recorded) = s.history.steps().last().unwrap();
+                assert_eq!(recorded.unwrap(), &[crate::history::Recorded::new("array.create", &params)]);
+            }
+        }
+    }
+
+    #[test]
+    fn array_easing_validates_parameters_and_handles_one_instance() {
+        let mut s = radial_source();
+        let original = s.doc.clone();
+        for invalid in [
+            json!([]), json!({"preset": "unknown"}), json!({"preset": "smooth"}), json!({"preset": {"classic": 50}}),
+            json!({"mode": false}), json!({"distribution": 1}),
+        ] {
+            assert!(s.preview_array(&json!({"easing": invalid})).is_err());
+            assert!(s.doc == original && !s.array_preview_active());
+        }
+        let params = json!({"mode": "radial", "count": 1, "center_x": 50, "center_y": 20, "radius": 20,
+            "start_angle": 0, "sweep_angle": -1080, "closed_loop": false, "spiral_offset": -120, "drift_x": -30, "rotate": true,
+            "easing": {"mode": "per_segment", "preset": "BackOut"},
+            "property_stops": [{"offset": 0.0, "scale_x": 2, "alpha": 0.5}, {"offset": 1.0, "alpha": 0, "rotation": 720}],
+        });
+        s.execute("array.create", &params).unwrap();
+        let copies = s.selected_elements();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].1.transform.translation(), Vec2::new(70.0, 20.0));
+        assert_eq!(copies[0].1.transform.m[0], 2.0);
+        assert_eq!(copies[0].1.color.alpha(), 0.5);
+    }
+
+    #[test]
+    fn array_segment_easing_keeps_spiral_geometry_and_composes_with_instance_rotation() {
+        for distribution in [false, true] {
+            let mut s = radial_source();
+            let params = json!({"mode": "radial", "count": 5, "center_x": 75, "center_y": 250, "radius": 120,
+                "start_angle": 20, "sweep_angle": -720, "closed_loop": false, "spiral_offset": -30,
+                "drift_x": 60, "drift_y": -16, "rotate": true,
+                "easing": {"mode": "per_segment", "preset": "QuadIn", "distribution": distribution, "colour_effect": false},
+                "property_stops": [
+                    {"offset": 0, "rotation": 0, "alpha": 1},
+                    {"offset": 0.5, "rotation": 360, "alpha": 0.5, "scale_x": 2},
+                    {"offset": 1, "rotation": 720, "alpha": 0},
+                ],
+            });
+            let path = parse_radial(&params, Vec2::ZERO).unwrap();
+            s.execute("array.create", &params).unwrap();
+            let copies = s.selected_elements();
+            let at = if distribution { 0.125 } else { 0.25 };
+            let xf = copies[1].1.transform;
+            assert_eq!(xf.translation(), path.point(at));
+            let (sin, cos) = (90.0_f32 - 720.0 * at as f32).to_radians().sin_cos();
+            assert!(xf.apply_vector(Vec2::new(1.0, 0.0)).distance(Vec2::new(cos, sin) * 1.25) < 1e-5);
+            assert_eq!(copies[1].1.color.alpha(), 0.75);
+            assert_eq!(copies[2].1.transform.translation(), path.point(0.5));
+            assert_eq!(copies[4].1.transform.translation(), path.point(1.0));
+        }
     }
 
     #[test]
@@ -696,12 +1083,12 @@ mod tests {
     #[test]
     fn linear_count_includes_original_and_hits_last_stop() {
         let l = Layout::Linear { start_x: 12.0, start_y: 18.0, dx: 10.0, dy: -2.0 };
-        let (a, ta) = l.place(Affine::IDENTITY, 0, 10);
-        let (b, tb) = l.place(Affine::IDENTITY, 9, 10);
+        let a = l.place(Affine::IDENTITY, 0, 10, None);
+        let b = l.place(Affine::IDENTITY, 9, 10, None);
         assert_eq!(a.translation().x, 12.0);
         assert_eq!(b.translation().x, 102.0);
-        assert_eq!(ta, 0.0);
-        assert_eq!(tb, 1.0);
+        assert_eq!(l.progress(0, 10), 0.0);
+        assert_eq!(l.progress(9, 10), 1.0);
     }
 
     #[test]

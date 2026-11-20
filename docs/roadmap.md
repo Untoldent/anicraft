@@ -17,6 +17,8 @@ next Array to defaults at its source symbol. Cancel, Escape and None retain the 
 configuration while the original instance stays selected. The selected-stop card has draggable
 relative scales, additive multi-turn rotation and Alpha in independent sections.
 An active Array session has its own undo and redo for geometry and stop edits, coalesced by gesture.
+The Easing section offers global and independent outbound presets for distribution, transform and
+colour. Quit resolves an active Array before asking about unsaved documents.
 Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
 direction, length and spacing are editable in the panel. Both modes display white pivot markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only

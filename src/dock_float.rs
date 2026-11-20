@@ -173,6 +173,13 @@ fn own_window(app: &mut App, ctx: &egui::Context, f: &Float, layout: &Layout, ac
             }
         }
         if class != egui::ViewportClass::EmbeddedWindow {
+            if !app.modal_open() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
+                crate::tabs::quit(app);
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+            }
+            if app.array_quit_pending {
+                ui.disable();
+            }
             crate::array_panel::escape(app, ui.ctx());
             crate::array_panel::history_shortcut(app, ui.ctx());
         }

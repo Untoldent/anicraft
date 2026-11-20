@@ -546,9 +546,13 @@ pub fn close_all(app: &mut App) {
     close(app, ids);
 }
 
-/// The window is closing with unsaved changes somewhere: one question for all of them.
+/// Request application exit. Resolve an Array preview before checking document changes.
 pub fn quit(app: &mut App) {
-    if app.tabs.closing.as_ref().is_some_and(|f| f.quit) || crate::array_panel::blocked(app) {
+    if app.allow_close || app.tabs.closing.as_ref().is_some_and(|f| f.quit) {
+        return;
+    }
+    if app.s.array_preview_active() {
+        app.array_quit_pending = true;
         return;
     }
     app.playing = false;
