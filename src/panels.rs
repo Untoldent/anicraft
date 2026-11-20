@@ -531,12 +531,12 @@ fn renderer_tag(app: &App) -> Option<String> {
 
 // ----- right dock ---------------------------------------------------------------------------
 
-fn rgb(c: Rgba) -> [u8; 3] {
+pub(crate) fn rgb(c: Rgba) -> [u8; 3] {
     let c = c.sanitized();
     [(c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8]
 }
 
-fn hex(c: [u8; 3]) -> String {
+pub(crate) fn hex(c: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
@@ -989,6 +989,35 @@ impl EffectOf {
     }
 }
 
+pub(crate) fn colour_style_picker(ui: &mut egui::Ui, id: &str, name: &str, current: ColorStyle, allow_alpha: bool) -> Option<ColorStyle> {
+    let mut selected = None;
+    egui::ComboBox::from_id_salt(id).selected_text(crate::i18n::t(current.label())).show_ui(ui, |ui| {
+        for style in ColorStyle::ALL.into_iter().filter(|style| allow_alpha || *style != ColorStyle::Alpha) {
+            if ui.selectable_label(style == current, crate::i18n::t(style.label())).clicked() {
+                selected = Some(style);
+            }
+        }
+    }).response.set_name(name);
+    selected
+}
+
+pub(crate) fn advanced_colour_channels() -> [(&'static str, &'static str, &'static str, &'static str); 4] {
+    [
+        (tr!("Red"), tr!("Red multiplier"), tr!("Red offset"), "red"),
+        (tr!("Green"), tr!("Green multiplier"), tr!("Green offset"), "green"),
+        (tr!("Blue"), tr!("Blue multiplier"), tr!("Blue offset"), "blue"),
+        (tr!("Alpha"), tr!("Alpha multiplier"), tr!("Alpha offset"), "alpha"),
+    ]
+}
+
+pub(crate) fn advanced_colour_fields(ui: &mut egui::Ui, multiplier: &mut f32, offset: &mut f32, mul_name: &str, off_name: &str) -> (bool, bool) {
+    with_type(ui, Type::Data, |ui| {
+        let mul = ui.add(egui::DragValue::new(multiplier).suffix(" %").speed(0.5).range(-100.0..=100.0).max_decimals(0)).named(mul_name);
+        let add = ui.add(egui::DragValue::new(offset).custom_formatter(|v, _| format!("{v:+.0}")).speed(1.0).range(-255.0..=255.0).max_decimals(0)).named(off_name);
+        (mul.changed(), add.changed())
+    })
+}
+
 /// The colour effect (ADR 0056): Animate's Style menu, then the chosen style's controls. Each
 /// change sets that value on every selected element (ADR 0053), or on the camera, as one undo
 /// step per drag.
@@ -997,15 +1026,13 @@ fn colour_effect_rows(app: &mut App, ui: &mut egui::Ui, fx: &ColorEffect, m: cra
     let cmd = of.command();
     let camera = of == EffectOf::Camera;
     row_prose(ui, tr!("Colour effect"), |ui| {
-        egui::ComboBox::from_id_salt(if camera { "prop_camera_color_style" } else { "prop_color_style" }).selected_text(crate::i18n::t(current.label())).show_ui(ui, |ui| {
-            for st in ColorStyle::ALL.into_iter().filter(|st| !camera || *st != ColorStyle::Alpha) {
-                if ui.selectable_label(st == current, crate::i18n::t(st.label())).clicked() && (st != current || m.style) {
-                    app.run(cmd, json!({"style": st.key()}));
-                }
-            }
-        })
-        .response
-        .set_name(if camera { tr!("Camera colour effect style") } else { tr!("Colour effect style") });
+        let id = if camera { "prop_camera_color_style" } else { "prop_color_style" };
+        let name = if camera { tr!("Camera colour effect style") } else { tr!("Colour effect style") };
+        if let Some(style) = colour_style_picker(ui, id, name, current, !camera)
+            && (style != current || m.style)
+        {
+            app.run(cmd, json!({"style": style.key()}));
+        }
         mixed(ui, m.style);
     });
     let pct = a11y::SliderLook { suffix: " %", max_decimals: Some(0), ..Default::default() };
@@ -1049,16 +1076,16 @@ fn colour_effect_rows(app: &mut App, ui: &mut egui::Ui, fx: &ColorEffect, m: cra
         }
         ColorEffect::Advanced(t) => {
             // Each channel: its multiplier in percent, then the offset added (−255..255).
-            let channels = [(tr!("Red"), tr!("Red multiplier"), tr!("Red offset"), "red"), (tr!("Green"), tr!("Green multiplier"), tr!("Green offset"), "green"), (tr!("Blue"), tr!("Blue multiplier"), tr!("Blue offset"), "blue"), (tr!("Alpha"), tr!("Alpha multiplier"), tr!("Alpha offset"), "alpha")];
             // The camera has no opacity: its Advanced effect has no alpha channel.
-            for (i, (label, mul_name, off_name, key)) in channels.into_iter().enumerate().take(if camera { 3 } else { 4 }) {
+            for (i, (label, mul_name, off_name, key)) in advanced_colour_channels().into_iter().enumerate().take(if camera { 3 } else { 4 }) {
                 let mut mv = t.mul.get(i).copied().unwrap_or(1.0) * 100.0;
                 let mut ov = t.add.get(i).copied().unwrap_or(0.0) * 255.0;
                 row(ui, label, |ui| {
-                    if ui.add(egui::DragValue::new(&mut mv).suffix(" %").speed(0.5).range(-100.0..=100.0).max_decimals(0)).named(mul_name).changed() {
+                    let (mul, add) = advanced_colour_fields(ui, &mut mv, &mut ov, mul_name, off_name);
+                    if mul {
                         set(app, json!({format!("{key}_multiplier"): mv}));
                     }
-                    if ui.add(egui::DragValue::new(&mut ov).custom_formatter(|v, _| format!("{v:+.0}")).speed(1.0).range(-255.0..=255.0).max_decimals(0)).named(off_name).changed() {
+                    if add {
                         set(app, json!({format!("{key}_offset"): ov}));
                     }
                     mixed(ui, m.advanced.get(i).copied().unwrap_or(false) || m.advanced.get(i + 4).copied().unwrap_or(false));

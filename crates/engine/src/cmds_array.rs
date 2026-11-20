@@ -7,7 +7,7 @@
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
-use anicraft_doc::{Easing, Element, ElementId, ElementKind};
+use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind};
 use anicraft_geom::{Affine, Vec2};
 use serde_json::{Value, json};
 use std::ops::Range;
@@ -120,7 +120,9 @@ impl ArrayEasing {
             eased.scale = base.scale;
             eased.rotation = base.rotation;
         } else if !self.colour_effect {
-            eased.alpha = linear().alpha;
+            let base = linear();
+            eased.alpha = base.alpha;
+            eased.color = base.color;
         }
         eased
     }
@@ -190,6 +192,8 @@ impl RadialDistribution {
 pub struct ArrayPropertyStop {
     pub offset: f32,
     pub alpha: f32,
+    /// The stop's colour style. The Advanced alpha multiplier lives in `alpha`.
+    pub color: ColorEffect,
     pub scale: [f32; 2],
     pub rotation: f32,
     /// None denotes a stop from a command with no authored outbound preset.
@@ -202,7 +206,7 @@ impl ArrayPropertyStop {
     pub const ROTATION_LIMIT: f32 = 100_000.0;
 
     pub const fn new(offset: f32, alpha: f32) -> Self {
-        Self { offset, alpha, scale: [1.0; 2], rotation: 0.0, outbound: None }
+        Self { offset, alpha, color: ColorEffect::None, scale: [1.0; 2], rotation: 0.0, outbound: None }
     }
 
     /// Hold the endpoint value outside the first or last stop, as gradients do.
@@ -251,13 +255,28 @@ impl ArrayPropertyStop {
         let blend = |a, b| a + (b - a) * f;
         Self {
             offset: t,
-            alpha: blend(self.alpha, other.alpha).clamp(0.0, 1.0),
+            alpha: blend(self.alpha, other.alpha).clamp(alpha_min(self.color).min(alpha_min(other.color)), 1.0),
+            color: self.color.lerp(&other.color, f).sanitized(),
             scale: [
                 blend(self.scale[0], other.scale[0]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
                 blend(self.scale[1], other.scale[1]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
             ],
             rotation: blend(self.rotation, other.rotation),
             outbound: None,
+        }
+    }
+
+    /// Apply the Array colour once, after the effect already authored on the source symbol.
+    fn apply_color(&self, source: ColorEffect) -> ColorEffect {
+        let effect = match self.color {
+            ColorEffect::None => ColorEffect::opacity(self.alpha),
+            color if self.alpha == 1.0 => color,
+            color => color.with_alpha(self.alpha),
+        };
+        if effect.transform().is_identity() && source != ColorEffect::None {
+            source
+        } else {
+            effect.nested(&source)
         }
     }
 
@@ -272,6 +291,10 @@ impl ArrayPropertyStop {
         adjusted.m[5] = base.m[5] + shift.y;
         adjusted
     }
+}
+
+fn alpha_min(color: ColorEffect) -> f32 {
+    if matches!(color, ColorEffect::Advanced(_)) { *anicraft_doc::ADVANCED_MUL.start() } else { 0.0 }
 }
 
 impl Session {
@@ -444,7 +467,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?}}. Easing defaults to Global Linear with all three families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?}}. Easing defaults to Global Linear with all three families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). When color_effect is supplied, the stop effects are composed over the source and alpha overrides the effect's alpha multiplier. Older calls without color_effect retain absolute alpha. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -472,9 +495,24 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
             Ok(n as f32)
         };
         let offset = number("offset", 0.0, 1.0, None)?;
-        let alpha = number("alpha", 0.0, 1.0, (!legacy).then_some(1.0))?;
+        let color = match v.get("color_effect").filter(|_| !legacy) {
+            None => ColorEffect::None,
+            Some(raw) => {
+                if !raw.is_object() || opt_str(raw, "style")?.is_some_and(|s| ColorStyle::from_key(s).is_none()) {
+                    return Err(EngineError::Param("color_effect must be a supported Colour Effect object".into()));
+                }
+                serde_json::from_value::<ColorEffect>(raw.clone())
+                    .map_err(|e| EngineError::Param(format!("invalid color_effect: {e}")))?
+            }
+        };
+        let alpha = number("alpha", alpha_min(color), 1.0, (!legacy).then(|| color.alpha()))?;
         let mut stop = ArrayPropertyStop::new(offset, alpha);
         if !legacy {
+            stop.color = match color {
+                ColorEffect::Alpha(_) => ColorEffect::None,
+                ColorEffect::Advanced(_) => color.with_alpha(1.0),
+                color => color,
+            };
             let scale = ArrayPropertyStop::SCALE_LIMIT;
             let rotation = ArrayPropertyStop::ROTATION_LIMIT;
             stop.scale = [number("scale_x", -scale, scale, Some(1.0))?, number("scale_y", -scale, scale, Some(1.0))?];
@@ -555,6 +593,10 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let stops = parse_stops(p)?;
     let easing = ArrayEasing::parse(p)?;
     let eased_distribution = easing.eases_distribution(stops.as_deref().unwrap_or_default());
+    // Old Array command recordings used an absolute alpha multiplier. The full colour
+    // controls use a relative effect, even when every stop is set to the neutral style.
+    let compose_colour = p.get("property_stops").and_then(Value::as_array)
+        .is_some_and(|stops| stops.iter().any(|stop| stop.get("color_effect").is_some()));
     let Some((_, id)) = s.selection.first().filter(|(layer, _)| *layer == s.layer && s.selection.len() == 1) else {
         return Err(EngineError::State("select exactly one symbol instance on the active layer".into()));
     };
@@ -592,7 +634,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         if i > 0 { el.id = ElementId(s.doc.alloc_id()); }
         el.transform = transform;
         if let Some(stop) = stop {
-            el.color = el.color.with_alpha(stop.alpha);
+            el.color = if compose_colour { stop.apply_color(original.color) } else { original.color.with_alpha(stop.alpha) };
         }
         ids.push(el.id);
         copies.push(Arc::new(el));
@@ -613,6 +655,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anicraft_doc::{ColorTransform, Rgba};
 
     fn st(p: f32, alpha: f32) -> ArrayPropertyStop { ArrayPropertyStop::new(p, alpha) }
 
@@ -622,6 +665,146 @@ mod tests {
         assert!((ArrayPropertyStop::sample(&stops, 0.25).alpha - 0.5).abs() < 1e-6);
         assert!((ArrayPropertyStop::sample(&stops, 0.75).alpha - 0.5).abs() < 1e-6);
         assert_eq!(ArrayPropertyStop::sample(&stops, 0.5).alpha, 0.0);
+    }
+
+    #[test]
+    fn colour_stops_interpolate_signed_brightness_tint_and_mixed_styles() {
+        let dark = ArrayPropertyStop { color: ColorEffect::Brightness(-0.5), ..st(0.0, 0.5) };
+        let light = ArrayPropertyStop { color: ColorEffect::Brightness(0.5), ..st(1.0, 1.0) };
+        let halfway = ArrayPropertyStop::sample([&dark, &light], 0.5);
+        assert_eq!(halfway.color, ColorEffect::Brightness(0.0));
+        assert_eq!(halfway.alpha, 0.75);
+
+        let red = ArrayPropertyStop { color: ColorEffect::Tint { color: Rgba::hex(0xff0000), amount: 0.25 }, ..st(0.0, 0.25) };
+        let blue = ArrayPropertyStop { color: ColorEffect::Tint { color: Rgba::hex(0x0000ff), amount: 0.75 }, ..st(1.0, 0.75) };
+        assert_eq!(ArrayPropertyStop::sample([&red, &blue], 0.5).color,
+            ColorEffect::Tint { color: Rgba::hex(0xff0000).lerp(Rgba::hex(0x0000ff), 0.5), amount: 0.5 });
+        assert_eq!(ArrayPropertyStop::sample([&st(0.0, 1.0), &blue], 0.5).color,
+            ColorEffect::Tint { color: Rgba::hex(0x0000ff), amount: 0.375 });
+        let mixed = ArrayPropertyStop::sample([&red, &light], 0.5);
+        assert_eq!(mixed.color, ColorEffect::Advanced(ColorTransform {
+            mul: [0.625, 0.625, 0.625, 1.0], add: [0.375, 0.25, 0.25, 0.0],
+        }));
+        assert_eq!(mixed.apply_color(ColorEffect::None).alpha(), 0.625);
+    }
+
+    #[test]
+    fn colour_easing_samples_all_advanced_channels_and_bounds_overshoot() {
+        let end = ArrayPropertyStop {
+            color: ColorEffect::Advanced(ColorTransform {
+                mul: [-1.0, 0.5, 0.0, 1.0], add: [1.0, -1.0, 0.5, 0.25],
+            }),
+            ..st(0.5, -1.0)
+        };
+        let start = ArrayPropertyStop { outbound: Some(Easing::QuadIn), ..st(0.0, 1.0) };
+        let stops = [start, end.clone(), ArrayPropertyStop { offset: 1.0, ..end.clone() }];
+        let global = ArrayEasing { preset: Easing::QuadIn, ..ArrayEasing::default() };
+        let segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        for (easing, fraction) in [(&global, 0.125), (&segment, 0.25)] {
+            let actual = easing.properties(&stops, 0.25).apply_color(ColorEffect::None).transform();
+            assert_eq!(actual, ColorTransform {
+                mul: [1.0 - 2.0 * fraction, 1.0 - 0.5 * fraction, 1.0 - fraction, 1.0 - 2.0 * fraction],
+                add: [fraction, -fraction, 0.5 * fraction, 0.25 * fraction],
+            });
+            let disabled = ArrayEasing { colour_effect: false, ..easing.clone() };
+            let actual = disabled.properties(&stops, 0.25).apply_color(ColorEffect::None).transform();
+            assert_eq!(actual.mul, [0.0, 0.75, 0.5, 0.0]);
+            assert_eq!(actual.add, [0.5, -0.5, 0.25, 0.125]);
+        }
+
+        let back = ArrayEasing { preset: Easing::BackOut, ..global };
+        let mut stops = [stops[0].clone(), ArrayPropertyStop { offset: 1.0, ..end }];
+        stops[0].outbound = Some(Easing::BackOut);
+        for easing in [&back, &ArrayEasing { mode: ArrayEaseMode::PerSegment, ..back.clone() }] {
+            let t = easing.properties(&stops, 0.625).apply_color(ColorEffect::None).transform();
+            assert_eq!(t.mul[0], -1.0);
+            assert_eq!(t.mul[3], -1.0);
+            assert_eq!(&t.add[..2], &[1.0, -1.0]);
+            assert!(t.add[3] > 0.25);
+        }
+        let tint = |offset, color, amount| ArrayPropertyStop {
+            color: ColorEffect::Tint { color: Rgba::hex(color), amount }, ..st(offset, 1.0)
+        };
+        let stops = [tint(0.0, 0xff0000, 0.0), tint(1.0, 0x0040ff, 1.0)];
+        let ColorEffect::Tint { color, amount } = back.properties(&stops, 0.625).color else { panic!("expected Tint"); };
+        assert_eq!(amount, 1.0);
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.b, 1.0);
+        assert!(color.g > Rgba::hex(0x0040ff).g);
+    }
+
+    #[test]
+    fn colour_preview_and_commit_compose_with_source_and_render_in_both_layouts() {
+        let mut original = Session::default();
+        original.execute("draw.rect", &json!({"x": 15, "y": 15, "w": 10, "h": 10, "fill": "#336699", "stroke": null})).unwrap();
+        original.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        let source = ColorEffect::Advanced(ColorTransform { mul: [1.0, 0.5, 1.0, 0.5], add: [0.0; 4] });
+        original.execute("element.set_color_effect", &json!({"green_multiplier": 50, "alpha_multiplier": 50})).unwrap();
+        let base = original.doc.clone();
+        let selection = original.selection.clone();
+        let bake = |s: &Session| anicraft_render::render_frame(&s.doc, 0, 1.0).unwrap();
+        let pixel = |s: &Session, at: [f32; 2]| {
+            let pm = bake(s);
+            let i = ((at[1] as u32 * pm.width + at[0] as u32) * 4) as usize;
+            <[u8; 4]>::try_from(&pm.to_rgba8()[i..i + 4]).unwrap()
+        };
+        let last = ColorEffect::Advanced(ColorTransform { mul: [0.0, 0.0, 0.0, 0.25], add: [0.0, 0.0, 1.0, 0.375] });
+        for (mode, positions) in [("linear", [[20.0, 20.0], [60.0, 20.0], [100.0, 20.0]]),
+            ("radial", [[180.0, 100.0], [105.0, 105.0], [230.0, 110.0]])]
+        {
+            let params = json!({
+                "mode": mode, "count": 3, "start_x": 20, "start_y": 20, "dx": 40,
+                "center_x": 140, "center_y": 100, "radius": 40, "start_angle": 0,
+                "sweep_angle": -360, "closed_loop": false, "spiral_offset": 20, "drift_x": 30, "drift_y": 10,
+                "property_stops": [
+                    {"offset": 0, "color_effect": ColorEffect::None},
+                    {"offset": 0.5, "alpha": 0.5, "color_effect": ColorEffect::Brightness(0.5)},
+                    {"offset": 1, "alpha": 0.5, "color_effect": last},
+                ],
+            });
+            let mut s = Session::new(base.clone());
+            s.selection = selection.clone();
+            let mut draft = params.clone();
+            draft["property_stops"][2].as_object_mut().unwrap().remove("alpha");
+            s.preview_array(&draft).unwrap();
+            assert_eq!(s.selected_elements()[2].1.color, last.nested(&source));
+            s.finish_array_preview(false);
+            assert_eq!(s.doc, base);
+            assert_eq!(s.selection, selection);
+            assert_eq!(s.history_len(), 0);
+
+            s.preview_array(&params).unwrap();
+            let elements = s.selected_elements();
+            assert_eq!(elements[0].1.color, source);
+            assert_eq!(elements[1].1.color, ColorEffect::Brightness(0.5).with_alpha(0.5).nested(&source));
+            assert_eq!(elements[2].1.color, last.with_alpha(0.5).nested(&source));
+            for ((_, el), [x, y]) in elements.iter().zip(positions) {
+                assert_eq!(el.transform.translation(), Vec2::new(x, y));
+            }
+            // Alpha = 0.5 * 0.5 + 0.375. Blue over the default white stage is (96, 96, 255).
+            let colour = pixel(&s, positions[2]);
+            assert!(colour.iter().zip([96u8, 96, 255, 255]).all(|(a, b)| a.abs_diff(b) <= 1), "{colour:?}");
+            let preview = bake(&s).to_rgba8();
+            s.finish_array_preview(true);
+            assert_eq!(s.history_len(), 1);
+            assert_eq!(bake(&s).to_rgba8(), preview);
+
+            let (_, recorded) = s.history.steps().last().unwrap();
+            let [recorded] = recorded.unwrap() else { panic!("expected one recorded Array command") };
+            assert_eq!(recorded.cmd, "array.create");
+            let replay_params = serde_json::from_str(&recorded.params.to_string()).unwrap();
+            let mut replay = Session::new(base.clone());
+            replay.selection = selection.clone();
+            replay.execute(&recorded.cmd, &replay_params).unwrap();
+            assert_eq!(replay.doc, s.doc);
+
+            s.undo().unwrap();
+            assert_eq!(s.doc, base);
+        }
+        original.execute("array.create", &json!({"count": 1, "property_stops": [
+            {"offset": 0, "alpha": 1}, {"offset": 1, "alpha": 1}
+        ]})).unwrap();
+        assert_eq!(original.selected_elements()[0].1.color, source.with_alpha(1.0));
     }
 
     #[test]

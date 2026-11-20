@@ -11,11 +11,12 @@ AniCraft retains mixing, frame-range limits, temporary-file cleanup and VFS writ
 This integration depends on craft-libs #1962 and still requires hosted parity validation.
 
 The experimental [Array panel](array-panel-design.md) previews Linear and Radial arrays of
-one symbol instance, with a neutral track for Transform and Alpha stops. Array mode stays active
+one symbol instance, with a neutral track for Transform and Colour Effect stops. Array mode stays active
 when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
 next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
 configuration while the original instance stays selected. The selected-stop card has draggable
-relative scales, additive multi-turn rotation and Alpha in independent sections.
+relative scales and additive multi-turn rotation in Transform, and Alpha, Brightness, Tint and
+Advanced channels in Colour Effect. Array colour effects compose with the source instance's effect.
 An active Array session has its own undo and redo for geometry and stop edits, coalesced by gesture.
 The Easing section offers global and independent outbound presets for distribution, transform and
 colour. Quit resolves an active Array before asking about unsaved documents.

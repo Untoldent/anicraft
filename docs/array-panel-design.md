@@ -210,8 +210,30 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   adds to the source orientation and Rotate Instances. It interpolates the entered degrees
   directly, so 0° to 720° takes two turns. Scale and rotation keep the instance's transformation
   point in place after the distribution positions it.
-- **Colour Effect** retains Alpha as a multiplier of the source effect. New stops sample each
-  property at their insertion point. Geometry edits leave the authored stop values intact.
+- **Colour Effect** offers None, Brightness, Tint, and Advanced. Brightness runs from −100%
+  (black) through 0% (unchanged) to +100% (white). Tint uses the shared colour picker and an
+  independent amount from 0% to 100%. Advanced has Alpha, Red, Green, and Blue rows, each with
+  a multiplier from −100% to 100% and an offset from −255 to 255. All numeric fields can be
+  dragged horizontally or typed.
+- Each stop has one Alpha multiplier. Advanced edits it in the Alpha channel row alongside
+  a separate Alpha offset. The other styles show it as the 0–100% Alpha field. Leaving Advanced
+  floors a negative Alpha multiplier at 0% and removes the channel offsets with that style.
+  Switching from Brightness or Tint to Advanced starts with the equivalent channel transform.
+- Arrays apply the sampled colour transform over the source symbol's existing colour effect
+  using [ADR 0056's shared colour effects](adr/0056-colour-effects.md) for interpolation and
+  nested composition. The baked instance uses the document's existing Advanced channel limits
+  if the combined transform exceeds them. A neutral Array stop preserves the source
+  appearance and opacity. The new command payload supplies a document Colour Effect object
+  at each stop. Its Advanced multipliers and offsets are normalized fractions in red,
+  green, blue, alpha order. The stop's explicit Alpha value takes precedence over the
+  object's alpha multiplier. Older command recordings without these objects retain their
+  original Alpha behaviour. Commit records the authored stop payload so replay uses the same
+  colour composition and easing as the live preview.
+- New stops sample each property at their insertion point. Within a style, its values
+  interpolate directly, including both Tint colour and amount. None meets the neutral value
+  of the neighbouring style. Other mixed styles interpolate multipliers and offsets in
+  Advanced space, matching Classic Tweens. Geometry edits leave the authored values intact.
+  Changes made in one opening of the Tint picker form one session undo step.
 - Preserve independently draggable stops at positions 0..100%. Example:
   positions 0%, 40%, 100% can have Alpha 75%, 100%, 3%; dragging the 40% stop
   changes how quickly that middle value is approached.
@@ -258,7 +280,8 @@ ordinary linear progression when unchecked. Filters is disabled until filter int
   stays at Start.
 - In Per Segment mode, a property that overshoots continues the current segment's interpolation.
   Global overshoot continues from the track endpoint's value using the nearest usable stop span.
-  Alpha and Scale remain in their valid ranges. Rotation uses the unwrapped authored degrees.
+  Colour Effect easing applies to all colour values, including Alpha. Colour and Scale remain
+  in their valid ranges. Rotation uses the unwrapped authored degrees.
   Adding a stop samples the authored values at its track position.
 
 ## Future distribution modes (not in this milestone)
@@ -301,7 +324,8 @@ ordinary linear progression when unchecked. Filters is disabled until filter int
 9. **Easing** covers global and per-segment presets, independent family assignment, and overshoot.
 10. **Independent outbound easing and Quit** covers stop-owned presets, insertion inheritance,
     and resolving a preview before the normal Save/Discard/Cancel question.
-11. Later: Grid, Path/node placement, more stop properties, filter interpolation, custom easing,
+11. **Colour Effect property stops** covers Brightness, Tint, and Advanced channels alongside Alpha.
+12. Later: Grid, Path/node placement, more stop properties, filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

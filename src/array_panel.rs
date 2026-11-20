@@ -7,7 +7,7 @@ use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
 use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
-use anicraft_engine::doc::{Easing, ElementId, ElementKind, LayerId};
+use anicraft_engine::doc::{ColorEffect, Easing, ElementId, ElementKind, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -54,6 +54,7 @@ impl Settings {
             .map(|s| {
                 json!({
                     "offset": s.value.offset, "alpha": s.value.alpha,
+                    "color_effect": s.value.color,
                     "scale_x": s.value.scale[0], "scale_y": s.value.scale[1], "rotation": s.value.rotation,
                     "outbound_ease": anicraft_engine::params::easing_json(s.value.outbound.as_ref().unwrap_or(&Easing::Linear)),
                 })
@@ -100,6 +101,7 @@ struct Active {
 pub(crate) enum EditGesture {
     Pointer(egui::ViewportId, Id),
     Text(egui::ViewportId, Id),
+    Picker(egui::ViewportId, Id),
 }
 
 struct Configuration {
@@ -278,6 +280,9 @@ impl State {
     fn record_edit(&mut self, before: Option<Configuration>, gesture: Option<EditGesture>) {
         let Some(before) = before.filter(|before| self.differs(before)) else { return };
         let Some(active) = &mut self.active else { return };
+        if active.history.pending.as_ref().is_some_and(|(owner, _)| Some(*owner) == gesture) {
+            return;
+        }
         // A different edit may arrive before the previous gesture ended.
         active.history.settle(before.mode, &before.settings);
         if let Some(id) = gesture {
@@ -292,6 +297,7 @@ impl State {
         if active.history.pending.as_ref().is_some_and(|(gesture, _)| match *gesture {
             EditGesture::Pointer(viewport, id) => viewport == ctx.viewport_id() && ctx.dragged_id() != Some(id),
             EditGesture::Text(viewport, id) => viewport == ctx.viewport_id() && focused_text(ctx) != Some(id),
+            EditGesture::Picker(viewport, id) => viewport == ctx.viewport_id() && !egui::Popup::is_id_open(ctx, id),
         }) {
             active.history.settle(active.mode, settings);
         }
@@ -507,7 +513,8 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 /// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
-    let transform_sample = segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
+    let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
+    let transform_sample = colour_sample || segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
         let sweep = values.next()?.parse::<f32>().ok()?;
@@ -541,7 +548,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
-    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
+    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
     app.array_panel.dim_stage = view != "array-polish-off";
@@ -587,6 +594,27 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             }
         }
         match view {
+            "array-colour-brightness" => {
+                for (stop, value) in settings.stops.iter_mut().zip([-0.8, 0.0, 0.75]) {
+                    stop.value.color = ColorEffect::Brightness(value);
+                }
+            }
+            "array-colour-tint" => {
+                for (stop, (rgb, amount)) in settings.stops.iter_mut().zip([(0x2675ed, 0.9), (0xcf23c8, 0.75), (0x08c576, 0.9)]) {
+                    stop.value.color = ColorEffect::Tint { color: Rgba::hex(rgb), amount };
+                }
+            }
+            "array-colour-advanced" => {
+                let transform = anicraft_engine::doc::ColorTransform {
+                    mul: [0.65, 0.85, 0.45, 1.0], add: [20.0, -15.0, 145.0, 24.0].map(|v| v / 255.0),
+                };
+                for (stop, color) in settings.stops.iter_mut().zip([
+                    ColorEffect::Advanced(transform), ColorEffect::Brightness(0.3),
+                    ColorEffect::Tint { color: Rgba::hex(0x08a675), amount: 0.8 },
+                ]) {
+                    stop.value.color = color;
+                }
+            }
             "array-easing-global" => settings.easing.preset = Easing::BackOut,
             _ if segment_sample => {
                 settings.easing.mode = ArrayEaseMode::PerSegment;
@@ -699,12 +727,12 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
         if state.mode().is_some() {
             let ctx = ui.ctx();
             let viewport = ctx.viewport_id();
-            let gesture = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()).map(|id| EditGesture::Pointer(viewport, id))
+            let mut gesture = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()).map(|id| EditGesture::Pointer(viewport, id))
                 .or_else(|| focused_text(ctx).map(|id| EditGesture::Text(viewport, id)));
             let before = state.before_edit(gesture);
             let changed = state.settings.as_mut().is_some_and(|settings| {
                 ui.add_enabled_ui(!state.reset_pending, |ui| {
-                    settings_ui(ui, settings, mode, state.stop_editor_epoch, &mut state.selected_stop, &mut app.scale_lock)
+                    settings_ui(ui, settings, mode, state.stop_editor_epoch, &mut state.selected_stop, &mut app.scale_lock, &mut gesture)
                 }).inner
             });
             if changed {
@@ -770,7 +798,7 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
     }).inner
 }
 
-fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64, selected_stop: &mut Option<usize>, scale_lock: &mut bool) -> bool {
+fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64, selected_stop: &mut Option<usize>, scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
     let easing_open = settings.easing != ArrayEasing::default();
     let mut changed = crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
         let index = settings.stops.iter().position(|stop| Some(stop.marker_id()) == *selected_stop).unwrap_or(0);
@@ -782,7 +810,7 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
         let id = ui.make_persistent_id(("array_stop_bar", stop_editor_epoch));
         let before = *selected_stop;
         changed |= crate::colour_panel::array_stop_bar(ui, id, &mut settings.stops, selected_stop, |ui, stop| {
-            stop_properties(ui, stop, scale_lock)
+            stop_properties(ui, stop, scale_lock, gesture)
         });
         if *selected_stop != before { ui.ctx().request_repaint(); }
     });
@@ -901,7 +929,7 @@ fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
     changed
 }
 
-fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, scale_lock: &mut bool) -> bool {
+fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
     egui::Frame::new()
         .fill(T.panel_alt)
         .stroke(egui::Stroke::new(1.0, T.border))
@@ -914,20 +942,63 @@ fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, scale_lock: &mut bool) 
                 ui.push_id(("transform", marker), |ui| transform_stop(ui, &mut stop.value, scale_lock)).inner
             }).unwrap_or(false);
             let colour = section(ui, "array_stop_colour_effect", Section::Rule, tr!("Colour Effect"), None, |ui| {
-                ui.push_id(("colour", marker), |ui| ui.horizontal_wrapped(|ui| {
-                    ui.label(text(Type::Label, tr!("Alpha")));
-                    let mut value = stop.value.alpha * 100.0;
-                    let changed = with_type(ui, Type::Data, |ui| {
-                        ui.add(egui::DragValue::new(&mut value).range(0.0..=100.0).suffix(" %").max_decimals(1))
-                    }).named(tr!("Alpha")).changed();
-                    if changed {
-                        stop.value.alpha = value / 100.0;
-                    }
-                    changed
-                }).inner).inner
+                ui.push_id(("colour", marker), |ui| colour_stop(ui, &mut stop.value, gesture)).inner
             }).unwrap_or(false);
             transform || colour
         }).inner
+}
+
+fn colour_stop(ui: &mut Ui, stop: &mut ArrayPropertyStop, gesture: &mut Option<EditGesture>) -> bool {
+    let before = (stop.color, stop.alpha);
+    let current = stop.color.style();
+    let picked = form_row(ui, FORM_LABEL_DOCK, tr!("Style"), |ui| {
+        crate::panels::colour_style_picker(ui, "array_colour_style", tr!("Colour effect style"), current, false)
+    });
+    if let Some(style) = picked.filter(|style| *style != current) {
+        stop.color = stop.color.to_style(style);
+    }
+    match &mut stop.color {
+        ColorEffect::Advanced(transform) => {
+            let [red, green, blue, alpha] = crate::panels::advanced_colour_channels();
+            for (i, (label, mul_name, off_name, _)) in [(3, alpha), (0, red), (1, green), (2, blue)] {
+                let multiplier = if i == 3 { &mut stop.alpha } else { &mut transform.mul[i] };
+                let mut mv = *multiplier * 100.0;
+                let mut ov = transform.add[i] * 255.0;
+                let (mul, add) = form_row(ui, FORM_LABEL_DOCK, label, |ui| {
+                    crate::panels::advanced_colour_fields(ui, &mut mv, &mut ov, mul_name, off_name)
+                });
+                if mul && mv.is_finite() { *multiplier = mv / 100.0; }
+                if add && ov.is_finite() { transform.add[i] = ov / 255.0; }
+            }
+            return before != (stop.color, stop.alpha);
+        }
+        ColorEffect::Brightness(value) => {
+            colour_percent(ui, tr!("Brightness"), value, -100.0..=100.0);
+        }
+        ColorEffect::Tint { color, amount } => {
+            let mut rgb = crate::panels::rgb(*color);
+            form_row(ui, FORM_LABEL_DOCK, tr!("Tint"), |ui| {
+                let response = crate::colour::button(ui, &mut rgb).named(tr!("Tint colour"));
+                if response.changed() {
+                    *color = Rgba::hex(u32::from_be_bytes([0, rgb[0], rgb[1], rgb[2]]));
+                    *gesture = Some(EditGesture::Picker(ui.ctx().viewport_id(), crate::colour::swatch_popup_id(response.id)));
+                }
+                ui.label(text(Type::Data, crate::panels::hex(rgb)));
+            });
+            colour_percent(ui, tr!("Tint amount"), amount, 0.0..=100.0);
+        }
+        _ => {}
+    }
+    stop.alpha = stop.alpha.clamp(0.0, 1.0);
+    colour_percent(ui, tr!("Alpha"), &mut stop.alpha, 0.0..=100.0);
+    before != (stop.color, stop.alpha)
+}
+
+fn colour_percent(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>) {
+    let mut percent = *value * 100.0;
+    if dimension(ui, label, &mut percent, range, " %", true) && percent.is_finite() {
+        *value = percent / 100.0;
+    }
 }
 
 fn transform_stop(ui: &mut Ui, stop: &mut ArrayPropertyStop, scale_lock: &mut bool) -> bool {
@@ -1442,6 +1513,101 @@ mod tests {
     }
 
     #[test]
+    fn stop_colour_styles_share_alpha_and_picker_changes_are_one_live_undo_step() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let node = |app: &mut App, label: &str| {
+            nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label))
+                .unwrap_or_else(|| panic!("missing Array control {label}"))
+        };
+        let numeric = |app: &mut App, label| {
+            nodes(&ctx, app).into_iter().find(|(_, n)| n.role() == Role::SpinButton && n.label() == Some(label))
+                .unwrap_or_else(|| panic!("missing Array numeric field {label}"))
+        };
+        let number = |app: &mut App, label, value| {
+            let (id, _) = numeric(app, label);
+            set_number(&ctx, app, id, value);
+        };
+        let style = |app: &mut App, name| {
+            let (_, chooser) = node(app, "Colour effect style");
+            assert_eq!(chooser.role(), Role::ComboBox);
+            click(&ctx, app, &chooser);
+            let option = node(app, name).1;
+            click(&ctx, app, &option);
+        };
+        let stop = |app: &App| app.array_panel.settings.as_ref().unwrap().stops[0].value.clone();
+        let first_effect = |app: &App| app.s.selected_elements()[0].1.color;
+        let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
+        let original = app.s.committed_document().0.clone();
+
+        number(&mut app, "Alpha", 75.0);
+        style(&mut app, "Brightness");
+        number(&mut app, "Brightness", -45.0);
+        assert_eq!(stop(&app).color, ColorEffect::Brightness(-0.45));
+        assert_eq!(first_effect(&app), ColorEffect::Brightness(-0.45).with_alpha(0.75));
+        let bounds = numeric(&mut app, "Brightness").1.bounds().unwrap();
+        let from = pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
+        let before_drag = steps(&app);
+        drag_gizmo(&ctx, &mut app, from, vec2(12.0, 0.0), false);
+        assert_ne!(first_effect(&app), ColorEffect::Brightness(-0.45).with_alpha(0.75));
+        let to = from + vec2(24.0, 0.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        assert_eq!(steps(&app), before_drag + 1);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        style(&mut app, "Advanced");
+        assert!(!nodes(&ctx, &mut app).iter().any(|(_, n)| n.role() == Role::SpinButton && n.label() == Some("Alpha")));
+        assert_eq!(node(&mut app, "Alpha multiplier").1.numeric_value(), Some(75.0));
+        for (label, value) in [("Alpha multiplier", 50.0), ("Alpha offset", 64.0), ("Red multiplier", -60.0), ("Red offset", 75.0),
+            ("Green multiplier", 20.0), ("Green offset", -4.0), ("Blue multiplier", 80.0), ("Blue offset", 12.0)]
+        {
+            number(&mut app, label, value);
+        }
+        let advanced = first_effect(&app);
+        assert_eq!(advanced.transform().mul, [-0.6, 0.2, 0.8, 0.5]);
+        assert_eq!(advanced.transform().add, [75.0, -4.0, 12.0, 64.0].map(|v| v / 255.0));
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(first_effect(&app).transform().add[2], 0.0);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(first_effect(&app), advanced);
+        style(&mut app, "Tint");
+        assert_eq!(numeric(&mut app, "Alpha").1.numeric_value(), Some(50.0));
+        number(&mut app, "Tint amount", 80.0);
+        let before = steps(&app);
+        let swatch = node(&mut app, "Tint colour").1;
+        click(&ctx, &mut app, &swatch);
+        let hex = node(&mut app, "Hex colour").1;
+        click(&ctx, &mut app, &hex);
+        for (typed, rgb) in [("#ff4000", 0xff4000), ("#20abcd", 0x20abcd)] {
+            history_key(&ctx, &mut app, Key::A, Modifiers::NONE);
+            frame(&ctx, &mut app, vec![Event::Text(typed.to_owned())]);
+            let tint = ColorEffect::Tint { color: Rgba::hex(rgb), amount: 0.8 };
+            assert_eq!(stop(&app).color, tint);
+            assert_eq!(first_effect(&app), tint.with_alpha(0.5));
+        }
+        let tint = stop(&app);
+        assert_eq!(steps(&app), before);
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        assert_eq!(steps(&app), before + 1);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(stop(&app).color, ColorEffect::Tint { color: Rgba::WHITE, amount: 0.8 });
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(stop(&app), tint);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[1].value, ArrayPropertyStop::new(1.0, 1.0));
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        app.array_panel.finish(&mut app.s, false);
+        assert!(app.s.doc == original);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(stop(&app), tint);
+        let history = app.s.history_len();
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.history_len(), history + 1);
+        assert!(app.array_panel.settings.is_none());
+    }
+
+    #[test]
     fn easing_controls_preview_and_follow_session_history_and_draft_lifecycle() {
         let (mut app, ctx) = linear_app();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
@@ -1802,6 +1968,9 @@ mod tests {
     fn radial_panel_keeps_winding_in_open_mode_and_limits_a_closed_loop() {
         let (mut app, ctx) = linear_app();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        // Use the collapsible stop editor to give the open Radial fields room in this viewport.
+        let colour = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Colour Effect")).unwrap().1;
+        click(&ctx, &mut app, &colour);
         let set_field = |app: &mut App, label: &str, value: f64| {
             let fields = nodes(&ctx, app);
             let input = fields.iter().find(|(_, n)| n.role() == Role::SpinButton && n.label() == Some(label)).unwrap().0;

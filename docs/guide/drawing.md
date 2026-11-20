@@ -571,9 +571,16 @@ Click the property track to add a stop. Drag a stop to move it or enter its posi
 percentage. In **Transform**, drag a Scale or Rotation value horizontally or click it to type.
 Scale multiplies the original instance's size on each axis. **Lock scale** keeps the selected stop's
 proportions while editing. Rotation adds to the instance's orientation, including **Rotate instances**.
-Enter 720° at the end of a progression starting at 0° to turn the artwork twice. Open **Colour
-Effect** to change Alpha. With a stop focused, use the arrow keys to nudge it, Shift for larger
-steps, or Delete to remove it.
+Enter 720° at the end of a progression starting at 0° to turn the artwork twice. With a stop
+focused, use the arrow keys to nudge it, Shift for larger steps, or Delete to remove it.
+
+Open **Colour Effect** to change Alpha and choose a style. **Brightness** goes from black at
+−100% to white at +100%. **Tint** blends toward the colour you pick, at the percentage you set.
+**Advanced** gives Alpha, Red, Green, and Blue their own multipliers (−100% to 100%) and offsets
+(−255 to 255). Its Alpha multiplier is the same value as the Alpha field in the other styles.
+Stop effects apply over any colour effect already on the source instance. The **Colour Effect**
+target under **Easing** changes how all these values progress across the copies. Tint picker
+changes made before closing the picker undo together.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
