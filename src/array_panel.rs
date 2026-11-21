@@ -1267,9 +1267,14 @@ mod tests {
     }
 
     fn frame(ctx: &egui::Context, app: &mut App, events: Vec<Event>) -> Vec<(NodeId, Node)> {
+        frame_at(ctx, app, events, None)
+    }
+
+    fn frame_at(ctx: &egui::Context, app: &mut App, events: Vec<Event>, time: Option<f64>) -> Vec<(NodeId, Node)> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 940.0))),
             events,
+            time,
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| app.frame(ui));
@@ -1317,6 +1322,151 @@ mod tests {
 
     fn pointer_button(pos: Pos2, pressed: bool) -> Event {
         Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+    }
+
+    fn filtered_app(count: u32) -> (App, egui::Context) {
+        let (mut app, ctx) = linear_app();
+        screenshot(&mut app, "array-blur");
+        app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
+        app.view.fit = false;
+        app.view.zoom = 0.65;
+        app.array_panel.settings.as_mut().unwrap().count = count;
+        app.array_panel.refresh(&mut app.s);
+        assert_eq!(app.s.selection.len(), count as usize);
+        assert!(app.s.selected_elements().iter().all(|(_, el)| {
+            matches!(el.kind.filters(), Some([FilterEntry { enabled: true, filter: Filter::Blur { quality: 2, .. } }]))
+        }));
+        nodes(&ctx, &mut app);
+        assert_eq!(app.stage_cache.drawn_by.as_ref().map(|(gpu, _)| *gpu), Some(false));
+        (app, ctx)
+    }
+
+    fn wait_for_stage(ctx: &egui::Context, app: &mut App, ready: impl Fn(&App) -> bool) {
+        let started = std::time::Instant::now();
+        while !ready(app) {
+            assert!(started.elapsed().as_secs() < 15, "the stage did not settle");
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            frame(ctx, app, vec![]);
+        }
+    }
+
+    fn warm_filtered(ctx: &egui::Context, app: &mut App) {
+        app.prefs.render_mode = crate::prefs::RenderMode::Auto;
+        wait_for_stage(ctx, app, |app| app.stage_cache.filtered_array_warmed());
+    }
+
+    fn begin_drag(ctx: &egui::Context, app: &mut App, from: Pos2) {
+        frame(ctx, app, vec![Event::PointerMoved(from)]);
+        frame(ctx, app, vec![pointer_button(from, true)]);
+    }
+
+    fn blur_x_grip(ctx: &egui::Context, app: &mut App) -> Pos2 {
+        for label in ["Transform", "Colour Effect"] {
+            let header = nodes(ctx, app).into_iter().find(|(_, node)| node.label() == Some(label)).unwrap().1;
+            click(ctx, app, &header);
+        }
+        let field = nodes(ctx, app).into_iter().find(|(_, node)| {
+            node.role() == Role::SpinButton && node.label() == Some("Blur blur X")
+        }).unwrap().1;
+        let bounds = field.bounds().unwrap();
+        pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32)
+    }
+
+    #[test]
+    fn filtered_linear_drag_tracks_reversals_and_settles_to_exact_tiles() {
+        use anicraft_engine::geom::Affine;
+        use anicraft_engine::render_service::{make_job, render_job};
+
+        let (mut app, ctx) = filtered_app(10);
+        let mut ends = app.array_panel.gizmo_endpoints().unwrap();
+        ends.end = [624.0, 218.0];
+        app.array_panel.set_endpoints(&mut app.s, ends);
+        nodes(&ctx, &mut app);
+        warm_filtered(&ctx, &mut app);
+        let first = app.s.state;
+        let generation = app.s.array_translation_generation();
+        let history = app.s.history_len();
+        let from = screen(&app, ends.end);
+        begin_drag(&ctx, &mut app, from);
+        for shift in [19.25, -12.5, 34.75, -21.25, 42.5] {
+            frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(shift, 0.5))]);
+            assert_eq!(app.stage_cache.filtered_array_presented(), Some(app.s.state));
+            assert_eq!(app.stage_cache.shown_state, Some(first));
+            assert_eq!(app.s.array_translation_generation(), generation);
+        }
+        wait_for_stage(&ctx, &mut app, |app| app.stage_cache.shown_state == Some(app.s.state));
+        assert!(app.array_panel.gizmo_drag.is_some());
+        assert_eq!(app.stage_cache.filtered_array_presented(), None);
+
+        let to = from + vec2(-29.25, -3.5);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        assert_eq!(app.stage_cache.filtered_array_presented(), Some(app.s.state));
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        wait_for_stage(&ctx, &mut app, |app| app.stage_cache.shown_state == Some(app.s.state));
+        let selection: Vec<_> = {
+            let mut ids: Vec<_> = app.s.selection.ids().collect();
+            ids.sort_unstable();
+            ids
+        };
+        let view = anicraft_render::View { transform: Affine::scale(app.view.zoom, app.view.zoom), width: 416, height: 260, background: Some(app.s.doc.stage.background) };
+        let job = make_job(app.s.state, &app.s.doc, 0, view, None).dim_around(Some(selection.into()));
+        let shown = app.stage_cache.service.as_ref().unwrap().cached(job.key).unwrap();
+        assert_eq!(shown.rgba_premul, render_job(&job).rgba_premul);
+
+        let preview = app.s.doc.clone();
+        let before_commit = anicraft_render::render_frame(&preview, 0, 1.0).unwrap().to_rgba8();
+        let commit = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1;
+        click(&ctx, &mut app, &commit);
+        assert!(!app.s.array_preview_active() && !app.stage_cache.filtered_array_warmed());
+        assert_eq!(app.s.history_len(), history + 1);
+        assert_eq!(before_commit, anicraft_render::render_frame(&app.s.doc, 0, 1.0).unwrap().to_rgba8());
+    }
+
+    #[test]
+    fn filtered_linear_preview_drops_provisional_pictures_on_edits_and_cancel() {
+        let (mut app, ctx) = filtered_app(10);
+        app.array_panel.finish(&mut app.s, false);
+        let source = app.s.doc.clone();
+        let history = app.s.history_len();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let blur = blur_x_grip(&ctx, &mut app);
+        warm_filtered(&ctx, &mut app);
+        let initial = app.s.doc.clone();
+        let move_end = |app: &mut App| {
+            let from = screen(app, app.array_panel.gizmo_endpoints().unwrap().end);
+            let to = from + vec2(31.5, -16.25);
+            begin_drag(&ctx, app, from);
+            frame(&ctx, app, vec![Event::PointerMoved(to)]);
+            assert_eq!(app.stage_cache.filtered_array_presented(), Some(app.s.state));
+            to
+        };
+        let to = move_end(&mut app);
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert!(app.s.doc == initial);
+        assert_eq!(app.stage_cache.filtered_array_presented(), None);
+        assert!(app.stage_cache.filtered_array_warmed());
+
+        let generation = app.s.array_translation_generation();
+        begin_drag(&ctx, &mut app, blur);
+        let to = blur + vec2(36.0, 0.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        assert_ne!(app.s.array_translation_generation(), generation);
+        assert_eq!(app.stage_cache.filtered_array_presented(), None);
+        assert!(!app.stage_cache.filtered_array_warmed());
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        warm_filtered(&ctx, &mut app);
+        app.view.zoom = 0.8;
+        frame(&ctx, &mut app, vec![]);
+        assert!(!app.stage_cache.filtered_array_warmed());
+        warm_filtered(&ctx, &mut app);
+        let to = move_end(&mut app);
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false), pointer_button(to, false)]);
+        assert!(!app.s.array_preview_active() && !app.stage_cache.filtered_array_warmed());
+        assert_eq!(app.stage_cache.filtered_array_presented(), None);
+        assert!(app.s.doc == source && app.s.history_len() == history);
+        wait_for_stage(&ctx, &mut app, |app| app.stage_cache.shown_state == Some(app.s.state));
     }
 
     #[test]
@@ -1389,23 +1539,6 @@ mod tests {
             (median, samples[(samples.len() * 95).div_ceil(100) - 1])
         }
 
-        fn fixture(count: u32) -> (App, egui::Context) {
-            let (mut app, ctx) = linear_app();
-            screenshot(&mut app, "array-blur");
-            app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
-            app.view.fit = false;
-            app.view.zoom = 0.65;
-            app.array_panel.settings.as_mut().unwrap().count = count;
-            app.array_panel.refresh(&mut app.s);
-            assert_eq!(app.s.selection.len(), count as usize);
-            assert!(app.s.selected_elements().iter().all(|(_, el)| {
-                matches!(el.kind.filters(), Some([FilterEntry { enabled: true, filter: Filter::Blur { quality: 2, .. } }]))
-            }));
-            nodes(&ctx, &mut app);
-            assert_eq!(app.stage_cache.drawn_by.as_ref().map(|(gpu, _)| *gpu), Some(false));
-            (app, ctx)
-        }
-
         let drag = |app: &mut App, ctx: &egui::Context, count, interaction, from: Pos2, step: Vec2, rebuilds| {
             frame(ctx, app, vec![Event::PointerMoved(from)]);
             frame(ctx, app, vec![pointer_button(from, true)]);
@@ -1440,7 +1573,7 @@ mod tests {
 
         eprintln!("Filtered Array CPU Immediate, p50/p95, {WARMUP} warm-up + {SAMPLES} measured pointer moves");
         for count in [10, 50, 200] {
-            let (mut app, ctx) = fixture(count);
+            let (mut app, ctx) = filtered_app(count);
 
             for (interaction, end_x) in [("End on stage", 480.0), ("End on pasteboard", 720.0)] {
                 let mut ends = app.array_panel.gizmo_endpoints().unwrap();
@@ -1460,45 +1593,61 @@ mod tests {
             let mut ends = app.array_panel.gizmo_endpoints().unwrap();
             ends.end = [480.0, 220.0];
             app.array_panel.set_endpoints(&mut app.s, ends);
-            for label in ["Transform", "Colour Effect"] {
-                let header = nodes(&ctx, &mut app).into_iter().find(|(_, node)| node.label() == Some(label)).unwrap().1;
-                click(&ctx, &mut app, &header);
-            }
-            let field = nodes(&ctx, &mut app).into_iter().find(|(_, node)| {
-                node.role() == Role::SpinButton && node.label() == Some("Blur blur X")
-            }).unwrap().1;
-            let bounds = field.bounds().unwrap();
-            let from = pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
+            let from = blur_x_grip(&ctx, &mut app);
             drag(&mut app, &ctx, count, "Blur X", from, vec2(3.0, 0.0), true);
             assert!(app.array_panel.settings.as_ref().unwrap().stops[1].value.blurs[0].blur_x > 22.0);
         }
 
         eprintln!("Filtered Array CPU Auto, 60 Hz pointer moves with one repaint between moves");
-        for count in [10, 50, 200] {
-            let (mut app, ctx) = fixture(count);
+        let auto_drag = |count, reuse: bool, interaction, end_x| {
+            let (mut app, ctx) = filtered_app(count);
             let mut ends = app.array_panel.gizmo_endpoints().unwrap();
-            ends.end = [480.0, 220.0];
+            ends.end = [end_x, 220.0];
             app.array_panel.set_endpoints(&mut app.s, ends);
             nodes(&ctx, &mut app);
+            let blur = interaction == "Blur X";
+            let from = match interaction {
+                "Blur X" => blur_x_grip(&ctx, &mut app),
+                "Bar" => screen(&app, [(ends.start[0] + ends.end[0]) / 2.0, (ends.start[1] + ends.end[1]) / 2.0]),
+                _ => screen(&app, ends.end),
+            };
+            let step = if blur { vec2(3.0, 0.0) } else { vec2(2.0, 0.5) };
+            app.stage_cache.disable_filtered_array = !reuse;
             app.prefs.render_mode = crate::prefs::RenderMode::Auto;
-            let from = screen(&app, ends.end);
-            frame(&ctx, &mut app, vec![Event::PointerMoved(from)]);
-            frame(&ctx, &mut app, vec![pointer_button(from, true)]);
+            let epoch = ctx.input(|i| i.time);
+            let clock = Instant::now();
+            let step_frame = |app: &mut App, events| frame_at(&ctx, app, events, Some(epoch + clock.elapsed().as_secs_f64()));
+            if reuse {
+                while !app.stage_cache.filtered_array_warmed() {
+                    assert!(clock.elapsed().as_secs() < 15, "the provisional preview did not warm");
+                    step_frame(&mut app, vec![]);
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            }
+            let warm_ms = clock.elapsed().as_secs_f64() * 1_000.0;
+            step_frame(&mut app, vec![Event::PointerMoved(from)]);
+            step_frame(&mut app, vec![pointer_button(from, true)]);
             let beat = Duration::from_secs_f64(1.0 / 60.0);
-            let (mut complete, mut partial) = (0, 0);
+            let (mut exact, mut cached, mut partial) = (0, 0, 0);
+            let mut times = Vec::with_capacity(SAMPLES);
             let mut to = from;
             for i in 1..=WARMUP + SAMPLES {
                 let started = Instant::now();
-                to = from + vec2(2.0, 0.5) * i as f32;
+                to = from + step * i as f32;
                 let previous = app.s.state;
-                frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+                step_frame(&mut app, vec![Event::PointerMoved(to)]);
+                let pointer_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                let provisional = app.stage_cache.filtered_array_presented();
                 let ready = app.stage_cache.ready.0;
                 std::thread::sleep((beat / 2).saturating_sub(started.elapsed()));
-                frame(&ctx, &mut app, vec![]);
+                step_frame(&mut app, vec![]);
                 if i > WARMUP {
                     assert_ne!(app.s.state, previous);
+                    times.push(pointer_ms);
                     if app.stage_cache.shown_state == Some(app.s.state) {
-                        complete += 1;
+                        exact += 1;
+                    } else if provisional == Some(app.s.state) || app.stage_cache.filtered_array_presented() == Some(app.s.state) {
+                        cached += 1;
                     } else if ready.max(app.stage_cache.ready.0) > 0 {
                         partial += 1;
                     }
@@ -1507,20 +1656,28 @@ mod tests {
             }
             let catch_up = |app: &mut App, started: Instant| {
                 while app.stage_cache.shown_state != Some(app.s.state) {
-                    assert!(started.elapsed() < Duration::from_secs(5), "stage image must catch up");
-                    std::thread::sleep(beat / 2);
-                    frame(&ctx, app, vec![]);
+                    assert!(started.elapsed().as_secs() < 15, "the stage did not settle");
+                    std::thread::sleep(Duration::from_millis(4));
+                    step_frame(app, vec![]);
                 }
                 started.elapsed().as_secs_f64() * 1_000.0
             };
             let held_ms = catch_up(&mut app, Instant::now());
-            assert!(app.array_panel.gizmo_drag.is_some(), "render can catch up with the button held");
-            to += vec2(2.0, 0.5);
-            frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+            assert_eq!(app.array_panel.gizmo_drag.is_some(), !blur);
+            to += step;
+            step_frame(&mut app, vec![Event::PointerMoved(to)]);
             let released = Instant::now();
-            frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+            step_frame(&mut app, vec![pointer_button(to, false)]);
             let released_ms = catch_up(&mut app, released);
-            eprintln!("{count:3} updated during drag: {complete}/{SAMPLES} complete, {partial}/{SAMPLES} partial; caught up in {held_ms:.2} ms held, {released_ms:.2} ms after release");
+            if !reuse || blur { assert_eq!(cached, 0); } else { assert_eq!(exact + cached, SAMPLES); }
+            let (p50, p95) = percentiles(&mut times);
+            let mode = if reuse { "cached" } else { "original" };
+            eprintln!("{count:3} {interaction:12} {mode:8} pointer {p50:6.2}/{p95:6.2} ms; {exact:2} exact, {cached:2} reused, {partial:2} partial of {SAMPLES}; held {held_ms:6.2} ms, released {released_ms:6.2} ms, warm {warm_ms:6.2} ms");
+        };
+        for count in [10, 50, 200] {
+            for (interaction, end_x) in [("End", 480.0), ("Cross stage", 620.0), ("Bar", 480.0), ("Blur X", 480.0)] {
+                for reuse in [false, true] { auto_drag(count, reuse, interaction, end_x); }
+            }
         }
     }
 

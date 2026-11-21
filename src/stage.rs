@@ -17,6 +17,8 @@ use anicraft_engine::cmds_raw::Grab;
 use egui::{Color32, CursorIcon, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
+mod filtered_array;
+
 /// Frames rendered ahead of the playhead during playback.
 const LOOKAHEAD: u32 = 12;
 /// In Auto mode, edits render on the UI thread when the visible tiles last took at most this
@@ -35,6 +37,7 @@ struct TileTex {
     rect: [f32; 4],
     tex: TileImage,
     used: u64,
+    array: bool,
 }
 
 /// A tile's texture: uploaded from the CPU's bytes, or drawn there by the GPU stage (ADR 0029).
@@ -72,11 +75,17 @@ pub struct Cache {
     /// The selection pattern's texture and the colour it was made in (`selection_pattern`).
     pattern: Option<(Color32, egui::TextureHandle)>,
     array_tiles: Option<crate::array_gizmo::TileBounds>,
+    filtered_array: filtered_array::Cache,
+    #[cfg(test)]
+    pub(crate) disable_filtered_array: bool,
 }
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), laid_out: false, service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None }
+        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), laid_out: false, service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None, filtered_array: Default::default(),
+            #[cfg(test)]
+            disable_filtered_array: false,
+        }
     }
 }
 
@@ -96,6 +105,7 @@ impl Cache {
     pub fn forget_document(&mut self) {
         self.tiles.clear();
         self.array_tiles = None;
+        self.filtered_array = Default::default();
         self.shown_state = None;
         self.ready = (0, 0);
         if let Some(s) = &self.service {
@@ -121,7 +131,13 @@ impl Cache {
         }
     }
 
-    fn upload(&mut self, ctx: &egui::Context, img: &FrameImage, rect: [f32; 4], keep: &[u64]) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn filtered_array_warmed(&self) -> bool { self.filtered_array.warmed() }
+
+    #[cfg(test)]
+    pub(crate) fn filtered_array_presented(&self) -> Option<anicraft_engine::StateId> { self.filtered_array.presented }
+
+    fn upload(&mut self, ctx: &egui::Context, img: &FrameImage, rect: [f32; 4], keep: &[u64], array: bool) -> Option<String> {
         if let Some(e) = &img.error {
             return Some(e.clone());
         }
@@ -141,7 +157,7 @@ impl Cache {
             }
         };
         self.tick += 1;
-        self.tiles.push(TileTex { key: img.key, rect, tex, used: self.tick });
+        self.tiles.push(TileTex { key: img.key, rect, tex, used: self.tick, array });
         // Evict least recently used tiles that are not on screen.
         while self.tiles.len() > MAX_TILE_TEXTURES {
             let victim = self.tiles.iter().enumerate().filter(|(_, t)| !keep.contains(&t.key)).min_by_key(|(_, t)| t.used).map(|(i, _)| i);
@@ -234,6 +250,8 @@ fn to_v(p: Pos2) -> Vec2 {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let array_active = app.s.array_preview_active();
+    #[cfg(test)]
+    { app.stage_cache.filtered_array.presented = None; }
     // View › Rulers along the top and the left (ADR 0076); the stage view in what is left.
     let (canvas, bars) = crate::rulers::layout(app, ui.max_rect());
     let now = ui.input(|i| i.time);
@@ -349,7 +367,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     } else {
         None
     };
+    let before_gizmo = app.s.state;
     let array_gizmo = if array_active { crate::array_gizmo::input(app, ui, canvas, array_projection) } else { None };
+    let moved_array = before_gizmo != app.s.state;
     let array_generation = (!preview && edit_view.is_none()).then(|| app.s.array_translation_generation()).flatten();
     let array_instances = if app.array_panel.shows_registrations() || array_generation.is_some() { app.s.selected_elements() } else { Vec::new() };
     // Library items dragged onto the stage land at the pointer (ADR 0053).
@@ -1073,10 +1093,27 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             job
         };
         let jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = tile_job(&t); (t, j) }).collect();
+        let allow_filtered = app.prefs.render_mode == RenderMode::Auto && !app.playing
+            && matches!(app.array_panel.gizmo_geometry(), Some(crate::array_gizmo::Geometry::Linear(_)));
+        #[cfg(test)]
+        let allow_filtered = allow_filtered && !app.stage_cache.disable_filtered_array;
+        let provisional = if allow_filtered && let Some(generation) = tile_generation
+            && array_instances.first().and_then(|(_, el)| el.kind.filters()).is_some_and(|filters| {
+                filters.iter().any(|entry| entry.enabled && matches!(entry.filter, anicraft_engine::doc::Filter::Blur { .. }))
+            })
+            && let Some(svc) = &app.stage_cache.service
+        {
+            let cache = &mut app.stage_cache.filtered_array;
+            cache.update(ui.ctx(), svc, filtered_array::Scene { generation, state, dim, scale: z, jobs: &jobs, instances: &array_instances }, moved_array);
+            cache.provisional(ui.ctx(), state, app.array_panel.gizmo_drag.is_some())
+        } else {
+            app.stage_cache.filtered_array = Default::default();
+            None
+        };
         let keys: Vec<u64> = jobs.iter().map(|(_, j)| j.key).collect();
         let missing: Vec<usize> = (0..jobs.len()).filter(|&i| !app.stage_cache.has(keys[i])).collect();
 
-        if !missing.is_empty()
+        if !missing.is_empty() && provisional != Some(true)
             && let Some(svc) = &app.stage_cache.service
         {
             // Latency vs throughput (ADR 0006): an edit (the document changed under the picture
@@ -1090,7 +1127,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && match app.prefs.render_mode {
                     RenderMode::Immediate => true,
                     RenderMode::Background => false,
-                    RenderMode::Auto => app.stage_cache.ms <= IMMEDIATE_BUDGET_MS,
+                    RenderMode::Auto => provisional.is_none() && app.stage_cache.ms <= IMMEDIATE_BUDGET_MS,
                 };
             let batch: Vec<FrameJob> = missing.iter().map(|&i| jobs[i].1.clone()).collect();
             let started = web_time::Instant::now();
@@ -1104,7 +1141,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if img.error.is_none() {
                         app.stage_cache.drawn_by = Some((img.gpu, img.fallback.clone()));
                     }
-                    if let Some(e) = app.stage_cache.upload(ui.ctx(), &img, jobs[i].0.rect, &keys) {
+                    if let Some(e) = app.stage_cache.upload(ui.ctx(), &img, jobs[i].0.rect, &keys, array_active) {
                         error = Some(e);
                     }
                 }
@@ -1141,6 +1178,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             } else if !array_active {
                 ahead.extend(tiles_for(z, stage_px, px, 1, bg, pasteboard).into_iter().filter(|t| !jobs.iter().any(|(v, _)| v.rect == t.rect)).map(|t| tile_job(&t)));
+            } else {
+                ahead = app.stage_cache.filtered_array.pending();
             }
             svc.prefetch(ahead);
         }
@@ -1154,25 +1193,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let r = Rect::from_min_max(st_screen(Vec2::new(t.rect[0], t.rect[1])), st_screen(Vec2::new(t.rect[2], t.rect[3])));
             painter.image(t.tex.id(), r, uv, Color32::WHITE);
         };
-        if ready < keys.len() && array_active {
-            // A transparent pasteboard tile cannot cover stale artwork. Draw at most one
-            // placeholder for each missing tile, and remove it when that tile becomes current.
-            for (spec, job) in &jobs {
-                if !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
-                    && let Some(old) = app.stage_cache.tiles.iter().filter(|t| t.rect == spec.rect).max_by_key(|t| t.used)
-                {
-                    paint_tile(old);
+        if ready < keys.len() && provisional.is_some() {
+            app.stage_cache.filtered_array.paint(&painter.with_clip_rect(vis), state, &array_instances, st_screen);
+        } else {
+            if ready < keys.len() && array_active {
+                // A transparent pasteboard tile cannot cover stale artwork. Draw at most one
+                // placeholder for each missing tile, and remove it when that tile becomes current.
+                for (spec, job) in &jobs {
+                    if !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
+                        && let Some(old) = app.stage_cache.tiles.iter().filter(|t| t.rect == spec.rect).max_by_key(|t| t.used)
+                    {
+                        paint_tile(old);
+                    }
+                }
+            } else if ready < keys.len() {
+                let mut stale: Vec<&TileTex> = app.stage_cache.tiles.iter().filter(|t| !t.array && !keys.contains(&t.key) && overlaps(&t.rect)).collect();
+                stale.sort_by_key(|t| t.used);
+                for t in stale.iter().rev().take(96).rev() {
+                    paint_tile(t);
                 }
             }
-        } else if ready < keys.len() {
-            let mut stale: Vec<&TileTex> = app.stage_cache.tiles.iter().filter(|t| !keys.contains(&t.key) && overlaps(&t.rect)).collect();
-            stale.sort_by_key(|t| t.used);
-            for t in stale.iter().rev().take(96).rev() {
+            for t in app.stage_cache.tiles.iter().filter(|t| keys.contains(&t.key)) {
                 paint_tile(t);
             }
-        }
-        for t in app.stage_cache.tiles.iter().filter(|t| keys.contains(&t.key)) {
-            paint_tile(t);
         }
 
         // While a background render catches up with a drag, outline where the selection is now,

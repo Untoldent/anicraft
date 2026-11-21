@@ -47,9 +47,25 @@ pub struct FrameJob {
     pub front: Option<Arc<Front>>,
     /// Editor-only focus. IDs are sorted so membership is cheap while evaluating the picture.
     focus: Option<Arc<[ElementId]>>,
+    /// An already evaluated layer or backdrop, with its own scene identity.
+    prepared: Option<Arc<DisplayList>>,
 }
 
 impl FrameJob {
+    /// Render prepared artwork with the same view and rasterizer. Jobs for the same
+    /// document state and part must supply the same list, even across different tile views.
+    pub fn with_prepared_list(mut self, part: impl Hash, list: Arc<DisplayList>) -> Self {
+        let mix = |key| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (key, "prepared display list", &part).hash(&mut h);
+            h.finish()
+        };
+        self.key = mix(self.key);
+        self.scene = mix(self.scene);
+        self.prepared = Some(list);
+        self
+    }
+
     /// The same job seen through the scene's camera (`on`), keyed apart from the plain one.
     pub fn through_camera(mut self, on: bool) -> FrameJob {
         if on && !self.camera {
@@ -103,6 +119,9 @@ impl FrameJob {
     /// What the job draws: its frame with what its onion settings add (ADR 0047), on the open
     /// symbol's own timeline when there is one (ADR 0051).
     pub fn display_list(&self) -> DisplayList {
+        if let Some(list) = &self.prepared {
+            return list.as_ref().clone();
+        }
         let onion = self.onion.as_ref().filter(|o| o.shows());
         let mut list = match (&self.front, onion) {
             (Some(front), skin) if skin.is_some() || self.focus.is_some() => {
@@ -317,7 +336,7 @@ pub fn frame_key(state: StateId, frame: u32, view: &View, onion: Option<&OnionSk
 /// A job whose `scene` is derived from the same inputs as its key.
 pub fn make_job(state: StateId, doc: &Document, frame: u32, view: View, onion: Option<&OnionSkin>) -> FrameJob {
     let onion = onion.filter(|o| o.shows()).copied();
-    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, focus: None }
+    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, focus: None, prepared: None }
 }
 
 /// A job for rasterizer `raster` (from [`RenderService::raster_id`]; 0 is the CPU oracle, and
@@ -393,7 +412,7 @@ pub fn render_batch(jobs: &[FrameJob]) -> Vec<FrameImage> {
 fn render_batch_by(jobs: &[FrameJob], slot: &RasterSlot) -> Vec<FrameImage> {
     let mut scenes: HashMap<u64, Arc<DisplayList>> = HashMap::new();
     for j in jobs {
-        scenes.entry(j.scene).or_insert_with(|| Arc::new(j.display_list()));
+        scenes.entry(j.scene).or_insert_with(|| j.prepared.clone().unwrap_or_else(|| Arc::new(j.display_list())));
     }
     jobs.par_iter()
         .map(|j| {
@@ -628,6 +647,11 @@ impl RenderService {
         self.request_batch(vec![job]).into_iter().next().flatten()
     }
 
+    /// Read a finished image without scheduling work or replacing the urgent batch.
+    pub fn cached(&self, key: u64) -> Option<Arc<FrameImage>> {
+        self.cache().get(key)
+    }
+
     /// Renders on the calling thread (one scene evaluation, tiles in parallel) and caches the
     /// results: for edits, where showing the change in this frame matters most.
     pub fn render_now_batch(&self, jobs: Vec<FrameJob>) -> Vec<Arc<FrameImage>> {
@@ -707,7 +731,7 @@ impl RenderService {
     pub fn wait_for(&self, key: u64, ms: u64) -> Option<Arc<FrameImage>> {
         let deadline = Instant::now() + std::time::Duration::from_millis(ms);
         while Instant::now() < deadline {
-            if let Some(img) = self.cache().get(key) {
+            if let Some(img) = self.cached(key) {
                 return Some(img);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));

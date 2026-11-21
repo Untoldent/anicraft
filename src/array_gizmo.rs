@@ -232,11 +232,11 @@ pub(crate) struct TileBounds {
 
 impl TileBounds {
     pub fn new(generation: StateId, list: &DisplayList, instances: &[(LayerId, Arc<Element>)]) -> Self {
-        let positions: HashMap<_, _> = instances.iter().map(|(_, el)| (el.id, el.transform.translation())).collect();
         let mut bounds = Self { generation, relative: None };
         // Filters can extend beyond path bounds and a moved mask can change other artwork.
         // Keep the full render path in those scenes.
         if list.groups.iter().any(|g| !g.filters.is_empty()) { return bounds; }
+        let positions: HashMap<_, _> = instances.iter().map(|(_, el)| (el.id, el.transform.translation())).collect();
         let mut footprint = ArtRect::EMPTY;
         for item in &list.items {
             let Some(at) = positions.get(&item.element) else { continue };

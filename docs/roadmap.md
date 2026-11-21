@@ -25,7 +25,9 @@ colour and Blur. Quit resolves an active Array before asking about unsaved docum
 Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
 direction, length and spacing are editable in the panel. Both modes display white pivot markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only
-Linear edits reuse the instances and eligible stage tiles. Radial distribution supports an explicit
+Linear edits reuse the instances and eligible stage tiles. Auto can reposition warmed Blur images
+during eligible Linear stage drags, then draws exact tiles when the pointer pauses or is released.
+Radial distribution supports an explicit
 Closed Loop and open arcs with a signed sweep, spiral offset and two-axis centre drift. Its stage
 controller has Centre, Start, End and Drift handles, a draggable drift bar and a curved guide.
 

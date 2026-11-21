@@ -318,7 +318,7 @@ generation on each measured field update. The renderer still quantizes blur widt
 pixels, so an eventual pixel cache could reuse resolved widths across edits that land on the
 same rasterized value.
 
-An isolated filtered-layer cache could reuse a padded image on translations at the same
+The original proposal was to reuse a padded image on translations at the same
 device-pixel phase. It would need to key the artwork frame, view scale, transform basis,
 resolved filters and effective colour, retain correct clipping and stacking, and composite
 with the current backdrop. Rotation, scale, filter edits that change the resolved effect,
@@ -326,6 +326,75 @@ or a change in device-pixel phase require a suitable fresh raster. For fractiona
 a translated image could serve as a transient preview while the ordinary renderer draws
 the exact current image and the final released state. The probe covers isolated normal-blend
 copies with no masks. It does not exercise a GPU layer cache.
+
+#### Provisional Linear drag preview
+
+Auto now uses the position-only Array generation to keep a bounded warm set of
+premultiplied textures. The normal render service draws the backdrop tiles and the
+isolated Blur copies off the input path once the view and Array have been still for
+100 ms. The warm texture set holds one generation and view, up to 8 Mi pixels (32 MiB of
+RGBA8 textures), with a 2048-pixel patch edge limit and 32 texture uploads per UI frame.
+The render service accounts for the CPU images in its existing cache budget.
+
+During an eligible gizmo move, the stage draws the backdrop and places the warmed
+copy textures in stacking order. The ordinary exact tile batch resumes after 65 ms
+without motion or on release. The provisional frame stays visible until the whole
+current exact batch is ready. Texture interpolation at fractional offsets and separate
+8-bit layer composition can differ from fresh rasterization. The stage keeps the provisional
+pictures in their own cache, and the existing exact path renders the document and exports.
+
+Eligibility requires Linear geometry, stable realized transforms, an enabled source Blur,
+and an independent normal-blend foreground stack. Dim Stage can supply that order. The
+cache defers to standard rendering for cold starts, over-budget scenes, other active
+filter types, masks, shared groups, camera or onion previews, and unsupported stacking.
+Numerical edits, including Blur X/Y, use the exact stage path. Changing properties,
+renderers, or the view scale invalidates the warm set. Stage clipping is applied while
+drawing, so a prepared copy can cross onto the pasteboard without being cropped to its old
+position.
+
+The same `measure_filtered_preview` command now also runs paired Auto trials with the
+cache disabled and enabled in the same binary. Each trial starts with the same fixture,
+uses a wall-clock egui input clock, and samples 30 moves after six warm-up moves. Pointer
+time measures the UI frame that consumes each event. The probe counts current exact,
+provisional, and partial frames on the event frame and one intervening repaint. These are
+editor frame timings on the CPU stage, before display presentation.
+
+| Instances | Auto drag | Original pointer ms p50 / p95 | Warm-cache pointer ms p50 / p95 | Fresh frames out of 30, original → enabled |
+|---:|---|---:|---:|---:|
+| 10 | End on stage | 4.51 / 7.96 | 2.85 / 4.59 | 0 → 30 |
+| 10 | End crossing stage edge | 3.13 / 5.07 | 2.33 / 4.65 | 0 → 30 |
+| 10 | Translate bar | 3.86 / 5.62 | 2.33 / 4.72 | 0 → 30 |
+| 10 | Blur X field | 4.36 / 8.51 | 9.85 / 21.98 | 2 → 19 |
+| 50 | End on stage | 3.35 / 7.38 | 2.79 / 4.80 | 0 → 30 |
+| 50 | End crossing stage edge | 4.58 / 9.83 | 2.71 / 4.32 | 0 → 30 |
+| 50 | Translate bar | 2.90 / 5.34 | 2.93 / 4.40 | 0 → 30 |
+| 50 | Blur X field | 3.58 / 6.45 | 3.64 / 6.53 | 0 → 0 |
+| 200 | End on stage | 5.22 / 6.11 | 3.16 / 5.26 | 0 → 30 |
+| 200 | End crossing stage edge | 4.28 / 5.67 | 1.07 / 2.61 | 0 → 30 |
+| 200 | Translate bar | 2.51 / 3.08 | 2.70 / 4.13 | 0 → 30 |
+| 200 | Blur X field | 3.64 / 4.58 | 2.94 / 4.22 | 0 → 0 |
+
+Every fresh geometry frame in the enabled trials used provisional pictures. The original
+geometry trials in the table showed no fresh full or partial tiles during the sampled moves, consistent
+with the checkpoint. The 200-copy End drag still took 102.23 ms p50 in Immediate, compared
+with 106.12 ms at the checkpoint. Immediate continues to rasterize each edit synchronously.
+All Blur-field samples took the ordinary stage path in both Auto trials. At 10 copies, the
+trial with the cache enabled showed more exact updates and longer pointer frames. Auto's
+12 ms scheduling threshold depends on the preceding render, and both trials showed zero
+cache reuse on Blur-field edits.
+
+The textures were ready in 121–197 ms, including the 100 ms dwell. Across the enabled
+geometry trials, exact catch-up took 77–159 ms from the end of the timed motion with the
+button held, and 22–90 ms from release on the next move. The original geometry trials took
+19–183 ms held and 3–98 ms after release. The enabled trials kept the current artwork
+visible while waiting for exact tiles. The paired numbers are one run on Windows x86-64
+with the Intel Core Ultra 9 185H and 22 logical processors.
+
+A repeat run with the final texture cap produced the same 30/30 provisional updates in each
+geometry trial and zero during Blur edits. For 200 copies, End measured 4.78 → 2.08 ms p50
+on stage and 4.56 → 1.07 ms while crossing the stage edge. The 10-copy bar trial showed how
+Auto can vary with render cost: the original path drew 27/30 exact updates at 17.30 ms p50,
+and the warm cache drew 30/30 provisional updates at 2.50 ms p50.
 
 ### How budgets are enforced
 

@@ -126,6 +126,14 @@ is required now.
 - Dragging is available across the pasteboard. Keep feedback live while reusing stable preview
   artwork and unaffected stage tiles where possible. Measure inside- and outside-stage drags at
   different counts before and after performance changes.
+- Auto rendering can warm a bounded set of isolated Blur pictures and the backdrop once the
+  current Linear Array and view settle. When the copies form an independent normal-blend
+  foreground stack, moving Start, End or the bar places those pictures at the current geometry.
+  Dim Stage makes the preview a foreground stack when the copies have no shared compositing
+  group. A pause of 65 ms or release requests exact tiles and replaces the provisional picture
+  as one frame. Parameter changes, a new view scale, masks, shared groups and other filter types
+  use the normal rendering path. Commit and export render the baked document through the
+  existing pipeline.
 
 ### Radial and spiral distribution
 
@@ -336,7 +344,9 @@ progression when unchecked. Filters is available when the source has a Blur filt
     and resolving a preview before the normal Save/Discard/Cancel question.
 11. **Colour Effect property stops** covers Brightness, Tint, and Advanced channels alongside Alpha.
 12. **Blur filter stops** vary each source Blur independently while preserving the filter stack.
-13. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
+13. **Responsive filtered dragging** repositions cached Linear Blur pictures during eligible Auto
+    gestures and renders exact artwork at rest.
+14. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
