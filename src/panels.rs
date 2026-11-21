@@ -1706,6 +1706,17 @@ fn filter_grip(ui: &mut egui::Ui, fname: &str, i: usize, n: usize, act: &mut Opt
     resp.on_hover_text(tr!("Drag to change the order (filters apply from the top down)"))
 }
 
+pub(crate) fn filter_blur_fields(ui: &mut egui::Ui, fname: &str, blur_x: &mut f32, blur_y: &mut f32) -> bool {
+    let max = anicraft_engine::doc::MAX_BLUR;
+    with_type(ui, Type::Data, |ui| {
+        let x = ui.add(egui::DragValue::new(blur_x).prefix("X ").suffix(" px").speed(0.25).range(0.0..=max).max_decimals(1))
+            .named(&tr!("{filter} blur X", filter = fname));
+        let y = ui.add(egui::DragValue::new(blur_y).prefix("Y ").suffix(" px").speed(0.25).range(0.0..=max).max_decimals(1))
+            .named(&tr!("{filter} blur Y", filter = fname));
+        x.changed() || y.changed()
+    })
+}
+
 /// The Filters rows of a movie clip or button instance, as Animate's Filters section: Add,
 /// Presets and an options menu (copy, paste, all on or off, remove all), then each filter with
 /// its grip (drag, or Alt+arrows, to reorder), its on/off switch, its name and Remove, and its
@@ -1920,10 +1931,8 @@ fn filter_rows(app: &mut App, ui: &mut egui::Ui, current: &[anicraft_engine::doc
             });
             let f = &mut entry.filter;
             let blur_rows = |ui: &mut egui::Ui, bx: &mut f32, by: &mut f32, quality: &mut u8, changed: &mut Option<&'static str>| {
-                row(ui, tr!("Blur"), |ui| {
-                    let a = ui.add(egui::DragValue::new(bx).prefix("X ").suffix(" px").speed(0.25).range(0.0..=255.0).max_decimals(1)).named(&tr!("{filter} blur X", filter = fname));
-                    let b = ui.add(egui::DragValue::new(by).prefix("Y ").suffix(" px").speed(0.25).range(0.0..=255.0).max_decimals(1)).named(&tr!("{filter} blur Y", filter = fname));
-                    if a.changed() || b.changed() {
+                row_prose(ui, tr!("Blur"), |ui| {
+                    if filter_blur_fields(ui, fname, bx, by) {
                         *changed = Some(tr_noop!("Filter blur"));
                     }
                 });

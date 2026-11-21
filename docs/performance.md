@@ -236,6 +236,97 @@ The CPU stage (the oracle through the render service's 256 px tiles, `onion_timi
 frames 12, 30 and 48) with hairlines: onion ±5 outlines **17.1 ms** against 14.8 tinted at
 1080p (was 34–39 against 16.2–17.2).
 
+### Filtered Array preview
+
+Run these manual benchmarks on an otherwise idle machine. They use the normal Cargo test
+profile and report timings without imposing a machine-dependent pass threshold.
+
+```sh
+cargo test --workspace --locked array_panel::tests::measure_filtered_preview -- --ignored --nocapture --test-threads=1
+cargo test --workspace --locked array_panel::tests::measure_cached_blur_translation -- --ignored --nocapture --test-threads=1
+```
+
+The first benchmark drives the real Array editor with pointer events and the CPU stage renderer.
+It uses the `array-blur` fixture, a 640 × 400 stage in a 1600 × 940 window at 65% zoom, with
+Dim Stage on, three authored stops, and one enabled Medium Blur on each copy. Counts include
+the original. Immediate mode renders each change synchronously. Six warm-up moves precede 30
+timed moves for each interaction. Frame time includes editor updates and painting commands.
+Stage time measures the synchronous tile batch, before texture upload. The benchmark checks
+that each measured move changes document state and produces a complete, fresh stage image.
+
+Baseline on Windows x86-64, Intel Core Ultra 9 185H, 22 logical processors available to the
+test. Each pair is p50 / p95 in milliseconds.
+
+| Instances | Interaction | Frame ms | Stage batch ms |
+|---:|---|---:|---:|
+| 10 | End on stage | 10.77 / 13.08 | 5.34 / 8.05 |
+| 10 | End on pasteboard | 10.59 / 13.59 | 5.60 / 8.33 |
+| 10 | Blur X field | 11.18 / 13.08 | 6.38 / 7.93 |
+| 50 | End on stage | 14.44 / 19.13 | 9.58 / 12.85 |
+| 50 | End on pasteboard | 14.84 / 17.97 | 9.63 / 12.14 |
+| 50 | Blur X field | 17.65 / 56.41 | 12.54 / 43.48 |
+| 200 | End on stage | 106.12 / 147.28 | 90.06 / 130.79 |
+| 200 | End on pasteboard | 80.62 / 99.18 | 68.15 / 85.47 |
+| 200 | Blur X field | 116.77 / 191.47 | 99.42 / 171.60 |
+
+At 200 copies the stage batch dominates frame time. A separate run put the onstage End
+median at 95.58 ms and the Blur X median at 98.54 ms, which gives a sense of run-to-run
+variation on this machine.
+
+The Auto probe starts from the same fixture and moves the Linear End handle onstage at a
+target cadence of 60 Hz. It asks for one repaint between pointer moves. A complete update
+shows the current document state while the button is still down. A partial update has some
+current stage tiles available. Missing tiles retain their previous pictures. The probe pauses
+with the button held and polls for the current image. It then moves once more and measures
+catch-up from button release at the new position.
+
+| Instances | Complete or partial updates during 30 moves | Catch-up with button held | Catch-up after release on next move |
+|---:|---:|---:|---:|
+| 10 | 0 | 24.63 ms | 4.14 ms |
+| 50 | 0 | 30.97 ms | 2.53 ms |
+| 200 | 0 | 139.35 ms | 74.46 ms |
+
+The sustained drag displayed older artwork in both runs. Each count caught up while the
+button was still held once the pointer paused. Auto can switch to the background renderer
+when a synchronous stage batch exceeds 12 ms. Each pointer edit can then replace the pending
+batch, so a completed render of an earlier state may miss its chance to appear.
+
+The cache probe uses the same 34 × 15 shape and a constant Medium Blur of X 22 px, Y 3 px
+for every copy. It renders one padded transparent image at 100% and composites translated
+copies in document order over a transparent 640 × 400 surface. It times the composite and
+compares every whole-pixel result with a fresh CPU render of the same Array. A half-pixel
+move tests whether the same cached sample can stand in for the exact result. The probe
+measures composition plus canvas clear with a warm cache. It excludes editor work, cache
+lookup, texture upload, and GPU presentation.
+
+| Instances | Fresh render p50 | Cached composite p50 | Pixels differing after half-pixel move |
+|---:|---:|---:|---:|
+| 10 | 4.03 ms | 0.41 ms | 8,930 |
+| 50 | 15.56 ms | 1.52 ms | 1,584 |
+| 200 | 165.27 ms | 13.69 ms | 1,181 |
+
+All 108 whole-pixel placements, including warm-up, matched byte for byte in RGBA8. The
+half-pixel oracle differed at every tested count. These timings characterize the isolated
+composition opportunity on this fixture with a shared raster per copy.
+
+When a filtered Array moves, the engine keeps its position-only preview generation. The
+stage falls back to state-based keys for every visible tile because its current position cache
+uses path bounds, and a filter can draw beyond them. This invalidates even tiles outside the
+affected region. The footprint check also builds a position map before it discovers filters
+and falls back. A Blur value change takes the full preview command path and creates a new
+generation on each measured field update. The renderer still quantizes blur widths to device
+pixels, so an eventual pixel cache could reuse resolved widths across edits that land on the
+same rasterized value.
+
+An isolated filtered-layer cache could reuse a padded image on translations at the same
+device-pixel phase. It would need to key the artwork frame, view scale, transform basis,
+resolved filters and effective colour, retain correct clipping and stacking, and composite
+with the current backdrop. Rotation, scale, filter edits that change the resolved effect,
+or a change in device-pixel phase require a suitable fresh raster. For fractional drags,
+a translated image could serve as a transient preview while the ordinary renderer draws
+the exact current image and the final released state. The probe covers isolated normal-blend
+copies with no masks. It does not exercise a GPU layer cache.
+
 ### How budgets are enforced
 
 * **Budgets that don't depend on the machine** (undo memory, snapshot sharing, file size,

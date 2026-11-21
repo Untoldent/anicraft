@@ -15,11 +15,13 @@ one symbol instance, with a neutral track for Transform and Colour Effect stops.
 when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
 next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
 configuration while the original instance stays selected. The selected-stop card has draggable
-relative scales and additive multi-turn rotation in Transform, and Alpha, Brightness, Tint and
-Advanced channels in Colour Effect. Array colour effects compose with the source instance's effect.
+scales and multi-turn rotation in Transform, and Alpha, Brightness, Tint and Advanced channels
+in Colour Effect. The default stops start with the source instance's values. An inserted stop
+copies the prior stop's entire snapshot, including its outbound ease.
+Filter stops interpolate each source Blur's X and Y sizes and preserve the full filter stack.
 An active Array session has its own undo and redo for geometry and stop edits, coalesced by gesture.
-The Easing section offers global and independent outbound presets for distribution, transform and
-colour. Quit resolves an active Array before asking about unsaved documents.
+The Easing section offers global and independent outbound presets for distribution, transform,
+colour and Blur. Quit resolves an active Array before asking about unsaved documents.
 Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
 direction, length and spacing are editable in the panel. Both modes display white pivot markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only

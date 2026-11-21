@@ -7,8 +7,8 @@
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
-use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind};
-use anicraft_geom::{Affine, Vec2};
+use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, MAX_BLUR};
+use anicraft_geom::{Affine, Decomposed, Vec2};
 use serde_json::{Value, json};
 use std::ops::Range;
 use std::sync::Arc;
@@ -39,13 +39,14 @@ pub struct ArrayEasing {
     pub distribution: bool,
     pub transform: bool,
     pub colour_effect: bool,
+    pub filters: bool,
 }
 
 impl Default for ArrayEasing {
     fn default() -> Self {
         Self {
             mode: ArrayEaseMode::Global, preset: Easing::Linear,
-            distribution: true, transform: true, colour_effect: true,
+            distribution: true, transform: true, colour_effect: true, filters: true,
         }
     }
 }
@@ -68,6 +69,7 @@ impl ArrayEasing {
             distribution: opt_bool(easing, "distribution")?.unwrap_or(defaults.distribution),
             transform: opt_bool(easing, "transform")?.unwrap_or(defaults.transform),
             colour_effect: opt_bool(easing, "colour_effect")?.unwrap_or(defaults.colour_effect),
+            filters: opt_bool(easing, "filters")?.unwrap_or(defaults.filters),
         })
     }
 
@@ -108,21 +110,28 @@ impl ArrayEasing {
 
     fn properties(&self, stops: &[ArrayPropertyStop], t: f32) -> ArrayPropertyStop {
         let linear = || ArrayPropertyStop::sample(stops.iter(), t);
-        if !(self.transform || self.colour_effect) || (self.mode == ArrayEaseMode::Global && self.preset == Easing::Linear) {
+        let filter_stops = stops.first().is_some_and(|stop| !stop.blurs.is_empty());
+        if !(self.transform || self.colour_effect || self.filters && filter_stops)
+            || (self.mode == ArrayEaseMode::Global && self.preset == Easing::Linear) {
             return linear();
         }
         let mut eased = match self.mode {
             ArrayEaseMode::Global => ArrayPropertyStop::sample_global(stops, self.preset.apply(t)),
             ArrayEaseMode::PerSegment => ArrayPropertyStop::sample_segments(stops.iter(), t, Some(self.segment_default(stops))),
         };
-        if !self.transform {
+        if !self.transform || !self.colour_effect || (!self.filters && filter_stops) {
             let base = linear();
-            eased.scale = base.scale;
-            eased.rotation = base.rotation;
-        } else if !self.colour_effect {
-            let base = linear();
-            eased.alpha = base.alpha;
-            eased.color = base.color;
+            if !self.transform {
+                eased.scale = base.scale;
+                eased.rotation = base.rotation;
+            }
+            if !self.colour_effect {
+                eased.alpha = base.alpha;
+                eased.color = base.color;
+            }
+            if !self.filters {
+                eased.blurs = base.blurs;
+            }
         }
         eased
     }
@@ -187,6 +196,33 @@ impl RadialDistribution {
     }
 }
 
+/// Editable Blur values in stage pixels. Quality and enabled state belong to the source.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArrayBlur {
+    pub blur_x: f32,
+    pub blur_y: f32,
+}
+
+impl ArrayBlur {
+    pub fn from_filter(filter: &Filter) -> Option<Self> {
+        let Filter::Blur { .. } = filter else { return None };
+        match filter.sanitized() {
+            Filter::Blur { blur_x, blur_y, .. } => Some(Self { blur_x, blur_y }),
+            _ => None,
+        }
+    }
+
+    fn in_range(self) -> bool {
+        (0.0..=MAX_BLUR).contains(&self.blur_x) && (0.0..=MAX_BLUR).contains(&self.blur_y)
+    }
+
+    fn blend(self, other: Self, t: f32) -> Self {
+        let lerp = |a, b| anicraft_geom::lerp(a, b, t).clamp(0.0, MAX_BLUR);
+        Self { blur_x: lerp(self.blur_x, other.blur_x), blur_y: lerp(self.blur_y, other.blur_y) }
+    }
+}
+
 /// One property snapshot on the array's 0..1 progression.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArrayPropertyStop {
@@ -196,6 +232,8 @@ pub struct ArrayPropertyStop {
     pub color: ColorEffect,
     pub scale: [f32; 2],
     pub rotation: f32,
+    /// One entry per source Blur, in its original stack order.
+    pub blurs: Vec<ArrayBlur>,
     /// None denotes a stop from a command with no authored outbound preset.
     pub outbound: Option<Easing>,
 }
@@ -206,7 +244,20 @@ impl ArrayPropertyStop {
     pub const ROTATION_LIMIT: f32 = 100_000.0;
 
     pub const fn new(offset: f32, alpha: f32) -> Self {
-        Self { offset, alpha, color: ColorEffect::None, scale: [1.0; 2], rotation: 0.0, outbound: None }
+        Self { offset, alpha, color: ColorEffect::None, scale: [1.0; 2], rotation: 0.0, blurs: Vec::new(), outbound: None }
+    }
+
+    /// Authored values as shown in Properties, apart from the distribution's position.
+    pub fn from_source(source: &Element) -> Self {
+        let basis = source.transform.decompose();
+        Self {
+            color: stop_color_style(source.color),
+            scale: [basis.sx, basis.sy],
+            rotation: basis.rotation.to_degrees(),
+            blurs: source.kind.filters().unwrap_or_default().iter()
+                .filter_map(|entry| ArrayBlur::from_filter(&entry.filter)).collect(),
+            ..Self::new(0.0, source.color.alpha())
+        }
     }
 
     /// Hold the endpoint value outside the first or last stop, as gradients do.
@@ -253,26 +304,33 @@ impl ArrayPropertyStop {
 
     fn blend(&self, other: &Self, t: f32, f: f32) -> Self {
         let blend = |a, b| a + (b - a) * f;
+        let scale = |a: f32, b: f32| {
+            // Imported instances can start larger than the normal editing range.
+            let limit = Self::SCALE_LIMIT.max(a.abs()).max(b.abs());
+            blend(a, b).clamp(-limit, limit)
+        };
         Self {
             offset: t,
             alpha: blend(self.alpha, other.alpha).clamp(alpha_min(self.color).min(alpha_min(other.color)), 1.0),
             color: self.color.lerp(&other.color, f).sanitized(),
-            scale: [
-                blend(self.scale[0], other.scale[0]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
-                blend(self.scale[1], other.scale[1]).clamp(-Self::SCALE_LIMIT, Self::SCALE_LIMIT),
-            ],
+            scale: [scale(self.scale[0], other.scale[0]), scale(self.scale[1], other.scale[1])],
             rotation: blend(self.rotation, other.rotation),
+            blurs: self.blurs.iter().zip(&other.blurs).map(|(&a, &b)| a.blend(b, f)).collect(),
             outbound: None,
         }
     }
 
-    /// Apply the Array colour once, after the effect already authored on the source symbol.
-    fn apply_color(&self, source: ColorEffect) -> ColorEffect {
-        let effect = match self.color {
+    fn color_effect(&self) -> ColorEffect {
+        match self.color {
             ColorEffect::None => ColorEffect::opacity(self.alpha),
             color if self.alpha == 1.0 => color,
             color => color.with_alpha(self.alpha),
-        };
+        }
+    }
+
+    /// Compatibility with Array recordings that composed a relative effect over the source.
+    fn apply_color(&self, source: ColorEffect) -> ColorEffect {
+        let effect = self.color_effect();
         if effect.transform().is_identity() && source != ColorEffect::None {
             source
         } else {
@@ -285,11 +343,41 @@ impl ArrayPropertyStop {
         // Wrap after interpolation so full turns affect the intermediate copies.
         let degrees = self.rotation % CLOSED_SWEEP_LIMIT;
         if [sx, sy] == [1.0; 2] && degrees == 0.0 { return base; }
-        let mut adjusted = Affine::rotate(degrees.to_radians()).mul(&base.mul(&Affine::scale(sx, sy)));
-        let shift = pivot.map_or(Vec2::ZERO, |p| base.apply_vector(p) - adjusted.apply_vector(p));
-        adjusted.m[4] = base.m[4] + shift.x;
-        adjusted.m[5] = base.m[5] + shift.y;
-        adjusted
+        let adjusted = Affine::rotate(degrees.to_radians()).mul(&base.mul(&Affine::scale(sx, sy)));
+        keep_pivot(base, adjusted, pivot)
+    }
+
+    fn source_transform(&self, mut original: Affine, basis: Decomposed) -> Affine {
+        let original_scale = [basis.sx, basis.sy];
+        let degrees = (self.rotation - basis.rotation.to_degrees()) % CLOSED_SWEEP_LIMIT;
+        if self.scale != original_scale {
+            let unit = Decomposed { sx: 1.0, sy: 1.0, ..basis }.compose();
+            for (i, (from, to)) in original_scale.into_iter().zip(self.scale).enumerate() {
+                if from == to { continue; }
+                let idx = 2 * i;
+                for j in idx..idx + 2 {
+                    // Keep the original direction and shear. A collapsed axis needs a basis
+                    // direction from the decomposition before it can be given a scale.
+                    original.m[j] = if from == 0.0 { unit.m[j] * to } else { original.m[j] / from * to };
+                }
+            }
+        }
+        if degrees == 0.0 { original } else { Affine::rotate(degrees.to_radians()).mul(&original) }
+    }
+}
+
+fn keep_pivot(base: Affine, mut adjusted: Affine, pivot: Option<Vec2>) -> Affine {
+    let shift = pivot.map_or(Vec2::ZERO, |p| base.apply_vector(p) - adjusted.apply_vector(p));
+    adjusted.m[4] = base.m[4] + shift.x;
+    adjusted.m[5] = base.m[5] + shift.y;
+    adjusted
+}
+
+fn stop_color_style(color: ColorEffect) -> ColorEffect {
+    match color {
+        ColorEffect::Alpha(_) => ColorEffect::None,
+        ColorEffect::Advanced(_) => color.with_alpha(1.0),
+        color => color,
     }
 }
 
@@ -401,10 +489,20 @@ impl PositionPreview {
         let reversed = p.get("stacking").and_then(Value::as_str) == Some("front_to_back");
         let copies = kf.elements.get(instances.clone())?;
         let custom_pivot = copies.first()?.pivot().is_some() && p.get("property_stops").is_some();
-        let stops = parse_stops(p).ok()?.unwrap_or_default();
+        let source = if custom_pivot && opt_bool(p, "source_values").ok()?.unwrap_or(false) {
+            let base = s.gesture.as_ref()?;
+            let (layer, id) = base.selection.first()?;
+            let layer = crate::editing::edited(&base.doc, base.scene, &base.editing).layer(layer)?;
+            let (_, elements) = anicraft_doc::evaluate_layer_elements(layer, base.frame)?;
+            Some(ArrayPropertyStop::from_source(elements.iter().find(|element| element.id == id)?))
+        } else {
+            None
+        };
+        let stops = parse_stops(p, source.as_ref()).ok()?.unwrap_or_default();
         // A transformed custom pivot can offset the copy from its layout position.
         // Replay from the source so those offsets stay exact after a move.
-        if custom_pivot && stops.iter().any(|stop| stop.scale != [1.0; 2] || stop.rotation != 0.0) {
+        let (scale, rotation) = source.as_ref().map_or(([1.0; 2], 0.0), |source| (source.scale, source.rotation));
+        if custom_pivot && stops.iter().any(|stop| stop.scale != scale || stop.rotation != rotation) {
             return None;
         }
         let eased_progress = easing.eases_distribution(&stops).then(|| {
@@ -467,13 +565,13 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?}}. Easing defaults to Global Linear with all three families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. Scale is a local multiplier (default 1), rotation is an additive angle in degrees (default 0), and Alpha is a multiplier (default 1). When color_effect is supplied, the stop effects are composed over the source and alpha overrides the effect's alpha multiplier. Older calls without color_effect retain absolute alpha. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...], scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Blur lists follow the source Blur entries in stack order. Omitted or empty lists use the source sizes. The filter stack, quality and switches are preserved. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
 }
 
-fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
+fn parse_stops(p: &Value, source: Option<&ArrayPropertyStop>) -> Result<Option<Vec<ArrayPropertyStop>>> {
     let (field, value, legacy) = match (p.get("property_stops"), p.get("alpha_stops")) {
         (Some(_), Some(_)) => return Err(EngineError::Param("use property_stops or alpha_stops".into())),
         (Some(v), None) => ("property_stops", v, false),
@@ -484,6 +582,8 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
     if !(2..=ArrayPropertyStop::LIMIT).contains(&stops.len()) {
         return Err(EngineError::Param(format!("{field} needs 2..={} stops", ArrayPropertyStop::LIMIT)));
     }
+    let source_scale = source.map_or([1.0; 2], |source| source.scale);
+    let [limit_x, limit_y] = source_scale.map(|value| ArrayPropertyStop::SCALE_LIMIT.max(value.abs()));
     let mut out = Vec::with_capacity(stops.len());
     for v in stops {
         let number = |key: &str, min: f32, max: f32, default: Option<f32>| -> Result<f32> {
@@ -496,7 +596,7 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
         };
         let offset = number("offset", 0.0, 1.0, None)?;
         let color = match v.get("color_effect").filter(|_| !legacy) {
-            None => ColorEffect::None,
+            None => source.map_or(ColorEffect::None, |source| source.color_effect()),
             Some(raw) => {
                 if !raw.is_object() || opt_str(raw, "style")?.is_some_and(|s| ColorStyle::from_key(s).is_none()) {
                     return Err(EngineError::Param("color_effect must be a supported Colour Effect object".into()));
@@ -508,21 +608,47 @@ fn parse_stops(p: &Value) -> Result<Option<Vec<ArrayPropertyStop>>> {
         let alpha = number("alpha", alpha_min(color), 1.0, (!legacy).then(|| color.alpha()))?;
         let mut stop = ArrayPropertyStop::new(offset, alpha);
         if !legacy {
-            stop.color = match color {
-                ColorEffect::Alpha(_) => ColorEffect::None,
-                ColorEffect::Advanced(_) => color.with_alpha(1.0),
-                color => color,
-            };
-            let scale = ArrayPropertyStop::SCALE_LIMIT;
+            stop.color = stop_color_style(color);
             let rotation = ArrayPropertyStop::ROTATION_LIMIT;
-            stop.scale = [number("scale_x", -scale, scale, Some(1.0))?, number("scale_y", -scale, scale, Some(1.0))?];
-            stop.rotation = number("rotation", -rotation, rotation, Some(0.0))?;
+            stop.scale = [number("scale_x", -limit_x, limit_x, Some(source_scale[0]))?, number("scale_y", -limit_y, limit_y, Some(source_scale[1]))?];
+            stop.rotation = number("rotation", -rotation, rotation, Some(source.map_or(0.0, |source| source.rotation)))?;
             stop.outbound = opt_named_ease(v, "outbound_ease")?;
+            if let Some(blurs) = v.get("blurs") {
+                stop.blurs = serde_json::from_value(blurs.clone())
+                    .map_err(|e| EngineError::Param(format!("invalid Array blurs: {e}")))?;
+                if !stop.blurs.iter().all(|blur| blur.in_range()) {
+                    return Err(EngineError::Param(format!("Array Blur sizes must be in 0..={MAX_BLUR}")));
+                }
+            }
         }
         out.push(stop);
     }
     out.sort_by(|a, b| a.offset.total_cmp(&b.offset));
     Ok(Some(out))
+}
+
+fn init_blur_stops(stops: &mut [ArrayPropertyStop], source: &[FilterEntry]) -> Result<()> {
+    if stops.iter().all(|stop| stop.blurs.is_empty()) { return Ok(()); }
+    let defaults: Vec<_> = source.iter().filter_map(|entry| ArrayBlur::from_filter(&entry.filter)).collect();
+    for stop in stops {
+        if stop.blurs.is_empty() {
+            stop.blurs.clone_from(&defaults);
+        } else if stop.blurs.len() != defaults.len() {
+            return Err(EngineError::Param("Array stop needs one set of Blur sizes per source Blur filter".into()));
+        }
+    }
+    Ok(())
+}
+
+fn apply_blur_sizes(stack: &mut [FilterEntry], blurs: &[ArrayBlur]) {
+    let axes = stack.iter_mut().filter_map(|entry| match &mut entry.filter {
+        Filter::Blur { blur_x, blur_y, .. } => Some((blur_x, blur_y)),
+        _ => None,
+    });
+    for ((x, y), blur) in axes.zip(blurs) {
+        *x = blur.blur_x;
+        *y = blur.blur_y;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -590,9 +716,8 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         Some("front_to_back") => true,
         Some(other) => return Err(EngineError::Param(format!("unknown stacking '{other}'"))),
     };
-    let stops = parse_stops(p)?;
+    let source_values = opt_bool(p, "source_values")?.unwrap_or(false) && p.get("property_stops").is_some();
     let easing = ArrayEasing::parse(p)?;
-    let eased_distribution = easing.eases_distribution(stops.as_deref().unwrap_or_default());
     // Old Array command recordings used an absolute alpha multiplier. The full colour
     // controls use a relative effect, even when every stop is set to the neutral style.
     let compose_colour = p.get("property_stops").and_then(Value::as_array)
@@ -606,6 +731,13 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if !matches!(&original.kind, ElementKind::Symbol { .. }) {
         return Err(EngineError::State("the initial Array implementation requires a symbol instance".into()));
     }
+    let seed = source_values.then(|| ArrayPropertyStop::from_source(&original));
+    let basis = source_values.then(|| original.transform.decompose());
+    let mut stops = parse_stops(p, seed.as_ref())?;
+    if let Some(stops) = &mut stops {
+        init_blur_stops(stops, original.kind.filters().unwrap_or_default())?;
+    }
+    let eased_distribution = easing.eases_distribution(stops.as_deref().unwrap_or_default());
     let [original_x, original_y] = [original.transform.m[4], original.transform.m[5]];
     let layout = match mode {
         "linear" => Layout::Linear {
@@ -625,7 +757,14 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         let eased = eased_distribution.then(|| easing.eased_position(stops.as_deref().unwrap_or_default(), t));
         let base = layout.place(original.transform, i, count, eased);
         let stop = stops.as_deref().map(|stops| easing.properties(stops, t as f32));
-        let transform = stop.as_ref().map_or(base, |stop| stop.apply_transform(base, original.pivot()));
+        let transform = match (&stop, basis) {
+            (Some(stop), Some(basis)) => {
+                let adjusted = layout.place(stop.source_transform(original.transform, basis), i, count, eased);
+                keep_pivot(base, adjusted, original.pivot())
+            }
+            (Some(stop), None) => stop.apply_transform(base, original.pivot()),
+            (None, _) => base,
+        };
         if !transform.is_finite() {
             return Err(EngineError::Param("array positions exceeded finite coordinate range".into()));
         }
@@ -634,7 +773,16 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         if i > 0 { el.id = ElementId(s.doc.alloc_id()); }
         el.transform = transform;
         if let Some(stop) = stop {
-            el.color = if compose_colour { stop.apply_color(original.color) } else { original.color.with_alpha(stop.alpha) };
+            el.color = if let Some(seed) = &seed {
+                if (stop.color, stop.alpha) == (seed.color, seed.alpha) { original.color } else { stop.color_effect() }
+            } else if compose_colour {
+                stop.apply_color(original.color)
+            } else {
+                original.color.with_alpha(stop.alpha)
+            };
+            if !stop.blurs.is_empty() && let Some(filters) = el.kind.filters_mut() {
+                apply_blur_sizes(filters, &stop.blurs);
+            }
         }
         ids.push(el.id);
         copies.push(Arc::new(el));
@@ -665,6 +813,157 @@ mod tests {
         assert!((ArrayPropertyStop::sample(&stops, 0.25).alpha - 0.5).abs() < 1e-6);
         assert!((ArrayPropertyStop::sample(&stops, 0.75).alpha - 0.5).abs() < 1e-6);
         assert_eq!(ArrayPropertyStop::sample(&stops, 0.5).alpha, 0.0);
+    }
+
+    #[test]
+    fn blur_stops_sample_both_axes_with_independent_easing_and_bounds() {
+        let make = |offset, x, y| ArrayPropertyStop {
+            blurs: vec![ArrayBlur { blur_x: x, blur_y: y }, ArrayBlur { blur_x: y, blur_y: x }],
+            ..st(offset, offset)
+        };
+        let stops = [
+            ArrayPropertyStop { outbound: Some(Easing::QuadIn), ..make(0.0, 0.0, 32.0) },
+            make(0.5, 16.0, 16.0),
+            make(1.0, 32.0, 0.0),
+        ];
+        let global = ArrayEasing { preset: Easing::QuadIn, transform: false, colour_effect: false, ..ArrayEasing::default() };
+        let segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        for (easing, x) in [(&global, 2.0), (&segment, 4.0)] {
+            let sample = easing.properties(&stops, 0.25);
+            assert_eq!(sample.blurs, [
+                ArrayBlur { blur_x: x, blur_y: 32.0 - x },
+                ArrayBlur { blur_x: 32.0 - x, blur_y: x },
+            ]);
+            assert_eq!(sample.alpha, 0.25);
+            let disabled = ArrayEasing { filters: false, ..easing.clone() };
+            assert_eq!(disabled.properties(&stops, 0.25).blurs, ArrayPropertyStop::sample(&stops, 0.25).blurs);
+        }
+        assert_eq!(segment.properties(&stops, 0.5).blurs, stops[1].blurs);
+        let mut extremes = [make(0.0, 0.0, MAX_BLUR), make(1.0, MAX_BLUR, 0.0)];
+        extremes[0].outbound = Some(Easing::BackOut);
+        for mode in [ArrayEaseMode::Global, ArrayEaseMode::PerSegment] {
+            let easing = ArrayEasing { mode, preset: Easing::BackOut, ..global.clone() };
+            assert_eq!(easing.properties(&extremes, 0.625).blurs, extremes[1].blurs);
+        }
+    }
+
+    #[test]
+    fn blur_array_preview_and_commit_keep_the_source_stack_and_render_anisotropically() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 60, "y": 60, "w": 16, "h": 16, "fill": "#ff0000", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Box"})).unwrap();
+        s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        let base_params = json!({"count": 3, "start_x": 68, "start_y": 68, "dx": 64});
+        let mut without_blur = base_params.clone();
+        without_blur["property_stops"] = json!([{"offset": 0, "blurs": [{"blur_x": 0, "blur_y": 0}]}, {"offset": 1}]);
+        let bare = s.doc.clone();
+        assert!(s.preview_array(&without_blur).is_err());
+        assert_eq!(s.doc, bare);
+        s.execute("element.set_filters", &json!({"filters": [
+            {"type": "blur", "blur_x": 0, "blur_y": 0, "quality": 2},
+            {"type": "adjust_color", "brightness": -15, "contrast": 30},
+            {"type": "blur", "blur_x": 11, "blur_y": 19, "quality": 3, "enabled": false},
+        ]})).unwrap();
+        let source = s.selected_elements()[0].1.kind.filters().unwrap().to_vec();
+        let base = s.doc.clone();
+        let selection = s.selection.clone();
+        let steps = s.history_len();
+        let render = |s: &Session| anicraft_render::render_frame(&s.doc, 0, 1.0).unwrap();
+        assert!(s.preview_array(&without_blur).is_err(), "requires both Blur entries");
+        for mode in ["linear", "radial"] {
+            let mut p = base_params.clone();
+            p["mode"] = json!(mode);
+            p["center_x"] = json!(140);
+            p["center_y"] = json!(150);
+            p["radius"] = json!(55);
+            p["start_angle"] = json!(0);
+            p["sweep_angle"] = json!(-450);
+            p["closed_loop"] = json!(false);
+            p["spiral_offset"] = json!(20);
+            p["drift_x"] = json!(55);
+            p["drift_y"] = json!(-10);
+            // An omitted stop inherits the source values.
+            p["property_stops"] = json!([{"offset": 0}, {"offset": 1, "blurs": [
+                {"blur_x": 32, "blur_y": 0}, {"blur_x": 21, "blur_y": 35},
+            ]}]);
+            s.preview_array(&p).unwrap();
+            assert_eq!(s.committed_document().0, &base);
+            for ((_, element), [x1, x2, y2]) in s.selected_elements().iter().zip([
+                [0.0, 11.0, 19.0], [16.0, 16.0, 27.0], [32.0, 21.0, 35.0],
+            ]) {
+                assert_eq!(element.kind.filters().unwrap(), [
+                    Filter::Blur { blur_x: x1, blur_y: 0.0, quality: 2 }.into(),
+                    source[1].clone(),
+                    FilterEntry { filter: Filter::Blur { blur_x: x2, blur_y: y2, quality: 3 }, enabled: false },
+                ]);
+            }
+            let (_, last) = s.selected_elements().pop().unwrap();
+            let at = last.transform.translation();
+            let preview = render(&s);
+            let coords = [at.x.round() as u32, at.y.round() as u32];
+            assert_ne!(preview.pixel(coords[0] + 11, coords[1]), Some([1.0; 4]), "horizontal blur extends the edge");
+            assert_eq!(preview.pixel(coords[0], coords[1] + 11), Some([1.0; 4]), "vertical blur and the disabled filter do not draw");
+            s.finish_array_preview(false);
+            assert_eq!(s.doc, base);
+            assert_eq!(s.selection, selection);
+            assert_eq!(s.history_len(), steps);
+
+            s.preview_array(&p).unwrap();
+            s.finish_array_preview(true);
+            assert_eq!(s.history_len(), steps + 1);
+            assert_eq!(render(&s).data, preview.data);
+            s.undo().unwrap();
+            assert_eq!(s.doc, base);
+            assert_eq!(s.selection, selection);
+        }
+    }
+
+    #[test]
+    fn source_seeded_stops_keep_the_source_appearance_and_edit_absolute_values() {
+        let mut s = radial_source();
+        let id = s.selection.ids().next().unwrap();
+        let source = s.editable_keyframe().unwrap().elements.iter_mut().find(|e| e.id == id).unwrap();
+        let source = Arc::make_mut(source);
+        let pivot = Vec2::new(4.0, -3.0);
+        assert!(source.set_pivot(Some(pivot)));
+        source.transform = Decomposed { sx: 1.5, sy: -0.75, rotation: 0.75, skew: 0.25, ..Default::default() }.compose();
+        source.color = ColorEffect::Advanced(ColorTransform { mul: [0.9, 0.7, 0.5, 0.75], add: [0.1, 0.0, 0.4, 0.125] });
+        let source = source.clone();
+        let seeded = ArrayPropertyStop::from_source(&source);
+        assert_eq!(seeded.color_effect(), source.color);
+        let base = s.doc.clone();
+        let select = s.selection.clone();
+        for (mode, rotate) in [("linear", false), ("radial", true)] {
+            let mut params = json!({
+                "mode": mode, "count": 3, "start_x": 50, "start_y": 80, "dx": 25, "dy": 0,
+                "center_x": 90, "center_y": 95, "radius": 20, "start_angle": 18,
+                "closed_loop": false, "sweep_angle": -555, "spiral_offset": 20, "drift_x": 35, "drift_y": 15, "rotate": rotate,
+            });
+            let mut unchanged = Session::new(base.clone());
+            unchanged.selection = select.clone();
+            unchanged.execute("array.create", &params).unwrap();
+            let copies = unchanged.selected_elements();
+            params["source_values"] = json!(true);
+            params["property_stops"] = json!([{"offset": 0}, {"offset": 1}]);
+            s.preview_array(&params).unwrap();
+            assert_eq!(s.doc, unchanged.doc);
+            if mode == "linear" { assert!(s.array_translation_generation().is_some()); }
+
+            let colour = ColorEffect::Tint { color: Rgba::hex(0x5566cc), amount: 0.5 };
+            params["property_stops"][1] = json!({
+                "offset": 1, "scale_x": 3.0, "rotation": seeded.rotation + 108.0,
+                "color_effect": colour, "alpha": 0.5,
+            });
+            s.preview_array(&params).unwrap();
+            let (_, last) = s.selected_elements().pop().unwrap();
+            let baseline = copies.last().unwrap().1.transform;
+            assert!(last.transform.apply(pivot).distance(baseline.apply(pivot)) < 1e-4);
+            let expected = Affine::rotate(108.0_f32.to_radians()).apply_vector(baseline.apply_vector(Vec2::new(1.0, 0.0))) * 2.0;
+            assert!(last.transform.apply_vector(Vec2::new(1.0, 0.0)).distance(expected) < 1e-5);
+            assert_eq!(last.color, colour.with_alpha(0.5));
+            s.finish_array_preview(false);
+            assert_eq!(s.doc, base);
+        }
     }
 
     #[test]
@@ -902,7 +1201,7 @@ mod tests {
                 {"offset": 0, "rotation": 0, "alpha": 0, "outbound_ease": "QuadIn"},
             ],
         });
-        let stops = parse_stops(&params).unwrap().unwrap();
+        let stops = parse_stops(&params, None).unwrap().unwrap();
         let easing = ArrayEasing::parse(&params).unwrap();
         assert!(easing.eases_distribution(&stops));
         for (input, output, rotation, scale_y) in [(0.25, 0.125, 90.0, 1.25), (0.75, 0.875, 630.0, 1.25)] {
@@ -1306,15 +1605,15 @@ mod tests {
     #[test]
     fn stop_positions_and_values_are_validated() {
         let p = json!({"alpha_stops": [{"offset": 1, "alpha": 0.03}, {"offset": 0, "alpha": 0.75}, {"offset": 0.4, "alpha": 1}]});
-        let parsed = parse_stops(&p).ok().flatten().unwrap_or_default();
+        let parsed = parse_stops(&p, None).ok().flatten().unwrap_or_default();
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[0].alpha, 0.75);
         assert_eq!(parsed[1].offset, 0.4);
-        assert!(parse_stops(&json!({"alpha_stops": [{"offset": 2, "alpha": 0.5}, {"offset": 1, "alpha": 0.4}]})).is_err());
+        assert!(parse_stops(&json!({"alpha_stops": [{"offset": 2, "alpha": 0.5}, {"offset": 1, "alpha": 0.4}]}), None).is_err());
         for (key, value) in [("alpha", json!(1.01)), ("scale_x", json!(101)), ("scale_y", json!("50%")), ("rotation", json!(1e10))] {
             let mut params = json!({"property_stops": [{"offset": 0}, {"offset": 1}]});
             params["property_stops"][0][key] = value;
-            assert!(parse_stops(&params).is_err());
+            assert!(parse_stops(&params, None).is_err());
         }
     }
 

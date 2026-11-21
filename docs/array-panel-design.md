@@ -169,6 +169,8 @@ After the radius reaches zero, the rest of an inward spiral follows the drifting
 
 Position-only drags reuse existing instances and unaffected stage tiles where eligible. The
 preview uses the standard rendering path when instance rotation changes the artwork's footprint.
+The [filtered Array benchmark](performance.md#filtered-array-preview) records frame
+times, stage update cadence, and the pixel limits of reusing an isolated Blur image.
 
 ### Gizmo visibility
 
@@ -203,13 +205,14 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   selected marker. The track carries positions and selection. Numeric values sit below it.
 - One rounded container beneath the track holds the selected stop's properties. Its section
   order is **Transform**, **Colour Effect**, **Filters**, **Playback**, and **Stacking Order**.
-  Show only implemented sections. **Transform** and **Colour Effect** collapse independently.
+  Show only implemented sections. **Transform**, **Colour Effect**, and **Filters** collapse
+  independently.
 - **Transform** offers draggable and typeable Scale X and Y in percent and Rotation in degrees.
-  Scale defaults to 100% on each local axis and multiplies the source basis. The shared Scale
-  lock preserves the selected stop's scale ratio while editing. Rotation defaults to 0° and
-  adds to the source orientation and Rotate Instances. It interpolates the entered degrees
-  directly, so 0° to 720° takes two turns. Scale and rotation keep the instance's transformation
-  point in place after the distribution positions it.
+  Both default stops start with the source's authored scales and angle, as shown in Properties.
+  Edits retain the source shear. The shared Scale lock preserves the selected stop's scale
+  ratio while editing. Rotation interpolates the entered degrees directly, so 0° to 720° takes
+  two turns. **Rotate instances** still adds the distribution's rotation. Scale and rotation
+  keep the instance's transformation point in place after the distribution positions it.
 - **Colour Effect** offers None, Brightness, Tint, and Advanced. Brightness runs from −100%
   (black) through 0% (unchanged) to +100% (white). Tint uses the shared colour picker and an
   independent amount from 0% to 100%. Advanced has Alpha, Red, Green, and Blue rows, each with
@@ -219,28 +222,35 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   a separate Alpha offset. The other styles show it as the 0–100% Alpha field. Leaving Advanced
   floors a negative Alpha multiplier at 0% and removes the channel offsets with that style.
   Switching from Brightness or Tint to Advanced starts with the equivalent channel transform.
-- Arrays apply the sampled colour transform over the source symbol's existing colour effect
-  using [ADR 0056's shared colour effects](adr/0056-colour-effects.md) for interpolation and
-  nested composition. The baked instance uses the document's existing Advanced channel limits
-  if the combined transform exceeds them. A neutral Array stop preserves the source
-  appearance and opacity. The new command payload supplies a document Colour Effect object
-  at each stop. Its Advanced multipliers and offsets are normalized fractions in red,
-  green, blue, alpha order. The stop's explicit Alpha value takes precedence over the
-  object's alpha multiplier. Older command recordings without these objects retain their
-  original Alpha behaviour. Commit records the authored stop payload so replay uses the same
-  colour composition and easing as the live preview.
-- New stops sample each property at their insertion point. Within a style, its values
-  interpolate directly, including both Tint colour and amount. None meets the neutral value
+- The default stops copy the source instance's colour style and Alpha. Each baked instance uses
+  its sampled effect through [ADR 0056's shared colour model](adr/0056-colour-effects.md).
+  `array.create` uses this behaviour with `source_values: true`. In that mode the stop's scale,
+  rotation and colour values are authored instance values, and omitted properties use the source
+  values. Older commands retain their relative scale, angle and colour semantics. Commit records
+  the authored stop payload and the mode so replay matches the preview.
+- A new stop copies the complete snapshot of the nearest stop on its left, including its
+  outbound ease. Before the earliest stop it copies that first stop. It keeps its own position
+  and remains independently editable. Deleting it leaves the surviving snapshots intact.
+- Within a colour style, values interpolate directly, including both Tint colour and amount.
+  None meets the neutral value
   of the neighbouring style. Other mixed styles interpolate multipliers and offsets in
   Advanced space, matching Classic Tweens. Geometry edits leave the authored values intact.
   Changes made in one opening of the Tint picker form one session undo step.
 - Preserve independently draggable stops at positions 0..100%. Example:
   positions 0%, 40%, 100% can have Alpha 75%, 100%, 3%; dragging the 40% stop
   changes how quickly that middle value is approached.
-- The original source's filter list provides the filter *types and order*.
-  Future stops may alter those existing filter values but do not add/delete
-  filter types. Give each filter a rounded container within the Filters section, following
-  AniCraft's Filters UI. Filter interpolation is a later increment.
+- The source instance provides the complete filter stack, including its order and on/off states.
+  The **Filters** section shows the source entries in that order. Each **Blur** has its own
+  collapsible card. Other filters show a read-only entry. Existing filters keep their quality
+  and other settings, and Array preserves every entry in preview and Commit.
+- Each Blur has independent **X** and **Y** amounts in stage pixels, from 0 to 255. Both use the
+  shared Properties fields. The default stops start with the source values. Moving a stop
+  preserves its values. An off Blur can store stop values while staying off. If the source
+  filter stack changes while a draft is inactive, reopening the draft initializes its filter
+  values from the current source. The other stop properties carry over.
+- `array.create` accepts an optional `blurs` list at each stop, with one `{blur_x, blur_y}` object
+  per source Blur in stack order. Omitted or empty lists use the source's Blur values. The
+  command copies the source stack and changes only the two Blur amounts.
 - Property families share one set of stop positions.
 - Future z-order interpolation can sample numeric depths and then sort copies
   stably, since visual stacking is discrete.
@@ -254,8 +264,8 @@ the named presets and curve thumbnails used by Classic and Motion Tweens
 ([ADR 0081](adr/0081-ease-presets-and-custom-eases.md)). New named families appear in Array
 automatically. The default is Global with Linear, and the default section starts collapsed to
 keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
-Distribution, Transform and Colour Effect start checked and can each use
-ordinary linear progression when unchecked. Filters is disabled until filter interpolation exists.
+Distribution, Transform, Colour Effect, and Filters start checked and each use ordinary linear
+progression when unchecked. Filters is available when the source has a Blur filter.
 
 - **Global** remaps the complete 0–100% progression before looking up values along the track.
   Intermediate values can be reached sooner or later while the authored stops stay in place.
@@ -263,11 +273,11 @@ ordinary linear progression when unchecked. Filters is disabled until filter int
   Exactly one stop is selected. Its preset appears in the picker, which is disabled on the
   final stop while its properties remain editable. Reordering carries each preset with its
   stop. Global and outbound presets are independent and survive mode changes.
-- Inserting a stop between two stops copies the left stop's preset to the new stop. A new
-  first or last stop starts with Linear. Deleting a stop leaves the surviving curves intact.
+- Inserting a stop copies the inherited snapshot's outbound preset. Deleting a stop leaves
+  the surviving curves intact.
   The new stop is selected on insertion. After deletion the next available stop is selected.
 - Segment boundaries stay fixed. When stops are inset, Distribution uses Linear between
-  the track edge and the first or last authored stop. Transform and Colour Effect hold the
+  the track edge and the first or last authored stop. Transform, Colour Effect, and Filters hold the
   nearest stop outside the authored range.
   Exactly coincident stops keep the stop track's existing sampling order. Spans no wider than
   floating-point epsilon avoid a division.
@@ -280,9 +290,9 @@ ordinary linear progression when unchecked. Filters is disabled until filter int
   stays at Start.
 - In Per Segment mode, a property that overshoots continues the current segment's interpolation.
   Global overshoot continues from the track endpoint's value using the nearest usable stop span.
-  Colour Effect easing applies to all colour values, including Alpha. Colour and Scale remain
-  in their valid ranges. Rotation uses the unwrapped authored degrees.
-  Adding a stop samples the authored values at its track position.
+  Colour Effect easing applies to all colour values, including Alpha. Filters easing applies to
+  Blur X/Y. Colour, Scale, and Blur remain in their valid ranges. Rotation uses the unwrapped
+  authored degrees.
 
 ## Future distribution modes (not in this milestone)
 
@@ -325,7 +335,8 @@ ordinary linear progression when unchecked. Filters is disabled until filter int
 10. **Independent outbound easing and Quit** covers stop-owned presets, insertion inheritance,
     and resolving a preview before the normal Save/Discard/Cancel question.
 11. **Colour Effect property stops** covers Brightness, Tint, and Advanced channels alongside Alpha.
-12. Later: Grid, Path/node placement, more stop properties, filter interpolation, custom easing,
+12. **Blur filter stops** vary each source Blur independently while preserving the filter stack.
+13. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

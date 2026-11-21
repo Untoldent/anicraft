@@ -561,16 +561,17 @@ to Drift indicates the displacement over one turn. Drag their connecting bar to 
 
 Use **Easing** above the property track to change how values progress along the Array. **Global**
 applies across the whole track. **Per Segment** lets you select a stop and set how the next
-segment eases. The final stop's Ease picker is disabled. Inserting a stop between two stops
-copies the ease from the stop on its left. Choose which families to ease under **Apply to**.
+segment eases. The final stop's Ease picker is disabled. Choose which families to ease under **Apply to**.
 The curve thumbnails use the same named presets as Classic and Motion Tweens.
 Distribution changes the placement along the path. **Back Out** can place copies past End
 or across a closed loop's seam.
 
-Click the property track to add a stop. Drag a stop to move it or enter its position as a
-percentage. In **Transform**, drag a Scale or Rotation value horizontally or click it to type.
-Scale multiplies the original instance's size on each axis. **Lock scale** keeps the selected stop's
-proportions while editing. Rotation adds to the instance's orientation, including **Rotate instances**.
+Both default stops start with the source instance's Transform, Colour Effect, and Blur values.
+Click the property track to add a stop. The new stop copies all the values and the outbound ease
+from the stop immediately to its left. A stop inserted before the first copies the first.
+Drag a stop to move it or enter its position as a percentage. In **Transform**, drag a Scale or
+Rotation value horizontally or click it to type. **Lock scale** keeps the selected stop's
+proportions while editing. **Rotate instances** adds the distribution's rotation.
 Enter 720° at the end of a progression starting at 0° to turn the artwork twice. With a stop
 focused, use the arrow keys to nudge it, Shift for larger steps, or Delete to remove it.
 
@@ -578,9 +579,13 @@ Open **Colour Effect** to change Alpha and choose a style. **Brightness** goes f
 −100% to white at +100%. **Tint** blends toward the colour you pick, at the percentage you set.
 **Advanced** gives Alpha, Red, Green, and Blue their own multipliers (−100% to 100%) and offsets
 (−255 to 255). Its Alpha multiplier is the same value as the Alpha field in the other styles.
-Stop effects apply over any colour effect already on the source instance. The **Colour Effect**
-target under **Easing** changes how all these values progress across the copies. Tint picker
+The **Colour Effect** target under **Easing** changes how all these values progress across the copies. Tint picker
 changes made before closing the picker undo together.
+
+Open **Filters** to see the source instance's filter stack. Each existing **Blur** has two
+draggable or typeable size fields, **X** and **Y**, in stage pixels. Every copy keeps the source's
+filter order, on/off states, Blur quality,
+and the settings of other filters. Use **Filters** under **Easing** to ease the Blur sizes.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the

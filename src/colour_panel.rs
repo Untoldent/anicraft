@@ -368,13 +368,12 @@ impl TrackStop for PropertyStop {
     fn colour(&self) -> Option<Rgba> { None }
     fn sample(stops: &[Self], offset: f32) -> Self {
         let marker = (0..Self::LIMIT).find(|i| stops.iter().all(|s| s.marker != *i)).unwrap_or(Self::LIMIT);
-        let mut value = ArrayPropertyStop::sample(stops.iter().map(|s| &s.value), offset);
         let next = stops.partition_point(|s| s.offset() <= offset);
-        value.outbound = if next < stops.len() {
-            next.checked_sub(1).and_then(|i| stops.get(i)).and_then(|s| s.value.outbound.clone())
-        } else {
-            None
-        };
+        let mut value = stops.get(next.saturating_sub(1)).map_or_else(
+            || ArrayPropertyStop::new(offset, 1.0),
+            |left| left.value.clone(),
+        );
+        value.offset = offset;
         Self { marker, value }
     }
     fn marker(&self, _: usize) -> usize { self.marker }
@@ -399,7 +398,7 @@ fn widest_gap(stops: &[impl TrackStop]) -> f32 {
     stops.windows(2).filter_map(|w| if let [a, b] = w { Some((b.offset() - a.offset(), (a.offset() + b.offset()) / 2.0)) } else { None }).max_by(|a, b| a.0.total_cmp(&b.0)).map_or(0.5, |g| g.1)
 }
 
-/// Adds a stop at `t`, initialized from the value already at that position.
+/// Adds a stop at `t` using the track's inheritance rule.
 fn add_stop<S: TrackStop>(stops: &mut Vec<S>, t: f32) -> Option<usize> {
     if stops.len() >= S::LIMIT {
         return None;
@@ -687,25 +686,27 @@ mod tests {
     }
 
     #[test]
-    fn a_property_stop_inherits_only_when_it_splits_an_outbound_segment() {
+    fn a_property_stop_inherits_before_between_and_after_existing_stops() {
         use anicraft_engine::doc::Easing;
-        let mut stops = vec![PropertyStop::new(0, 0.2, 1.0), PropertyStop::new(1, 0.8, 1.0)];
-        stops[0].value.outbound = Some(Easing::QuadOut);
-        stops[1].value.outbound = Some(Easing::BounceOut);
+        let mut first = PropertyStop::new(0, 0.2, 0.75);
+        first.value.outbound = Some(Easing::QuadOut);
+        let mut last = PropertyStop::new(1, 0.8, 0.5);
+        last.value.outbound = Some(Easing::BounceOut);
+        let mut stops = vec![first.clone(), last.clone()];
         assert_eq!(add_stop(&mut stops, 0.5), Some(1));
-        assert_eq!(stops[1].value.outbound, Some(Easing::QuadOut));
+        assert_eq!(stops[1].value, ArrayPropertyStop { offset: 0.5, ..first.value.clone() });
         stops[1].value.outbound = Some(Easing::QuadIn);
         assert!(remove_stop(&mut stops, 1));
-        assert_eq!(stops[0].value.outbound, Some(Easing::QuadOut));
         assert_eq!(add_stop(&mut stops, 1.0), Some(2));
-        assert!(stops[2].value.outbound.is_none());
-        assert_eq!(stops[1].value.outbound, Some(Easing::BounceOut));
+        assert_eq!(stops[2].value, ArrayPropertyStop { offset: 1.0, ..last.value.clone() });
         assert_eq!(add_stop(&mut stops, 0.0), Some(0));
-        assert!(stops[0].value.outbound.is_none());
+        assert_eq!(stops[0].value, ArrayPropertyStop { offset: 0.0, ..first.value.clone() });
+        assert!(remove_stop(&mut stops, 3) && remove_stop(&mut stops, 0));
+        assert_eq!(stops, [first, last]);
     }
 
     #[test]
-    fn property_track_samples_all_values_and_keeps_a_dragged_stop_through_reordering() {
+    fn property_track_copies_all_values_and_keeps_a_dragged_stop_through_reordering() {
         let ctx = egui::Context::default();
         let id = Id::new("property_stop_test");
         let mut stops = vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(1, 0.7, 1.0), PropertyStop::new(2, 1.0, 0.03)];
@@ -720,10 +721,7 @@ mod tests {
         track_frame(&ctx, id, &mut stops, vec![]);
         let picked = stops[1].clone();
         assert!((picked.value.offset - 0.4).abs() < 1e-4);
-        assert!((picked.value.alpha - (0.75 + 0.25 * 0.4 / 0.7)).abs() < 1e-4);
-        assert!((picked.value.scale[0] - 1.4).abs() < 1e-4);
-        assert!((picked.value.scale[1] - 0.6).abs() < 1e-4);
-        assert!((picked.value.rotation - 400.0).abs() < 1e-3);
+        assert_eq!(picked.value, ArrayPropertyStop { offset: picked.value.offset, ..stops[0].value.clone() });
         drag_track(&ctx, id, &mut stops, at, start.lerp(end, 0.85));
         assert_eq!(stops[2].marker, picked.marker);
         assert_eq!(stops[2].value, ArrayPropertyStop { offset: stops[2].value.offset, ..picked.value });

@@ -3022,7 +3022,7 @@ impl App {
             Some(which) if self.shot.is_some()
                 && (which.starts_with("array-radial-open:") || matches!(which, "array-transform" | "array-transform-radial"
                     | "array-easing-global" | "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end"
-                    | "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced")) => {
+                    | "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced" | "array-blur" | "array-blur-spiral")) => {
                 crate::array_panel::screenshot(self, which);
             }
             Some(which @ ("gradient" | "gradientbucket")) => {
