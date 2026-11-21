@@ -178,6 +178,13 @@ impl DocSaver {
         self.saver.as_ref().map(|s| s.id().to_string())
     }
 
+    /// Captures only document edits. A live Array is still an uncommitted gesture.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn graphics_checkpoint(&self, s: &anicraft_engine::Session) -> Option<recovery::Checkpoint> {
+        if !s.is_dirty() { return None; }
+        self.saver.as_ref()?.checkpoint(s.committed_document().0, s.path.as_deref())
+    }
+
     /// Writes a copy of unsaved work now, without waiting for the interval (the graphics driver
     /// reported trouble, ADR 0092: the next thing may be the window going). Whether one was
     /// started; nothing to do when the newest copy already holds this state.

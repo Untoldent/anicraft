@@ -207,7 +207,8 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
             if let Some(port) = control {
                 remote::start(&mut a, &cc.egui_ctx, port);
             }
-            a.open_panel(open.as_deref());
+            let open = open.as_deref();
+            a.open_panel(open);
             match report {
                 // An imported document says what came across, as opening it from the menu does.
                 Opened::Imported(r) => a.status_ok(tr!("{report} Save to keep it as an AniCraft document.", report = r)),
@@ -317,6 +318,7 @@ const HELP: &str = "anicraft [file.anicraft|file.fla|file.xfl] [--version] [--sc
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    let failed_backend = startup::wait_for_failed_window();
     if let Some(result) = updates::finish_helper() {
         let failed = result.is_err();
         if let Err(error) = result {
@@ -391,7 +393,12 @@ fn main() -> eframe::Result {
     let mut forced = platform::forced_backend(renderer.as_deref());
     while opening {
         opening = false;
-        let attempts = startup::plan(forced, prefs::Prefs::load().window_backend, &platform::window_attempts(platform::OS), &last);
+        let platform_attempts = platform::window_attempts(platform::OS);
+        let attempts = if let Some(failed) = failed_backend {
+            startup::recovery_plan(failed, &platform_attempts, platform::window_backends(platform::OS), &last)
+        } else {
+            startup::plan(forced, prefs::Prefs::load().window_backend, &platform_attempts, &last)
+        };
         for (n, attempt) in attempts.iter().enumerate() {
             startup::trying(attempt, n + 1, attempts.len());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(*attempt, file.as_deref(), shot.clone(), open.clone(), look.clone(), control)));
@@ -414,7 +421,20 @@ fn main() -> eframe::Result {
                     startup::line("closed");
                     return Ok(());
                 }
-                Ok(Err(e)) => e.to_string(),
+                Ok(Err(e)) => {
+                    if attempt.backend == prefs::WindowBackend::OpenGl && startup::started() && failed_backend.is_none()
+                        && matches!(e, eframe::Error::Glutin(_) | eframe::Error::OpenGL(_))
+                    {
+                        // eframe's returned graphics error ran on_exit and saved the open tabs.
+                        startup::line(&format!("the OpenGL window failed mid-session ({e}); trying another API"));
+                        startup::lost_mid_session();
+                        match startup::replace_lost_window(file.as_deref(), shot.as_deref()) {
+                            Ok(_replacement) => std::process::exit(0),
+                            Err(reopen_error) => startup::give_up(&reopen_error.to_string()),
+                        }
+                    }
+                    e.to_string()
+                }
                 Err(p) => format!("{} panicked: {}", attempt.label(), startup::panic_text(p.as_ref())), // i18n-exempt: a log line
             };
             startup::line(&format!("{} failed: {why}", attempt.label()));

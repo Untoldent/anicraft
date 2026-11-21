@@ -80,6 +80,13 @@ After Apply or Discard, the regular document close flow checks for unsaved chang
 Cancelling that second question leaves AniCraft open with the Array already applied or discarded,
 according to the earlier choice. A discarded draft can still be reopened while its source remains selected.
 
+### Graphics-backend restart
+
+Graphics recovery saves the document state, including unsaved document edits and committed
+Arrays. An active Array draft and its session Undo/Redo history are lost when AniCraft restarts
+on another graphics backend. Restoring both with the original source and document is deferred
+to [session-recovery work](roadmap.md).
+
 ### Remembering versus resetting
 
 Keep one unfinished configuration, including geometry for each array type, easing and property stops,
@@ -134,6 +141,11 @@ is required now.
   as one frame. Parameter changes, a new view scale, masks, shared groups and other filter types
   use the normal rendering path. Commit and export render the baked document through the
   existing pipeline.
+
+- Exact Array tiles are retained for the current view and pose. At most one older displayed
+  tile stands in for each pending tile, and the worker drops results for superseded keys.
+  Filtered GPU submissions share a scratch budget. A tile that cannot fit uses the CPU with
+  the same authored quality. See the [filtered Array measurements](performance.md#filtered-array-gpu-pressure).
 
 ### Radial and spiral distribution
 

@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::binning::{self as bn, Binned, PAINT_VEC4S, TILE, piece_cover, solid_of};
-use anicraft_doc::{BlendMode, ColorEffect, ColorTransform, DisplayItem, ElementId, ElementKind, GradientStop, Group, LayerId, LayerKind, MaskMode, Paint, Rgba, Stroke, sample};
+use anicraft_doc::{BlendMode, ColorEffect, ColorTransform, DisplayItem, ElementId, ElementKind, Filter, GradientStop, Group, LayerId, LayerKind, MaskMode, Paint, Rgba, Stroke, sample};
 use anicraft_geom::{Affine, FillRule, Path, Vec2};
 use anicraft_render::{paint::Premul, render};
 use std::sync::OnceLock;
@@ -66,6 +66,112 @@ fn mask(path: Path, clip: u32) -> DisplayItem {
 fn in_group(mut i: DisplayItem, g: u32) -> DisplayItem {
     i.group = Some(g);
     i
+}
+
+#[test]
+fn filtered_scratch_policy_tracks_completions_and_lowers_the_discrete_budget_on_oom() {
+    use wgpu::{Backend, DeviceType};
+    for backend in [Backend::Vulkan, Backend::Dx12, Backend::Metal, Backend::Gl] {
+        for device_type in [DeviceType::IntegratedGpu, DeviceType::VirtualGpu, DeviceType::Cpu, DeviceType::Other] {
+            assert_eq!(filter_budget(device_type, backend), SHARED_FILTER_BYTES);
+        }
+        assert_eq!(filter_budget(DeviceType::DiscreteGpu, backend), DISCRETE_FILTER_BYTES);
+    }
+    assert_eq!(filter_budget(DeviceType::DiscreteGpu, Backend::BrowserWebGpu), 0);
+
+    let mut flight = FilteredFlight::new(DISCRETE_FILTER_BYTES);
+    let sixty = 60 << 20;
+    flight.submitted(10, sixty);
+    flight.submitted(20, sixty);
+    let mut waited = Vec::new();
+    flight.make_room(8 << 20, |id| { waited.push(*id); Ok(()) }).unwrap();
+    assert!(waited.is_empty(), "the larger allowance keeps two submissions in flight");
+    let fail = flight.make_room(9 << 20, |id| Err(GpuError::Device(format!("submission {id} stalled"))));
+    assert!(matches!(fail, Err(GpuError::Device(_))));
+    assert_eq!(flight.bytes, sixty * 2, "a failed fence releases none of its memory");
+    flight.lower_after_oom();
+    assert!(matches!(flight.make_room(65 << 20, |_| panic!("over-budget jobs do not submit")), Err(GpuError::TooLarge(_))));
+    flight.make_room(5 << 20, |id| { waited.push(*id); Ok(()) }).unwrap();
+    assert_eq!(waited, [10, 20]);
+    assert_eq!(flight.bytes, 0);
+}
+
+/// Run on a hardware adapter with `WGPU_BACKEND=vulkan`. Sample the driver's allocator
+/// after successive 512 px tile batches, keeping the same output textures between passes.
+#[test]
+#[ignore = "requires a hardware GPU and reports filtered-stage memory"]
+fn measure_filtered_tile_pressure() {
+    let gpu = GpuRenderer::new().expect("hardware GPU");
+    eprintln!("{}", gpu.adapter);
+    {
+        let mut flight = gpu.filtered_flight.lock().unwrap();
+        let limit = flight.limit;
+        assert!(matches!(flight.make_room(limit + 1, |_| panic!("too large before allocation")), Err(GpuError::TooLarge(_))));
+    }
+    let scale = 2.0;
+    // Keep one visible set and room for its replacement, as the Array stage does.
+    let retained_limit = 40;
+    for (name, kinds, quality, radial_first) in [
+        ("shadow low", &["drop_shadow"][..], 1, false),
+        ("shadow high", &["drop_shadow"][..], 3, false),
+        ("glow high", &["glow"][..], 3, false),
+        ("mixed low", &["drop_shadow", "glow"][..], 1, false),
+        ("mixed high", &["drop_shadow", "glow"][..], 3, false),
+        ("mixed high radial to linear", &["drop_shadow", "glow"][..], 3, true),
+    ] {
+        let filters: Arc<[Filter]> = kinds.iter().map(|kind| {
+            let mut f = Filter::new(kind).unwrap();
+            f.set_param(anicraft_doc::FilterParam::Quality, quality as f32);
+            f
+        }).collect();
+        let mut display = list((0..10).map(|i| in_group(item(Path::rect(-32.0, -32.0, 64.0, 64.0), Paint::Solid(Rgba::BLACK)), i)).collect());
+        display.groups = (0..10).map(|_| Group { filters: filters.clone(), ..group(None, 1.0, BlendMode::Normal) }).collect();
+        let mut retained = std::collections::VecDeque::new();
+        let mut peak = (0, 0, 0);
+        let mut latter_peak = 0;
+        let mut timings = Vec::new();
+        for step in 0..30 {
+            let shift = if step % 2 == 0 { step as f32 * 9.0 } else { -(step as f32) * 12.0 };
+            for (i, item) in display.items.iter_mut().enumerate() {
+                let i = i as f32;
+                item.transform = if radial_first && step == 0 {
+                    let theta = i * std::f32::consts::TAU / 10.0;
+                    Affine::translate(640.0 + 220.0 * theta.cos(), 400.0 + 220.0 * theta.sin())
+                } else {
+                    Affine::translate(110.0 + 107.0 * i + shift, 425.0 + shift * 0.25)
+                };
+            }
+            let started = Instant::now();
+            let results: Vec<_> = (0..20).into_par_iter().map(|tile| {
+                let transform = Affine::translate(-512.0 * (tile % 5) as f32, -512.0 * (tile / 5) as f32).mul(&Affine::scale(scale, scale));
+                let v = View { transform, ..view(512, 512, None) };
+                gpu.render_texture(&display, &v)
+            }).collect();
+            for result in results { retained.push_back(result.expect(name)); }
+            while retained.len() > retained_limit { retained.pop_front(); }
+            timings.push(ms(started));
+            if let Some(report) = gpu.device.generate_allocator_report() {
+                let scratch = report.allocations.iter().filter(|a| matches!(a.name.as_str(), "layer" | "layer-coverage" | "paints")).map(|a| a.size).sum();
+                peak.0 = peak.0.max(report.total_allocated_bytes);
+                peak.1 = peak.1.max(report.total_reserved_bytes);
+                peak.2 = peak.2.max(scratch);
+                if step >= 15 { latter_peak = latter_peak.max(report.total_allocated_bytes); }
+            }
+        }
+        gpu.wait_idle().unwrap();
+        timings.sort_by(f32::total_cmp);
+        let mb = |bytes: u64| bytes as f64 / 1048576.0;
+        if peak.0 > 0 {
+            eprintln!("{name:<27} peak live {:.1} MiB, second half {:.1} MiB, reserved {:.1} MiB, filtered scratch {:.1} MiB, tile batch p50 {:.2} ms", mb(peak.0), mb(latter_peak), mb(peak.1), mb(peak.2), timings[15]);
+        } else {
+            eprintln!("{name:<27} allocator report unavailable, tile batch p50 {:.2} ms", timings[15]);
+        }
+        let flight = gpu.filtered_flight.lock().unwrap();
+        assert!(flight.bytes <= flight.limit);
+        drop(flight);
+        drop(retained);
+        gpu.wait_idle().unwrap();
+    }
 }
 
 /// Analytic scenes: each stresses one part of the coverage or paint model.

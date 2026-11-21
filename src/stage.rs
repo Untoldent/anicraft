@@ -1090,7 +1090,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if let Some(bounds) = array_tiles {
                 job.key = bounds.key(&job, t.rect, z.recip(), dim, &array_instances);
             }
-            job
+            job.preview_tile(array_active)
         };
         let jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = tile_job(&t); (t, j) }).collect();
         let allow_filtered = app.prefs.render_mode == RenderMode::Auto && !app.playing
@@ -1111,6 +1111,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             None
         };
         let keys: Vec<u64> = jobs.iter().map(|(_, j)| j.key).collect();
+        if let Some(svc) = &app.stage_cache.service {
+            svc.prepare_preview(if array_active { &keys } else { &[] });
+        }
         let missing: Vec<usize> = (0..jobs.len()).filter(|&i| !app.stage_cache.has(keys[i])).collect();
 
         if !missing.is_empty() && provisional != Some(true)
@@ -1161,6 +1164,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
         let ready = keys.iter().filter(|k| app.stage_cache.tiles.iter().any(|t| t.key == **k)).count();
+        // The next pose can use one placeholder for each missing tile. Earlier poses have
+        // different keys and can neither refine nor replace the current picture.
+        let mut placeholders = Vec::new();
+        if array_active && ready < keys.len() {
+            for (spec, job) in &jobs {
+                if !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
+                    && let Some(old) = app.stage_cache.tiles.iter().filter(|t| t.rect == spec.rect).max_by_key(|t| t.used)
+                {
+                    placeholders.push(old.key);
+                }
+            }
+        }
+        app.stage_cache.tiles.retain(|tile| !tile.array || (array_active && (keys.contains(&tile.key) || placeholders.contains(&tile.key))));
         app.stage_cache.ready = (ready, keys.len());
         if ready == keys.len() {
             app.stage_cache.shown_state = Some(state);
@@ -1199,12 +1215,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if ready < keys.len() && array_active {
                 // A transparent pasteboard tile cannot cover stale artwork. Draw at most one
                 // placeholder for each missing tile, and remove it when that tile becomes current.
-                for (spec, job) in &jobs {
-                    if !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
-                        && let Some(old) = app.stage_cache.tiles.iter().filter(|t| t.rect == spec.rect).max_by_key(|t| t.used)
-                    {
-                        paint_tile(old);
-                    }
+                for old in app.stage_cache.tiles.iter().filter(|tile| placeholders.contains(&tile.key)) {
+                    paint_tile(old);
                 }
             } else if ready < keys.len() {
                 let mut stale: Vec<&TileTex> = app.stage_cache.tiles.iter().filter(|t| !t.array && !keys.contains(&t.key) && overlaps(&t.rect)).collect();

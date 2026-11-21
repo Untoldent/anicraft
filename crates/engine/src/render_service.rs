@@ -49,9 +49,21 @@ pub struct FrameJob {
     focus: Option<Arc<[ElementId]>>,
     /// An already evaluated layer or backdrop, with its own scene identity.
     prepared: Option<Arc<DisplayList>>,
+    /// A temporary stage tile whose key must still be wanted when it finishes.
+    preview: bool,
 }
 
 impl FrameJob {
+    pub fn preview_tile(mut self, preview: bool) -> Self {
+        if preview && !self.preview {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            (self.key, "live preview tile").hash(&mut hash);
+            self.key = hash.finish();
+        }
+        self.preview = preview;
+        self
+    }
+
     /// Render prepared artwork with the same view and rasterizer. Jobs for the same
     /// document state and part must supply the same list, even across different tile views.
     pub fn with_prepared_list(mut self, part: impl Hash, list: Arc<DisplayList>) -> Self {
@@ -336,7 +348,7 @@ pub fn frame_key(state: StateId, frame: u32, view: &View, onion: Option<&OnionSk
 /// A job whose `scene` is derived from the same inputs as its key.
 pub fn make_job(state: StateId, doc: &Document, frame: u32, view: View, onion: Option<&OnionSkin>) -> FrameJob {
     let onion = onion.filter(|o| o.shows()).copied();
-    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, focus: None, prepared: None }
+    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, focus: None, prepared: None, preview: false }
 }
 
 /// A job for rasterizer `raster` (from [`RenderService::raster_id`]; 0 is the CPU oracle, and
@@ -437,6 +449,10 @@ struct RasterSlot {
 /// rasterizer keeps on the GPU, counted at 4 bytes a pixel.
 pub struct FrameCache {
     map: HashMap<u64, (Arc<FrameImage>, u64)>,
+    preview_keys: HashSet<u64>,
+    preview_images: HashSet<u64>,
+    /// Changes when the editor picks a different document while work is in flight.
+    generation: u64,
     tick: u64,
     bytes: usize,
     native_bytes: usize,
@@ -454,7 +470,7 @@ fn cost(img: &FrameImage) -> (usize, usize) {
 
 impl FrameCache {
     pub fn new(budget_bytes: usize) -> Self {
-        FrameCache { map: HashMap::new(), tick: 0, bytes: 0, native_bytes: 0, budget_bytes, native_budget_bytes: DEFAULT_NATIVE_CACHE_BYTES, hits: 0, misses: 0 }
+        FrameCache { map: HashMap::new(), preview_keys: HashSet::new(), preview_images: HashSet::new(), generation: 0, tick: 0, bytes: 0, native_bytes: 0, budget_bytes, native_budget_bytes: DEFAULT_NATIVE_CACHE_BYTES, hits: 0, misses: 0 }
     }
     pub fn get(&mut self, key: u64) -> Option<Arc<FrameImage>> {
         self.tick += 1;
@@ -490,10 +506,35 @@ impl FrameCache {
             }
             let victim = self.map.iter().filter(|(_, (i, _))| !over_gpu || i.native.is_some()).min_by_key(|(_, (_, t))| *t).map(|(&k, _)| k);
             let Some(victim) = victim else { break };
-            if let Some((old, _)) = self.map.remove(&victim) {
-                self.forget(&old);
-            }
+            self.remove(victim);
         }
+    }
+
+    fn insert_job(&mut self, job: &FrameJob, img: Arc<FrameImage>) {
+        if job.preview && !self.preview_keys.contains(&job.key) { return; }
+        self.insert(img);
+        if job.preview && self.contains(job.key) { self.preview_images.insert(job.key); }
+        if !job.preview { self.preview_images.remove(&job.key); }
+    }
+
+    fn insert_batch(&mut self, generation: u64, jobs: &[FrameJob], images: impl IntoIterator<Item = Arc<FrameImage>>) {
+        if generation == self.generation {
+            for (job, img) in jobs.iter().zip(images) { self.insert_job(job, img); }
+        }
+    }
+
+    fn prepare_preview(&mut self, keys: &[u64]) -> bool {
+        if keys.len() == self.preview_keys.len() && keys.iter().all(|key| self.preview_keys.contains(key)) { return false; }
+        self.preview_keys.clear();
+        self.preview_keys.extend(keys.iter().copied());
+        let stale: Vec<_> = self.preview_images.difference(&self.preview_keys).copied().collect();
+        for key in stale { self.remove(key); }
+        true
+    }
+
+    fn remove(&mut self, key: u64) {
+        self.preview_images.remove(&key);
+        if let Some((old, _)) = self.map.remove(&key) { self.forget(&old); }
     }
 
     fn forget(&mut self, img: &FrameImage) {
@@ -503,7 +544,10 @@ impl FrameCache {
     }
     /// Forgets every picture (the document they show is no longer on screen, ADR 0112).
     pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.map.clear();
+        self.preview_images.clear();
+        self.preview_keys.clear();
         self.bytes = 0;
         self.native_bytes = 0;
     }
@@ -600,12 +644,21 @@ impl RenderService {
         make_job_for(self.raster_id(), state, doc, frame, view, onion)
     }
 
+    /// Keep exact tiles of the current preview. Superseded results that finish on the worker
+    /// are discarded, while unchanged tile keys and regular document renders stay reusable.
+    pub fn prepare_preview(&self, keys: &[u64]) {
+        let changed = self.cache().prepare_preview(keys);
+        if changed && self.worker.is_some() {
+            self.queue().urgent.retain(|job| !job.preview || keys.contains(&job.key));
+        }
+    }
+
     /// Images that are ready, in order; the missing ones become the new urgent batch
     /// (replacing any older pending batch).
     pub fn request_batch(&self, jobs: Vec<FrameJob>) -> Vec<Option<Arc<FrameImage>>> {
         let mut out = Vec::with_capacity(jobs.len());
         let mut missing = Vec::new();
-        {
+        let generation = {
             let mut cache = self.cache();
             for j in jobs {
                 match cache.get(j.key) {
@@ -616,7 +669,8 @@ impl RenderService {
                     }
                 }
             }
-        }
+            cache.generation
+        };
         if missing.is_empty() {
             return out;
         }
@@ -624,9 +678,7 @@ impl RenderService {
             // No thread available: render here, so the caller still gets pictures.
             let imgs: Vec<Arc<FrameImage>> = render_batch_by(&missing, &self.slot()).into_iter().map(Arc::new).collect();
             let mut cache = self.cache();
-            for img in &imgs {
-                cache.insert(img.clone());
-            }
+            cache.insert_batch(generation, &missing, imgs.iter().cloned());
             let mut it = imgs.into_iter();
             for slot in out.iter_mut().filter(|s| s.is_none()) {
                 *slot = it.next();
@@ -634,6 +686,7 @@ impl RenderService {
             return out;
         }
         let mut q = self.queue();
+        if generation != self.cache().generation { return out; }
         let busy = q.busy.clone();
         q.urgent = missing.into_iter().filter(|j| !busy.contains(&j.key)).collect();
         if !q.urgent.is_empty() {
@@ -655,7 +708,7 @@ impl RenderService {
     /// Renders on the calling thread (one scene evaluation, tiles in parallel) and caches the
     /// results: for edits, where showing the change in this frame matters most.
     pub fn render_now_batch(&self, jobs: Vec<FrameJob>) -> Vec<Arc<FrameImage>> {
-        let (mut out, missing): (Vec<Option<Arc<FrameImage>>>, Vec<FrameJob>) = {
+        let (mut out, missing, generation): (Vec<Option<Arc<FrameImage>>>, Vec<FrameJob>, u64) = {
             let mut cache = self.cache();
             let mut missing = Vec::new();
             let out = jobs
@@ -668,15 +721,10 @@ impl RenderService {
                     hit
                 })
                 .collect();
-            (out, missing)
+            (out, missing, cache.generation)
         };
         let fresh: Vec<Arc<FrameImage>> = render_batch_by(&missing, &self.slot()).into_iter().map(Arc::new).collect();
-        {
-            let mut cache = self.cache();
-            for img in &fresh {
-                cache.insert(img.clone());
-            }
-        }
+        self.cache().insert_batch(generation, &missing, fresh.iter().cloned());
         let mut it = fresh.into_iter();
         for slot in out.iter_mut().filter(|s| s.is_none()) {
             *slot = it.next();
@@ -698,11 +746,12 @@ impl RenderService {
         if self.worker.is_none() {
             return;
         }
-        let jobs: VecDeque<FrameJob> = {
+        let (jobs, generation) = {
             let cache = self.cache();
-            jobs.into_iter().filter(|j| !cache.contains(j.key)).collect()
+            (jobs.into_iter().filter(|j| !cache.contains(j.key)).collect(), cache.generation)
         };
         let mut q = self.queue();
+        if generation != self.cache().generation { return; }
         q.prefetch = jobs;
         if !q.prefetch.is_empty() {
             self.shared.wake.notify_one();
@@ -718,6 +767,9 @@ impl RenderService {
     /// Forgets every finished picture, in memory and on the GPU: an editor showing another
     /// document calls it, so the one put aside keeps no pictures (ADR 0112).
     pub fn forget_pictures(&self) {
+        let mut q = self.queue();
+        q.urgent.clear();
+        q.prefetch.clear();
         self.cache().clear();
     }
 
@@ -758,7 +810,7 @@ impl Drop for RenderService {
 fn worker_loop(s: &Shared) {
     loop {
         // Take a whole batch: urgent first, topped up with prefetch work.
-        let jobs: Vec<FrameJob> = {
+        let (jobs, generation) = {
             let mut q = s.queue.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
                 if q.shutdown {
@@ -773,22 +825,25 @@ fn worker_loop(s: &Shared) {
                     for j in &batch {
                         q.busy.insert(j.key);
                     }
-                    break batch;
+                    let generation = s.cache.lock().unwrap_or_else(PoisonError::into_inner).generation;
+                    break (batch, generation);
                 }
                 q = s.wake.wait(q).unwrap_or_else(PoisonError::into_inner);
             }
         };
         let todo: Vec<FrameJob> = {
             let cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            jobs.iter().filter(|j| !cache.contains(j.key)).cloned().collect()
+            if cache.generation == generation {
+                jobs.iter().filter(|j| !cache.contains(j.key)).cloned().collect()
+            } else {
+                Vec::new()
+            }
         };
         let slot = s.raster.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let imgs = render_batch_by(&todo, &slot);
         {
             let mut cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            for img in imgs {
-                cache.insert(Arc::new(img));
-            }
+            cache.insert_batch(generation, &todo, imgs.into_iter().map(Arc::new));
         }
         {
             let mut q = s.queue.lock().unwrap_or_else(PoisonError::into_inner);
@@ -811,6 +866,90 @@ mod tests {
     fn job(doc: &Document, state: u64, frame: u32) -> FrameJob {
         let view = View { transform: Affine::scale(0.25, 0.25), width: 320, height: 180, background: Some(doc.stage.background) };
         make_job(state, doc, frame, view, None)
+    }
+
+    #[test]
+    fn superseded_preview_tiles_are_removed_and_late_results_are_discarded() {
+        let document = Document::default();
+        let stable = job(&document, 0, 0);
+        let first = job(&document, 1, 0).preview_tile(true);
+        let second = job(&document, 2, 0).preview_tile(true);
+        let mut cache = FrameCache::new(DEFAULT_CACHE_BYTES);
+        let raster = |job: &FrameJob| Arc::new(render_job(job));
+        cache.insert_job(&stable, raster(&stable));
+        cache.prepare_preview(&[first.key]);
+        let fake_native_texture = Arc::new(());
+        let released = Arc::downgrade(&fake_native_texture);
+        let mut native_frame = render_job(&first);
+        native_frame.native = Some(fake_native_texture);
+        native_frame.rgba_premul.clear();
+        let late = Arc::new(native_frame);
+        cache.insert_job(&first, late.clone());
+        assert!(cache.contains(first.key));
+        assert!(cache.native_bytes > 0);
+        cache.prepare_preview(&[second.key]);
+        assert_eq!(cache.native_bytes, 0);
+        assert!(released.upgrade().is_some(), "a holder can still present the old tile");
+        cache.insert_job(&first, late);
+        assert!(released.upgrade().is_none(), "late native results release their texture");
+        cache.insert_job(&second, raster(&second));
+        assert!(!cache.contains(first.key));
+        assert!(cache.contains(second.key) && cache.contains(stable.key));
+        cache.prepare_preview(&[]);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(stable.key));
+    }
+
+    #[test]
+    fn filter_budget_fallback_draws_the_authored_high_quality_stack() {
+        use serde_json::json;
+        let mut session = crate::Session::default();
+        session.execute("draw.rect", &json!({"x": 8, "y": 8, "w": 18, "h": 14, "fill": "#a60c32"})).unwrap();
+        session.execute("modify.convert_to_symbol", &json!({"name": "Filtered", "kind": "movie_clip"})).unwrap();
+        let filters = |quality| json!({"filters": [
+            {"type": "drop_shadow", "color": "#233385", "blur_x": 10, "blur_y": 7, "quality": quality},
+            {"type": "glow", "color": "#e58c1f", "blur_x": 12, "blur_y": 9, "quality": quality}
+        ]});
+        let view = View { transform: Affine::IDENTITY, width: 50, height: 50, background: None };
+        session.execute("element.set_filters", &filters(1)).unwrap();
+        let low = render_job(&make_job(session.state, &session.doc, 0, view, None));
+        session.execute("element.set_filters", &filters(3)).unwrap();
+        let svc = RenderService::new(64 << 20, None);
+        svc.set_rasterizer(Some(Arc::new(|_, _| Err("filtered scratch budget exceeded".into()))));
+        let fallback = svc.render_now(svc.job(session.state, &session.doc, 0, view, None));
+        let oracle = render_job(&make_job(session.state, &session.doc, 0, view, None));
+        assert!(!fallback.gpu && fallback.error.is_none());
+        assert_eq!(fallback.fallback.as_deref(), Some("filtered scratch budget exceeded"));
+        assert_eq!(fallback.rgba_premul, oracle.rgba_premul);
+        assert_ne!(fallback.rgba_premul, low.rgba_premul, "the oracle still uses three blur passes");
+    }
+
+    #[test]
+    fn forgetting_a_document_also_discards_its_in_flight_pictures() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let service = RenderService::new(DEFAULT_CACHE_BYTES, None);
+        let (entered, wait_for_render) = mpsc::sync_channel(1);
+        let (release, wait_for_release) = mpsc::channel();
+        let wait_for_release = Mutex::new(wait_for_release);
+        service.set_rasterizer(Some(Arc::new(move |_, view| {
+            let _ = entered.try_send(());
+            let _ = wait_for_release.lock().unwrap().recv_timeout(Duration::from_secs(3));
+            Ok((Raster::Premul8(vec![0; (view.width * view.height * 4) as usize]), RenderStats::default()))
+        })));
+        let document = Document::default();
+        let view = job(&document, 0, 0).view;
+        let discarded = service.job(0, &document, 0, view, None);
+        assert!(service.request(discarded.clone()).is_none());
+        wait_for_render.recv_timeout(Duration::from_secs(3)).unwrap();
+        service.forget_pictures();
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.busy() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!service.busy());
+        assert!(service.cached(discarded.key).is_none());
     }
 
     #[test]

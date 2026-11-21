@@ -252,6 +252,14 @@ pub fn finish_all(app: &mut App, clean: bool) {
     }
 }
 
+/// Copies of unsaved documents ready to flush if the window painter loses its device.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn graphics_checkpoints(app: &App) -> Vec<anicraft_engine::recovery::Checkpoint> {
+    app.recovery.doc.graphics_checkpoint(&app.s).into_iter().chain(
+        app.tabs.slots.iter().filter_map(|s| s.parked.as_ref()).filter_map(|p| p.saver.graphics_checkpoint(&p.s)),
+    ).collect()
+}
+
 /// Why another document can't be shown right now, if it can't: something is open that belongs
 /// to this one and has to be finished first.
 fn busy(app: &App) -> Option<&'static str> {

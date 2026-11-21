@@ -31,6 +31,10 @@ Radial distribution supports an explicit
 Closed Loop and open arcs with a signed sweep, spiral offset and two-axis centre drift. Its stage
 controller has Centre, Start, End and Drift handles, a draggable drift bar and a curved guide.
 
+**Future session recovery.** A graphics-backend restart recovers unsaved document edits, but an
+active Array draft and its session Undo/Redo history are lost. Restore the draft and both history
+branches with the original source in the recovered document. See [Array graphics recovery](array-panel-design.md#graphics-backend-restart).
+
 | Dimension | Status |
 |---|---|
 | Architecture | M0 skeleton in place: geom → doc → render → engine → cli → shell, layering enforced by `cargo test` (`src/architecture_tests.rs`: lower layers only, no UI crates below the shell, and the AGENTS.md map must match). |
