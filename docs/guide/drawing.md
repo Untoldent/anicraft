@@ -566,7 +566,7 @@ The curve thumbnails use the same named presets as Classic and Motion Tweens.
 Distribution changes the placement along the path. **Back Out** can place copies past End
 or across a closed loop's seam.
 
-Both default stops start with the source instance's Transform, Colour Effect, and Blur values.
+Both default stops start with the source instance's Transform, Colour Effect, and supported filter values.
 Click the property track to add a stop. The new stop copies all the values and the outbound ease
 from the stop immediately to its left. A stop inserted before the first copies the first.
 Drag a stop to move it or enter its position as a percentage. In **Transform**, drag a Scale or
@@ -582,10 +582,14 @@ Open **Colour Effect** to change Alpha and choose a style. **Brightness** goes f
 The **Colour Effect** target under **Easing** changes how all these values progress across the copies. Tint picker
 changes made before closing the picker undo together.
 
-Open **Filters** to see the source instance's filter stack. Each existing **Blur** has two
-draggable or typeable size fields, **X** and **Y**, in stage pixels. Every copy keeps the source's
-filter order, on/off states, Blur quality,
-and the settings of other filters. Use **Filters** under **Easing** to ease the Blur sizes.
+Open **Filters** to see the source instance's filter stack. Each entry has its own collapsible
+card. **Blur** offers X and Y sizes in stage pixels. **Drop Shadow** and **Glow** also offer
+Strength, a Colour picker, Quality, Inner, and Knockout. Drop Shadow has Angle, Distance, and
+Hide Object. A shadow going from 350° to 10° passes through 0°. Every copy keeps the source's
+filter order, on/off states, Blur quality, and the settings of other filters.
+
+Use **Filters** under **Easing** to ease the numbers and colours. Quality and switches hold
+their value until the next authored stop. Edits from one opening of a filter colour picker undo together.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the

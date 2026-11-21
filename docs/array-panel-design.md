@@ -141,7 +141,6 @@ is required now.
   as one frame. Parameter changes, a new view scale, masks, shared groups and other filter types
   use the normal rendering path. Commit and export render the baked document through the
   existing pipeline.
-
 - Exact Array tiles are retained for the current view and pose. At most one older displayed
   tile stands in for each pending tile, and the worker drops results for superseded keys.
   Filtered GPU submissions share a scratch budget. A tile that cannot fit uses the CPU with
@@ -260,17 +259,20 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   positions 0%, 40%, 100% can have Alpha 75%, 100%, 3%; dragging the 40% stop
   changes how quickly that middle value is approached.
 - The source instance provides the complete filter stack, including its order and on/off states.
-  The **Filters** section shows the source entries in that order. Each **Blur** has its own
-  collapsible card. Other filters show a read-only entry. Existing filters keep their quality
-  and other settings, and Array preserves every entry in preview and Commit.
-- Each Blur has independent **X** and **Y** amounts in stage pixels, from 0 to 255. Both use the
-  shared Properties fields. The default stops start with the source values. Moving a stop
-  preserves its values. An off Blur can store stop values while staying off. If the source
-  filter stack changes while a draft is inactive, reopening the draft initializes its filter
-  values from the current source. The other stop properties carry over.
-- `array.create` accepts an optional `blurs` list at each stop, with one `{blur_x, blur_y}` object
-  per source Blur in stack order. Omitted or empty lists use the source's Blur values. The
-  command copies the source stack and changes only the two Blur amounts.
+  Each entry has a collapsible card in **Filters**, including multiple entries of the same kind.
+  Blur, Drop Shadow, and Glow cards edit the current stop. Other cards show that they use the
+  source settings. Preview and Commit preserve the stack structure and unsupported values.
+- **Blur** retains its X and Y size fields and uses the source quality. **Drop Shadow** and
+  **Glow** use the shared Properties controls for Blur X/Y, Strength, Colour, Quality, Inner,
+  and Knockout. Drop Shadow also offers Angle, Distance, and Hide Object. Shadow direction
+  uses the shortest arc. An exact half turn follows the authored direction.
+- The default stops start with the source values. Moving a stop preserves its values. An off
+  filter can store stop values while staying off. If the source stack changes while a draft is
+  inactive, reopening the draft initializes the filter values from the current source. Other
+  stop properties carry over. Edits made during one opening of a filter colour picker undo together.
+- `array.create` accepts a `filters` list at each stop with one Blur, Drop Shadow, or Glow
+  object per supported source entry in stack order. Omitted or empty lists use the source values.
+  Existing `blurs` lists still set the Blur X/Y values in Blur order.
 - Property families share one set of stop positions.
 - Future z-order interpolation can sample numeric depths and then sort copies
   stably, since visual stacking is discrete.
@@ -285,7 +287,7 @@ the named presets and curve thumbnails used by Classic and Motion Tweens
 automatically. The default is Global with Linear, and the default section starts collapsed to
 keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
 Distribution, Transform, Colour Effect, and Filters start checked and each use ordinary linear
-progression when unchecked. Filters is available when the source has a Blur filter.
+progression when unchecked. Filters is available when the source has Blur, Drop Shadow, or Glow.
 
 - **Global** remaps the complete 0–100% progression before looking up values along the track.
   Intermediate values can be reached sooner or later while the authored stops stay in place.
@@ -311,8 +313,10 @@ progression when unchecked. Filters is available when the source has a Blur filt
 - In Per Segment mode, a property that overshoots continues the current segment's interpolation.
   Global overshoot continues from the track endpoint's value using the nearest usable stop span.
   Colour Effect easing applies to all colour values, including Alpha. Filters easing applies to
-  Blur X/Y. Colour, Scale, and Blur remain in their valid ranges. Rotation uses the unwrapped
-  authored degrees.
+  continuous filter numbers and colours. Drop Shadow and Glow Quality, Inner, Knockout, and
+  Hide Object hold from each authored stop until the next using uneased progression.
+  Colour, Scale, and filter parameters remain in their valid ranges. Transform Rotation uses
+  the unwrapped authored degrees.
 
 ## Future distribution modes (not in this milestone)
 
@@ -358,7 +362,9 @@ progression when unchecked. Filters is available when the source has a Blur filt
 12. **Blur filter stops** vary each source Blur independently while preserving the filter stack.
 13. **Responsive filtered dragging** repositions cached Linear Blur pictures during eligible Auto
     gestures and renders exact artwork at rest.
-14. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
+14. **Drop Shadow and Glow stops** add colour, continuous filter values and held switches and quality.
+    Mixed active stacks use the ordinary renderer. Eligible Blur-only previews retain their drag cache.
+15. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

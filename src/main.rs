@@ -208,6 +208,11 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
                 remote::start(&mut a, &cc.egui_ctx, port);
             }
             let open = open.as_deref();
+            #[cfg(debug_assertions)]
+            let open = if open == Some("array-gpu-loss-probe") && a.shot.is_some() && platform::recovery_dir_overridden() {
+                cc.egui_ctx.data_mut(|data| data.insert_temp(egui::Id::new("array-gpu-loss-probe"), true));
+                Some("array-shadow-glow")
+            } else { open };
             a.open_panel(open);
             match report {
                 // An imported document says what came across, as opening it from the menu does.

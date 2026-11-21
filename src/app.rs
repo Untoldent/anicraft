@@ -3022,7 +3022,8 @@ impl App {
             Some(which) if self.shot.is_some()
                 && (which.starts_with("array-radial-open:") || matches!(which, "array-transform" | "array-transform-radial"
                     | "array-easing-global" | "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end"
-                    | "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced" | "array-blur" | "array-blur-spiral")) => {
+                    | "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced" | "array-blur" | "array-blur-spiral"
+                    | "array-shadow-glow" | "array-glow-shadow")) => {
                 crate::array_panel::screenshot(self, which);
             }
             Some(which @ ("gradient" | "gradientbucket")) => {
@@ -4527,6 +4528,10 @@ impl eframe::App for App {
         if frame.wgpu_render_state().is_some() {
             crate::gpu_watch::prepare_paint(self);
             crate::gpu_watch::tick(self, ui.ctx());
+        }
+        #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+        if let Some(rs) = frame.wgpu_render_state() {
+            crate::gpu_watch::loss_probe(ui.ctx(), &rs.device);
         }
         #[cfg(target_arch = "wasm32")]
         let _ = frame;

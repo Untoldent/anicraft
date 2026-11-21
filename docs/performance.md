@@ -396,6 +396,99 @@ on stage and 4.56 → 1.07 ms while crossing the stage edge. The 10-copy bar tri
 Auto can vary with render cost: the original path drew 27/30 exact updates at 17.30 ms p50,
 and the warm cache drew 30/30 provisional updates at 2.50 ms p50.
 
+### Filtered Array GPU pressure
+
+On Intel Arc integrated graphics with Vulkan on Windows, the 2×-scale tile probe draws ten
+64 px shapes in 20 tiles of 512 × 512 px. It measures 30 batches, alternating translations
+in both directions. The switch variant starts with a radial batch and then translates the
+linear arrangement. The allocator report distinguishes live allocations from reserved blocks
+and covers wgpu's allocator for the test device.
+
+```powershell
+$env:WGPU_BACKEND = 'vulkan'
+cargo test -p anicraft-gpu --locked measure_filtered_tile_pressure -- --ignored --nocapture --test-threads=1
+cargo test --locked high_quality_shadow_glow_gpu_drag_lifecycle -- --ignored --nocapture --test-threads=1
+```
+
+In the original path, the probe held up to 384 completed textures, matching the render service's
+native tile budget. High quality increases filter reach and runs more blur passes. The passes
+reuse the same buffers, but the extra padding increases each layer's area. Each tile draws the
+filtered instances that touch it, so tiles can repeat the same padded layer work. Separate tile
+submissions can retain all those intermediates concurrently. New pointer updates replace the
+pending batch already, but prior submissions and finished textures can still consume memory.
+
+Exact preview pictures expire when their keys leave the visible preview. The stage keeps one
+displayed replacement per missing tile while newer tiles arrive. The display owns its texture
+handle independently of the render cache, including when a tile is uploaded from CPU memory.
+
+Filtered window textures and headless readbacks share an allowance of 64 MiB on integrated,
+virtual, and unclassified devices, or 128 MiB when the adapter reports a discrete GPU. A scoped
+allocation failure brings the discrete allowance back to 64 MiB for that renderer. The estimate
+counts float layers, coverage, layer copies in paint buffers, and the output texture or both
+readback buffers. Bitmap and finished tile caches have their own bounds. Driver padding,
+window resources and other applications can add pressure beyond those estimates. Allocator
+reports are optional diagnostics. Per-resource texture and buffer limits are checked
+independently, and no driver ID or reported VRAM size sets the allowance.
+
+The accounting retires submissions after their queue fence completes on native wgpu backends.
+The browser stage uses the CPU, and the budget rejects filtered GPU work on browser WebGPU,
+where a blocking poll cannot fence a submission. A tile that exceeds the allowance renders on
+the CPU with the same filter stack and quality. The GPU probe holds up to 40 textures to model
+one visible set and one incoming set. Blur's isolated provisional pictures retain their separate
+cache and exact redraw after the gesture.
+
+| Ten instances at 2× | Peak live MiB, before → after | Filter scratch MiB, before → after |
+|---|---:|---:|
+| Drop Shadow, Low | 421 → 53 | 15 → 8 |
+| Drop Shadow, High | 440 → 106 | 28 → 47 |
+| Glow, High | 456 → 120 | 39 → 49 |
+| Drop Shadow + Glow, Low | 447 → 112 | 33 → 51 |
+| Drop Shadow + Glow, High | 528 → 113 | 102 → 55 |
+| Drop Shadow + Glow, High, Radial to Linear | 532 → 113 | 102 → 55 |
+
+The mixed High switch case reserved 768 MiB before and 256 MiB after. Its live peak in the
+latter half of the fixed run was 111 MiB. Individual scratch readings reflect where the driver
+was in the queue when sampled, so a lighter trial can report more live scratch after the change.
+The original memory probe completed successfully. The reported device loss therefore remains
+dependent on the actual graphics budget and concurrent use of the window device.
+The switch case's median tile-batch call time was 27 ms before and 81–119 ms in two fixed runs.
+The fixed runs also overlapped other validation work, and their call times include waits for
+room in the GPU queue. The timings cover the synthetic batch calls, whose submissions can
+queue ahead of painting.
+
+The separate editor regression used the real shared Vulkan device with default Array settings.
+It ran eight Radial-to-Linear switches and 80 bar pointer moves with reversals and stage-boundary
+crossings. Over two runs, pointer frames took 2.42–2.78 ms p50 and 3.85–5.14 ms p95. The driver
+reported live peaks of 14.1–15.9 MiB, with the same peaks in the latter halves of the runs. Exact
+tiles settled after each release, including after Undo/Redo, Cancel and Commit. The tile probe
+above is a separate, higher-pressure workload.
+
+The portability review repeated the same 2× pressure probe on this Intel Arc adapter with
+Vulkan and Direct3D 12. The mixed High switch case peaked at 114 MiB live on Vulkan and
+82 MiB on Direct3D 12. Each reported 256 MiB in reserved allocator blocks. Their median
+batch calls took 72 ms and 238 ms respectively in these runs. The measurements describe
+these two driver paths on one Windows machine. Discrete and unknown adapter policies are
+covered by mocked budgets. An OpenGL window also displayed the mixed-filter Array using
+readback from a separate Vulkan device on the same adapter.
+
+The 80-move editor regression passed on both APIs. Vulkan pointer frames measured 3.06 ms p50
+and 5.56 ms p95, and driver-reported live allocations peaked at 12.5 MiB both overall and in
+the latter half. Direct3D 12 measured 2.43 ms p50 and 5.73 ms p95, with a 46.9 MiB overall peak
+and a 34.2 MiB latter-half peak. The test waits for GPU startup separately, so these timings
+start once the stage is rendering on the selected device.
+
+To exercise the failing paint path separately, run a **debug build** with isolated logs and
+recovery files. The fixture destroys AniCraft's test device just before the painter runs.
+The replacement process should open the **Recover unsaved work** dialog. The Vulkan and
+Direct3D 12 runs showed the staging-buffer panic, followed by the handoff before cleanup could
+unwind further. The recovery copy contains the source artwork and its filters.
+
+```powershell
+$env:ANICRAFT_LOG_DIR = "$pwd\target\array-gpu-loss-logs"
+$env:ANICRAFT_RECOVERY_DIR = "$pwd\target\array-gpu-loss-recovery"
+cargo run --locked -- --renderer vulkan --open array-gpu-loss-probe --screenshot shots/array-gpu-recovery.png
+```
+
 ### How budgets are enforced
 
 * **Budgets that don't depend on the machine** (undo memory, snapshot sharing, file size,

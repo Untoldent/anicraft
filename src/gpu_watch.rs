@@ -71,6 +71,16 @@ fn handoff(why: &str, recovery: PaintRecovery) -> ! {
     std::process::exit(0);
 }
 
+/// An isolated screenshot fixture can destroy its own test device just before egui paints.
+#[cfg(debug_assertions)]
+pub fn loss_probe(ctx: &egui::Context, device: &eframe::wgpu::Device) {
+    if crate::startup::started() && ctx.data_mut(|data| data.remove_temp(egui::Id::new("array-gpu-loss-probe"))) == Some(true) {
+        record_lost("injected graphics device loss before egui-wgpu paint"); // i18n-exempt: debug fixture log
+        device.destroy();
+        ctx.request_repaint();
+    }
+}
+
 /// eframe paints after the app returns. A loss first reported during that paint can trigger
 /// a staging-buffer panic before the app sees another frame. Recover before unwinding into HAL.
 pub fn recover_painter_panic(info: &std::panic::PanicHookInfo<'_>) {

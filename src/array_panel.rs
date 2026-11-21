@@ -6,7 +6,7 @@ use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{ArrayBlur, ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
+use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ColorEffect, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
@@ -76,7 +76,7 @@ impl Settings {
                 json!({
                     "offset": s.value.offset, "alpha": s.value.alpha,
                     "color_effect": s.value.color,
-                    "blurs": s.value.blurs,
+                    "filters": s.value.filters,
                     "scale_x": s.value.scale[0], "scale_y": s.value.scale[1], "rotation": s.value.rotation,
                     "outbound_ease": anicraft_engine::params::easing_json(s.value.outbound.as_ref().unwrap_or(&Easing::Linear)),
                 })
@@ -230,7 +230,7 @@ impl State {
             if settings.source_filters.as_ref() != filters {
                 settings.source_filters = Arc::from(filters);
                 for stop in &mut settings.stops {
-                    stop.value.blurs.clone_from(&settings.source_defaults.blurs);
+                    stop.value.filters.clone_from(&settings.source_defaults.filters);
                 }
             }
             if fresh { settings.seed_stops(); }
@@ -553,6 +553,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
     let blur_sample = matches!(view, "array-blur" | "array-blur-spiral");
+    let shadow_glow_sample = matches!(view, "array-shadow-glow" | "array-glow-shadow");
     let transform_sample = blur_sample || colour_sample || segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
@@ -574,9 +575,18 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
     }
     app.run("modify.convert_to_symbol", json!({"name": "Array sample"}));
-    if blur_sample {
+    if blur_sample || shadow_glow_sample {
         app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
-        app.run("element.set_filters", json!({"filters": [{"type": "blur", "blur_x": 1.5, "blur_y": 0, "quality": 2}]}));
+        let blur = json!({"type": "blur", "blur_x": 1.5, "blur_y": 0, "quality": 2});
+        let mut filters = vec![blur];
+        if shadow_glow_sample {
+            filters.splice(..0, [
+                json!({"type": "drop_shadow", "blur_x": 8, "blur_y": 8, "distance": 22, "angle": 350, "color": "#46276e", "quality": 2}),
+                json!({"type": "glow", "blur_x": 18, "blur_y": 18, "color": "#03bfba", "strength": 1.6, "quality": 2}),
+            ]);
+            if view == "array-glow-shadow" { filters.swap(0, 1); }
+        }
+        app.run("element.set_filters", json!({"filters": filters}));
     }
     if matches!(view, "array-polish" | "array-polish-off" | "array-radial")
         && let Some((_, source)) = app.s.selection.first()
@@ -591,6 +601,12 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
+    if shadow_glow_sample {
+        // Keep the mixed-filter capture at a fixed scale and draw the artwork before capture.
+        app.view.fit = false;
+        app.view.zoom = 1.0;
+        app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
+    }
     let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced" | "array-blur-spiral") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
@@ -640,7 +656,34 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             "array-blur" | "array-blur-spiral" => {
                 for (stop, [blur_x, blur_y]) in settings.stops.iter_mut().zip([[1.5, 0.0], [22.0, 3.0], [4.0, 26.0]]) {
                     stop.value.alpha = 1.0;
-                    stop.value.blurs = vec![ArrayBlur { blur_x, blur_y }];
+                    stop.value.filters = vec![Filter::Blur { blur_x, blur_y, quality: 2 }];
+                }
+                app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
+            }
+            "array-shadow-glow" | "array-glow-shadow" => {
+                settings.count = 6;
+                settings.linear.end[0] += 110.0;
+                let shadows = [(350.0, 20.0, 0x46276e), (45.0, 30.0, 0x985410), (115.0, 40.0, 0x1a42b8)];
+                let glows = [(18.0, 18.0, 1.6, 0x03bfba), (26.0, 14.0, 2.2, 0xffb13f), (13.0, 25.0, 1.4, 0xbe4cdf)];
+                for ((stop, shadow), glow) in settings.stops.iter_mut().zip(shadows).zip(glows) {
+                    stop.value.alpha = 1.0;
+                    stop.value.filters.clone_from(&settings.source_defaults.filters);
+                    for filter in &mut stop.value.filters {
+                        match filter {
+                            Filter::DropShadow { angle, distance, color, .. } => {
+                                *angle = shadow.0;
+                                *distance = shadow.1;
+                                *color = Rgba::hex(shadow.2);
+                            }
+                            Filter::Glow { blur_x, blur_y, strength, color, .. } => {
+                                *blur_x = glow.0;
+                                *blur_y = glow.1;
+                                *strength = glow.2;
+                                *color = Rgba::hex(glow.3);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
             }
@@ -853,8 +896,8 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
     let mut changed = crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
         let index = settings.stops.iter().position(|stop| Some(stop.marker_id()) == *selected_stop).unwrap_or(0);
         let has_successor = index + 1 < settings.stops.len();
-        let has_blurs = settings.stops.first().is_some_and(|stop| !stop.value.blurs.is_empty());
-        easing_fields(ui, &mut settings.easing, settings.stops.get_mut(index), has_successor, has_blurs)
+        let has_filters = settings.stops.first().is_some_and(|stop| !stop.value.filters.is_empty());
+        easing_fields(ui, &mut settings.easing, settings.stops.get_mut(index), has_successor, has_filters)
     }).unwrap_or(false);
     ui.add_space(4.0);
     section(ui, "array_stops", Section::Rule, tr!("Property stops"), None, |ui| {
@@ -886,7 +929,7 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
     changed
 }
 
-fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut PropertyStop>, has_successor: bool, has_blurs: bool) -> bool {
+fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut PropertyStop>, has_successor: bool, has_filters: bool) -> bool {
     fn mode_label(mode: ArrayEaseMode) -> &'static str {
         match mode {
             ArrayEaseMode::Global => tr!("Global"),
@@ -941,7 +984,7 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
         .show(ui, |ui| {
             let targets = [
                 (&mut easing.distribution, true), (&mut easing.transform, true),
-                (&mut easing.colour_effect, true), (&mut easing.filters, has_blurs),
+                (&mut easing.colour_effect, true), (&mut easing.filters, has_filters),
             ];
             for (index, (label, (target, enabled))) in labels.into_iter().zip(targets).enumerate() {
                 if enabled {
@@ -949,7 +992,7 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
                 } else {
                     let mut off = false;
                     ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, &mut off, label))
-                        .inner.on_disabled_hover_text(tr!("Available when the source has a Blur filter."));
+                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, or Glow."));
                 }
                 if (index + 1).is_multiple_of(columns) {
                     ui.end_row();
@@ -996,27 +1039,20 @@ fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, source_filters: &[Filte
                 ui.push_id(("colour", marker), |ui| colour_stop(ui, &mut stop.value, gesture)).inner
             }).unwrap_or(false);
             let filters = !source_filters.is_empty() && section(ui, "array_stop_filters", Section::Rule, tr!("Filters"), None, |ui| {
-                ui.push_id(("filters", marker), |ui| filter_stops(ui, source_filters, &mut stop.value.blurs)).inner
+                ui.push_id(("filters", marker), |ui| filter_stops(ui, source_filters, &mut stop.value.filters, gesture)).inner
             }).unwrap_or(false);
             transform || colour || filters
         }).inner
 }
 
-fn filter_stops(ui: &mut Ui, source: &[FilterEntry], blurs: &mut [ArrayBlur]) -> bool {
-    let mut blurs = blurs.iter_mut();
+fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], gesture: &mut Option<EditGesture>) -> bool {
+    let mut filters = filters.iter_mut();
     let mut changed = false;
     for (slot, entry) in source.iter().enumerate() {
         let label = crate::i18n::t(entry.filter.label());
         let label = if source.len() == 1 { label.to_owned() } else { tr!("{filter} {slot}", filter = label, slot = slot + 1) };
-        let blur = if matches!(entry.filter, Filter::Blur { .. }) { blurs.next() } else { None };
+        let filter = if ArrayPropertyStop::supports_filter(&entry.filter) { filters.next() } else { None };
         let heading = if entry.enabled { label.clone() } else { tr!("{filter} (off)", filter = label.as_str()) };
-        let Some(blur) = blur else {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(text(Type::Label, heading));
-                ui.label(text(Type::Caption, tr!("Uses source settings")));
-            });
-            continue;
-        };
         ui.push_id(slot, |ui| {
             egui::Frame::new()
                 .stroke(egui::Stroke::new(1.0, T.border))
@@ -1024,14 +1060,25 @@ fn filter_stops(ui: &mut Ui, source: &[FilterEntry], blurs: &mut [ArrayBlur]) ->
                 .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    changed |= section(ui, "array_blur", Section::Rule, &heading, None, |ui| {
-                        let mut sizes = *blur;
-                        let changed = ui.horizontal_wrapped(|ui| {
-                            crate::panels::filter_blur_fields(ui, &label, &mut sizes.blur_x, &mut sizes.blur_y)
-                        }).inner
-                            && sizes.blur_x.is_finite() && sizes.blur_y.is_finite();
-                        if changed { *blur = sizes; }
-                        changed
+                    changed |= section(ui, "array_filter", Section::Rule, &heading, None, |ui| {
+                        let Some(filter) = filter else {
+                            ui.label(text(Type::Caption, tr!("Uses source settings")));
+                            return false;
+                        };
+                        let mut values = filter.clone();
+                        let edited = if let Filter::Blur { blur_x, blur_y, .. } = &mut values {
+                            ui.horizontal_wrapped(|ui| {
+                                crate::panels::filter_blur_fields(ui, &label, blur_x, blur_y)
+                            }).inner && blur_x.is_finite() && blur_y.is_finite()
+                        } else {
+                            let mut edit = None;
+                            if let Some(popup) = crate::panels::shadow_glow_rows(ui, crate::panels::FilterRows::Array, &label, &mut values, &mut edit) {
+                                *gesture = Some(EditGesture::Picker(ui.ctx().viewport_id(), popup));
+                            }
+                            edit.is_some()
+                        };
+                        if edited { *filter = values.sanitized(); }
+                        edited
                     }).unwrap_or(false);
                 });
         });
@@ -1350,6 +1397,123 @@ mod tests {
         }
     }
 
+    #[cfg(gpu_stage)]
+    #[test]
+    #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
+    fn high_quality_shadow_glow_gpu_drag_lifecycle() {
+        use eframe::egui_wgpu::{RenderState, Renderer, wgpu};
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+        let info = adapter.get_info();
+        assert_ne!(info.device_type, wgpu::DeviceType::Cpu);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let target_format = wgpu::TextureFormat::Rgba8Unorm;
+        let renderer = Renderer::new(&device, target_format, Default::default());
+        let textures = RenderState {
+            adapter, instance, device: device.clone(), queue, target_format, available_adapters: vec![],
+            renderer: Arc::new(egui::mutex::RwLock::new(renderer)), surface_config: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
+        };
+        let (mut app, ctx) = linear_app();
+        app.stage_cache.gpu.set_window_device(Some(&textures));
+        app.prefs.stage_renderer = crate::prefs::StageRenderer::Gpu;
+        app.prefs.render_mode = crate::prefs::RenderMode::Auto;
+        app.view.fit = false;
+        app.view.zoom = 1.0;
+        app.s.execute("element.translate", &json!({"dx": 100, "dy": 230})).unwrap();
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [
+            {"type": "drop_shadow", "quality": 3}, {"type": "glow", "quality": 3}
+        ]})).unwrap();
+        let base = app.s.doc.clone();
+        let steps = app.s.history_len();
+        let settled = |app: &App| app.stage_cache.ready.0 == app.stage_cache.ready.1
+            && app.stage_cache.ready.0 > 0 && matches!(app.stage_cache.drawn_by, Some((true, _)))
+            && app.stage_cache.service.as_ref().is_some_and(|svc| !svc.busy());
+        // Some backends compile their pipelines much more slowly on a cold start. Keep
+        // that startup separate from the deadline and timings for live preview frames.
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let starting = std::time::Instant::now();
+        loop {
+            match app.stage_cache.gpu.state() {
+                crate::gpu_stage::State::Running { direct: true, .. } => break,
+                bad @ (crate::gpu_stage::State::Failed(_) | crate::gpu_stage::State::Stopped { .. } | crate::gpu_stage::State::Running { direct: false, .. }) => {
+                    panic!("the {:?} shared stage could not start: {bad:?}", info.backend);
+                }
+                _ => {}
+            }
+            assert!(starting.elapsed().as_secs() < 90, "the {:?} shared stage did not start", info.backend);
+            app.shot.as_mut().unwrap().frames = 0;
+            frame(&ctx, &mut app, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        let mut high_water = 0;
+        let mut late_water = 0;
+        let mut frames = Vec::new();
+        for round in 0..8 {
+            app.shot.as_mut().unwrap().frames = 0;
+            app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+            wait_for_stage(&ctx, &mut app, settled);
+            assert_eq!(app.s.selection.len(), 10);
+            app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+            wait_for_stage(&ctx, &mut app, settled);
+            let linear = app.array_panel.settings.as_ref().unwrap().linear;
+            let middle = std::array::from_fn(|axis| (linear.start[axis] + linear.end[axis]) * 0.5);
+            let from = screen(&app, middle);
+            drag_gizmo(&ctx, &mut app, from, vec2(8.0, 10.0), false);
+            assert!(app.array_panel.gizmo_drag.is_some());
+            for step in 1..=10 {
+                let now = std::time::Instant::now();
+                let delta = if step % 2 == 0 { 12.0 * step as f32 } else { -60.0 * step as f32 };
+                let to = from + vec2(delta, -80.0);
+                frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+                frames.push(now.elapsed().as_secs_f64() * 1000.0);
+                if let Some(report) = device.generate_allocator_report() {
+                    high_water = high_water.max(report.total_allocated_bytes);
+                    if round >= 4 { late_water = late_water.max(report.total_allocated_bytes); }
+                }
+            }
+            let end = from + vec2(8.0, 3.0);
+            frame(&ctx, &mut app, vec![Event::PointerMoved(end), pointer_button(end, false)]);
+            wait_for_stage(&ctx, &mut app, settled);
+            let moved = app.array_panel.settings.as_ref().unwrap().linear;
+            assert_ne!(moved.start, linear.start);
+            for axis in 0..2 {
+                assert!(((moved.end[axis] - linear.end[axis]) - (moved.start[axis] - linear.start[axis])).abs() < 0.001);
+            }
+            let (images, _, _, _) = app.stage_cache.service.as_ref().unwrap().cache_stats();
+            assert!(images <= app.stage_cache.ready.1, "only the current preview tiles remain cached");
+            assert_eq!(app.s.committed_document().0, &base);
+        }
+        let preview = app.s.doc.clone();
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_ne!(app.s.doc, preview);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(app.s.doc, preview);
+        app.array_panel.finish(&mut app.s, false);
+        assert_eq!(app.s.doc, base);
+        assert_eq!(app.s.history_len(), steps);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(app.s.doc, preview);
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.history_len(), steps + 1);
+        app.s.undo().unwrap();
+        assert_eq!(app.s.doc, base);
+        app.s.redo().unwrap();
+        assert_eq!(app.s.doc, preview);
+        wait_for_stage(&ctx, &mut app, settled);
+        eframe::App::on_exit(&mut app, None);
+        drop(app);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        frames.sort_by(f64::total_cmp);
+        eprintln!("{} ({:?}): 8 mode switches and 80 bar moves, p50 {:.2} ms, p95 {:.2} ms",
+            info.name, info.backend, frames[40], frames[75]);
+        if high_water > 0 {
+            eprintln!("live allocations peak {:.1} MiB, latter half {:.1} MiB", high_water as f64 / 1048576.0, late_water as f64 / 1048576.0);
+        } else {
+            eprintln!("allocator report unavailable");
+        }
+    }
+
     fn warm_filtered(ctx: &egui::Context, app: &mut App) {
         app.prefs.render_mode = crate::prefs::RenderMode::Auto;
         wait_for_stage(ctx, app, |app| app.stage_cache.filtered_array_warmed());
@@ -1409,7 +1573,7 @@ mod tests {
             ids
         };
         let view = anicraft_render::View { transform: Affine::scale(app.view.zoom, app.view.zoom), width: 416, height: 260, background: Some(app.s.doc.stage.background) };
-        let job = make_job(app.s.state, &app.s.doc, 0, view, None).dim_around(Some(selection.into()));
+        let job = make_job(app.s.state, &app.s.doc, 0, view, None).dim_around(Some(selection.into())).preview_tile(true);
         let shown = app.stage_cache.service.as_ref().unwrap().cached(job.key).unwrap();
         assert_eq!(shown.rgba_premul, render_job(&job).rgba_premul);
 
@@ -1467,6 +1631,50 @@ mod tests {
         assert_eq!(app.stage_cache.filtered_array_presented(), None);
         assert!(app.s.doc == source && app.s.history_len() == history);
         wait_for_stage(&ctx, &mut app, |app| app.stage_cache.shown_state == Some(app.s.state));
+    }
+
+    #[test]
+    fn shadow_glow_stops_invalidate_warmed_blur_and_active_effects_use_exact_tiles() {
+        use anicraft_engine::doc::FilterParam;
+        let (mut app, ctx) = filtered_app(10);
+        app.array_panel.finish(&mut app.s, false);
+        let mut filters = json!([
+            {"type": "blur", "blur_x": 8, "blur_y": 8, "quality": 2},
+            {"type": "drop_shadow", "distance": 14, "enabled": false},
+            {"type": "glow", "color": "#3296ee", "enabled": false},
+        ]);
+        app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        warm_filtered(&ctx, &mut app);
+        let generation = app.s.array_translation_generation();
+        let settings = app.array_panel.settings.as_mut().unwrap();
+        assert!(settings.stops[0].value.filters[1].set_param(FilterParam::Distance, 48.0));
+        assert!(settings.stops[0].value.filters[2].set_param(FilterParam::Strength, 240.0));
+        app.array_panel.refresh(&mut app.s);
+        frame(&ctx, &mut app, vec![]);
+        assert_ne!(app.s.array_translation_generation(), generation);
+        assert!(!app.stage_cache.filtered_array_warmed());
+        assert!(app.stage_cache.filtered_array_presented().is_none());
+        warm_filtered(&ctx, &mut app);
+
+        app.array_panel.finish(&mut app.s, false);
+        filters[1]["enabled"] = json!(true);
+        filters[2]["enabled"] = json!(true);
+        app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.filters[1].param(FilterParam::Distance), Some(14.0));
+        for _ in 0..12 { frame(&ctx, &mut app, vec![]); }
+        assert!(app.s.array_translation_generation().is_some());
+        assert!(!app.stage_cache.filtered_array_warmed());
+        let from = screen(&app, app.array_panel.gizmo_endpoints().unwrap().end);
+        let to = from + vec2(27.5, 8.25);
+        begin_drag(&ctx, &mut app, from);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        assert!(app.stage_cache.filtered_array_presented().is_none());
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        wait_for_stage(&ctx, &mut app, |app| app.stage_cache.shown_state == Some(app.s.state));
+        assert!(app.stage_cache.filtered_array_presented().is_none());
+        assert!(!app.stage_cache.filtered_array_warmed());
     }
 
     #[test]
@@ -1595,7 +1803,7 @@ mod tests {
             app.array_panel.set_endpoints(&mut app.s, ends);
             let from = blur_x_grip(&ctx, &mut app);
             drag(&mut app, &ctx, count, "Blur X", from, vec2(3.0, 0.0), true);
-            assert!(app.array_panel.settings.as_ref().unwrap().stops[1].value.blurs[0].blur_x > 22.0);
+            assert!(app.array_panel.settings.as_ref().unwrap().stops[1].value.filters[0].param(anicraft_engine::doc::FilterParam::BlurX) > Some(22.0));
         }
 
         eprintln!("Filtered Array CPU Auto, 60 Hz pointer moves with one repaint between moves");
@@ -1994,7 +2202,7 @@ mod tests {
         app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
         app.s.execute("element.set_filters", &json!({"filters": [
             {"type": "blur", "blur_x": 12, "blur_y": 4, "quality": 2},
-            {"type": "glow", "strength": 2, "enabled": false},
+            {"type": "adjust_color", "contrast": 20, "enabled": false},
         ]})).unwrap();
         app.s.execute("element.set_color_effect", &json!({"red_multiplier": 90, "alpha_multiplier": 80, "alpha_offset": 7})).unwrap();
         let source_element = source_element(&app.s).unwrap();
@@ -2008,7 +2216,7 @@ mod tests {
         let state = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
         let first_blur = |app: &App| {
             let copies = app.s.selected_elements();
-            ArrayBlur::from_filter(&copies[0].1.kind.filters().unwrap()[0].filter).unwrap()
+            copies[0].1.kind.filters().unwrap()[0].filter.clone()
         };
         for name in ["Transform", "Colour Effect"] {
             let header = node(&mut app, None, name).1;
@@ -2017,13 +2225,13 @@ mod tests {
         let initial = state(&app);
         assert_eq!(initial.stops[0].value, seeded);
         assert_eq!(app.s.selected_elements()[0].1.color, source_element.color);
-        assert_eq!(initial.stops[0].value.blurs, initial.stops[1].value.blurs);
+        assert_eq!(initial.stops[0].value.filters, initial.stops[1].value.filters);
         let x = node(&mut app, Some(Role::SpinButton), "Blur 1 blur X").1;
         assert_eq!(x.numeric_value(), Some(12.0));
         let bounds = x.bounds().unwrap();
         let from = pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32);
         drag_gizmo(&ctx, &mut app, from, vec2(16.0, 0.0), false);
-        assert!(first_blur(&app).blur_x > 12.0);
+        assert!(first_blur(&app).param(anicraft_engine::doc::FilterParam::BlurX) > Some(12.0));
         let to = from + vec2(32.0, 0.0);
         frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
         frame(&ctx, &mut app, vec![pointer_button(to, false)]);
@@ -2035,7 +2243,7 @@ mod tests {
         assert_eq!(state(&app), dragged);
         let y = node(&mut app, Some(Role::SpinButton), "Blur 1 blur Y").0;
         set_number(&ctx, &mut app, y, 40.0);
-        assert_eq!(first_blur(&app).blur_y, 40.0);
+        assert_eq!(first_blur(&app).param(anicraft_engine::doc::FilterParam::BlurY), Some(40.0));
         let left = &mut app.array_panel.settings.as_mut().unwrap().stops[0].value;
         left.scale = [0.5, 1.75];
         left.rotation = 52.0;
@@ -2051,7 +2259,7 @@ mod tests {
         let inserted = &draft.stops[1].value;
         assert_eq!(*inserted, ArrayPropertyStop { offset: inserted.offset, ..before_insert.stops[0].value.clone() });
         assert_eq!(app.array_panel.selected_stop, Some(draft.stops[1].marker_id()));
-        assert_ne!(inserted.blurs, initial.stops[0].value.blurs);
+        assert_ne!(inserted.filters, initial.stops[0].value.filters);
         let easing = node(&mut app, None, "Easing").1;
         click(&ctx, &mut app, &easing);
         let filters = node(&mut app, Some(Role::CheckBox), "Filters").1;
@@ -2074,6 +2282,98 @@ mod tests {
         assert_eq!(app.s.history_len(), history + 1);
         app.s.undo().unwrap();
         assert_eq!(app.s.doc, source);
+    }
+
+    #[test]
+    fn shadow_glow_controls_group_gestures_and_inherit_the_left_stop() {
+        use anicraft_engine::doc::{FilterColor, FilterParam};
+        let (mut app, ctx) = linear_app();
+        app.dock.right.size = Some(450.0);
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [
+            {"type": "drop_shadow", "distance": 12, "angle": 350, "color": "#2e3442"},
+            {"type": "glow", "strength": 2, "color": "#4898cc"},
+        ]})).unwrap();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let node = |app: &mut App, name: &str| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(name)).unwrap_or_else(|| panic!("missing {name}"));
+        let state = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
+        let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
+        for label in ["Transform", "Colour Effect"] {
+            let header = node(&mut app, label).1;
+            click(&ctx, &mut app, &header);
+        }
+        let to_edit = node(&mut app, "Drop Shadow 1 strength").1;
+        let b = to_edit.bounds().unwrap();
+        let from = pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        let before = steps(&app);
+        begin_drag(&ctx, &mut app, from);
+        for dx in [9.0, 18.0] { frame(&ctx, &mut app, vec![Event::PointerMoved(from + vec2(dx, 0.0))]); }
+        let strength = state(&app).stops[0].value.filters[0].param(FilterParam::Strength);
+        assert!(strength > Some(100.0), "strength {strength:?} after drag from {from:?}, {:?}", ctx.dragged_id());
+        let to = from + vec2(32.0, 0.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        assert_eq!(steps(&app), before + 1);
+        for (label, value) in [("Drop Shadow 1 angle", 10.0), ("Drop Shadow 1 distance", 24.0)] {
+            let field = node(&mut app, label).0;
+            set_number(&ctx, &mut app, field, value);
+        }
+        for label in ["Drop Shadow 1 quality High", "Drop Shadow 1 Inner", "Drop Shadow 1 Knockout", "Drop Shadow 1 Hide object"] {
+            let control = node(&mut app, label).1;
+            click(&ctx, &mut app, &control);
+        }
+        let swatch = node(&mut app, "Drop Shadow 1 colour").1;
+        let before = steps(&app);
+        click(&ctx, &mut app, &swatch);
+        let hex = node(&mut app, "Hex colour").1;
+        click(&ctx, &mut app, &hex);
+        for (typed, rgb) in [("#ff4200", 0xff4200), ("#10aabb", 0x10aabb)] {
+            history_key(&ctx, &mut app, Key::A, Modifiers::NONE);
+            frame(&ctx, &mut app, vec![Event::Text(typed.to_owned())]);
+            assert_eq!(state(&app).stops[0].value.filters[0].color(FilterColor::Color), Some(Rgba::hex(rgb)));
+        }
+        assert_eq!(steps(&app), before);
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        assert_eq!(steps(&app), before + 1);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(state(&app).stops[0].value.filters[0].color(FilterColor::Color), Some(Rgba::hex(0x2e3442)));
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        let shadow = &state(&app).stops[0].value.filters[0];
+        assert_eq!(shadow.param(FilterParam::Angle), Some(10.0));
+        assert_eq!(shadow.param(FilterParam::Distance), Some(24.0));
+        assert_eq!(FilterParam::STEPPED.map(|p| shadow.param(p)), [Some(3.0), Some(1.0), Some(1.0), Some(1.0)]);
+        let header = node(&mut app, "Drop Shadow 1").1;
+        click(&ctx, &mut app, &header);
+        if !nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("Glow 2 strength")) {
+            let glow = node(&mut app, "Glow 2").1;
+            click(&ctx, &mut app, &glow);
+        }
+        let strength = node(&mut app, "Glow 2 strength").0;
+        set_number(&ctx, &mut app, strength, 340.0);
+        let inner = node(&mut app, "Glow 2 Inner").1;
+        click(&ctx, &mut app, &inner);
+        let left = &mut app.array_panel.settings.as_mut().unwrap().stops[0].value;
+        left.outbound = Some(Easing::QuadOut);
+        app.array_panel.refresh(&mut app.s);
+        let authored = state(&app);
+        assert_eq!(authored.stops[0].value.filters[1].param(FilterParam::Strength), Some(340.0));
+        assert_eq!(authored.stops[0].value.filters[1].param(FilterParam::Inner), Some(1.0));
+        assert_eq!(authored.stops[1].value.filters[1].param(FilterParam::Strength), Some(200.0));
+        let track = node(&mut app, "Array: add a property stop").1;
+        click(&ctx, &mut app, &track);
+        let inserted = state(&app);
+        let stop = &inserted.stops[1];
+        assert_eq!(stop.value, ArrayPropertyStop { offset: stop.value.offset, ..authored.stops[0].value.clone() });
+        assert_eq!(app.array_panel.selected_stop, Some(stop.marker_id()));
+        let remove = node(&mut app, "Remove array stop").1;
+        click(&ctx, &mut app, &remove);
+        assert_eq!(state(&app), authored);
+        assert!(app.array_panel.selected_stop.is_some());
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(state(&app), inserted);
+        assert_eq!(app.array_panel.selected_stop, Some(stop.marker_id()));
     }
 
     #[test]

@@ -36,7 +36,13 @@ pub fn specs() -> Vec<CommandSpec> {
 /// A filter list from command params (`element.set_filters`, `filter.preset_save`): colours may
 /// be "#rrggbb" or "#rrggbbaa", values are brought into range, at most [`MAX_FILTERS`].
 pub(crate) fn parse_list(list: Option<&Value>) -> Result<Vec<FilterEntry>> {
-    let mut list = list.cloned().ok_or_else(|| EngineError::Param("param 'filters' is required (a list; [] removes them)".into()))?;
+    let list = list.ok_or_else(|| EngineError::Param("param 'filters' is required (a list; [] removes them)".into()))?;
+    parse_entries(list, MAX_FILTERS)
+}
+
+/// Array edits an existing stack, which may exceed the limit for creating a stack.
+pub(crate) fn parse_entries(list: &Value, max: usize) -> Result<Vec<FilterEntry>> {
+    let mut list = list.clone();
     fn hex_colors(v: &mut Value, keys: &[&str]) -> Result<()> {
         for k in keys {
             if v.get(*k).is_some_and(Value::is_string) {
@@ -46,8 +52,8 @@ pub(crate) fn parse_list(list: Option<&Value>) -> Result<Vec<FilterEntry>> {
         }
         Ok(())
     }
-    if list.as_array().is_some_and(|a| a.len() > MAX_FILTERS) {
-        return Err(EngineError::Param(format!("at most {MAX_FILTERS} filters per instance")));
+    if list.as_array().is_some_and(|a| a.len() > max) {
+        return Err(EngineError::Param(format!("at most {max} filters per instance")));
     }
     for f in list.as_array_mut().into_iter().flatten() {
         hex_colors(f, &["color", "shadow_color", "highlight_color"])?;
