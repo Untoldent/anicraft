@@ -1802,6 +1802,23 @@ pub(crate) fn effect_filter_rows(ui: &mut egui::Ui, layout: FilterRows, fname: &
             side_rows(ui, layout, fname, side, knockout, changed);
             picker
         }
+        Filter::AdjustColor { brightness, contrast, saturation, hue } => {
+            for (value, label, limit, unit) in [
+                (brightness, tr!("Brightness"), 100.0, ""), (contrast, tr!("Contrast"), 100.0, ""),
+                (saturation, tr!("Saturation"), 100.0, ""), (hue, tr!("Hue"), 180.0, "°"),
+            ] {
+                let name = match layout {
+                    FilterRows::Properties => label.to_owned(),
+                    FilterRows::Array => tr!("{filter} {parameter}", filter = fname, parameter = label),
+                };
+                layout.show(ui, label, |ui| with_type(ui, Type::Data, |ui| {
+                    if ui.add(egui::DragValue::new(value).range(-limit..=limit).suffix(unit).speed(limit / 100.0).max_decimals(0)).named(&name).changed() {
+                        *changed = Some(tr_noop!("Adjust colour"));
+                    }
+                }));
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -2030,17 +2047,8 @@ fn filter_rows(app: &mut App, ui: &mut egui::Ui, current: &[anicraft_engine::doc
             let f = &mut entry.filter;
             match f {
                 Filter::Blur { blur_x, blur_y, quality } => blur_quality_rows(ui, FilterRows::Properties, fname, blur_x, blur_y, quality, &mut changed),
-                Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. } | Filter::GradientGlow { .. } | Filter::GradientBevel { .. } => {
+                _ => {
                     effect_filter_rows(ui, FilterRows::Properties, fname, f, &mut changed);
-                }
-                Filter::AdjustColor { brightness, contrast, saturation, hue } => {
-                    for (v, label, range) in [(brightness, tr!("Brightness"), 100.0), (contrast, tr!("Contrast"), 100.0), (saturation, tr!("Saturation"), 100.0), (hue, tr!("Hue"), 180.0)] {
-                        row(ui, label, |ui| {
-                            if a11y::slider(ui, v, -range..=range, label, a11y::SliderLook { max_decimals: Some(0), ..Default::default() }).changed() {
-                                changed = Some(tr_noop!("Adjust colour"));
-                            }
-                        });
-                    }
                 }
             }
         });

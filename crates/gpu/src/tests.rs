@@ -1226,10 +1226,13 @@ fn gpu_matches_the_oracle_on_filtered_symbols_in_context() {
         stops: stops(&[(0.0, Rgba::WHITE), (0.32, Rgba::new(0.94, 0.72, 0.3, 0.6)), (0.5, Rgba::TRANSPARENT),
             (0.8, Rgba::new(0.35, 0.18, 0.52, 0.6)), (1.0, Rgba::new(0.14, 0.26, 0.38, 1.0))]),
         side: FilterSide::Full, knockout: false });
+    let mut all_filters = gradient_bevel_stack.clone();
+    all_filters.push(F::AdjustColor { brightness: 8.0, contrast: 16.0, saturation: -20.0, hue: -65.0 });
     for (name, filters) in [
         ("High-quality Blur, Drop Shadow, Glow and Bevel", high_quality),
         ("High-quality mixed stack with Gradient Glow", gradient_stack),
         ("High-quality mixed stack with Gradient Bevel", gradient_bevel_stack),
+        ("High-quality mixed stack with all seven filters", all_filters),
     ] {
         let mut items = vec![bg.clone()];
         items.extend(symbol_items(0));

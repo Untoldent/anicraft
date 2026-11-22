@@ -557,6 +557,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     let bevel_sample = view == "array-bevel";
     let gradient_glow_sample = view == "array-gradient-glow";
     let gradient_bevel_sample = view == "array-gradient-bevel";
+    let adjust_color_sample = view == "array-adjust-color";
     let transform_sample = blur_sample || colour_sample || segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
@@ -596,6 +597,10 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             "stops": [{"offset": 0, "color": "#fff1abff"}, {"offset": 0.25, "color": "#f6ae4cbf"},
                 {"offset": 0.5, "color": "#00000000"}, {"offset": 0.75, "color": "#872bb1ae"},
                 {"offset": 1, "color": "#431775ff"}]}]}));
+    } else if adjust_color_sample {
+        app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
+        app.run("element.set_filters", json!({"filters": [{"type": "adjust_color", "brightness": 6,
+            "contrast": 18, "saturation": 26, "hue": -125}]}));
     } else if blur_sample || shadow_glow_sample {
         app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
         let blur = json!({"type": "blur", "blur_x": 1.5, "blur_y": 0, "quality": 2});
@@ -628,7 +633,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.view.zoom = 1.0;
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
-    if gradient_glow_sample || gradient_bevel_sample {
+    if gradient_glow_sample || gradient_bevel_sample || adjust_color_sample {
         app.dock.right.size = Some(360.0);
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
@@ -736,6 +741,17 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                         after.color = Rgba::hex(shadow).with_alpha(0.72);
                         end.color = Rgba::hex(shadow);
                     }
+                }
+                app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
+            }
+            "array-adjust-color" => {
+                settings.count = 5;
+                settings.linear.end[0] += 75.0;
+                for (stop, (brightness, contrast, saturation, hue)) in settings.stops.iter_mut().zip([
+                    (6.0, 18.0, 26.0, -125.0), (15.0, 4.0, 5.0, -18.0), (-8.0, 36.0, 45.0, 126.0),
+                ]) {
+                    stop.value.alpha = 1.0;
+                    stop.value.filters = vec![Filter::AdjustColor { brightness, contrast, saturation, hue }];
                 }
                 app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
             }
@@ -1071,7 +1087,7 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
                 } else {
                     let mut off = false;
                     ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, &mut off, label))
-                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, Glow, Bevel, Gradient Glow, or Gradient Bevel."));
+                        .inner.on_disabled_hover_text(tr!("Available when the source has a filter."));
                 }
                 if (index + 1).is_multiple_of(columns) {
                     ui.end_row();
@@ -1151,7 +1167,12 @@ fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], ges
                             }).inner && blur_x.is_finite() && blur_y.is_finite()
                         } else {
                             let mut edit = None;
-                            if let Some(popup) = crate::panels::effect_filter_rows(ui, crate::panels::FilterRows::Array, &label, &mut values, &mut edit) {
+                            let read_only = !entry.enabled && matches!(values, Filter::AdjustColor { .. });
+                            let mut rows = |ui: &mut Ui| {
+                                crate::panels::effect_filter_rows(ui, crate::panels::FilterRows::Array, &label, &mut values, &mut edit)
+                            };
+                            let popup = if read_only { ui.add_enabled_ui(false, rows).inner } else { rows(ui) };
+                            if let Some(popup) = popup {
                                 *gesture = Some(EditGesture::Picker(ui.ctx().viewport_id(), popup));
                             }
                             edit.is_some()
@@ -1501,11 +1522,25 @@ mod tests {
     #[test]
     #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
     fn high_quality_gradient_bevel_stack_gpu_drag_lifecycle() {
+        high_quality_filter_gpu_drag_lifecycle(high_quality_gradient_bevel_stack());
+    }
+
+    #[cfg(gpu_stage)]
+    #[test]
+    #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
+    fn high_quality_all_filter_families_gpu_drag_lifecycle() {
+        let mut filters = high_quality_gradient_bevel_stack();
+        filters.push(json!({"type": "adjust_color", "brightness": 8, "contrast": 16, "saturation": -20, "hue": -65}));
+        high_quality_filter_gpu_drag_lifecycle(filters);
+    }
+
+    #[cfg(gpu_stage)]
+    fn high_quality_gradient_bevel_stack() -> Vec<Value> {
         let mut filters = high_quality_gradient_glow_stack();
         filters.push(json!({"type": "gradient_bevel", "side": "full", "quality": 3, "blur_x": 10, "blur_y": 8,
             "stops": [{"offset": 0, "color": "#f2cf58ff"}, {"offset": 0.32, "color": "#e7875ca0"},
                 {"offset": 0.5, "color": "#00000000"}, {"offset": 0.8, "color": "#513189a0"}, {"offset": 1, "color": "#234362ff"}]}));
-        high_quality_filter_gpu_drag_lifecycle(filters);
+        filters
     }
 
     #[cfg(gpu_stage)]
@@ -2503,6 +2538,102 @@ mod tests {
         history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
         assert_eq!(state(&app), inserted);
         assert_eq!(app.array_panel.selected_stop, Some(stop.marker_id()));
+    }
+
+    #[test]
+    fn linear_array_adjust_color_card_edits_and_inherits_independent_stops() {
+        let (mut app, ctx) = linear_app();
+        app.dock.right.size = Some(450.0);
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [
+            {"type": "adjust_color", "brightness": 5, "contrast": -10, "saturation": 22, "hue": -90},
+            {"type": "adjust_color", "brightness": 13, "hue": 70, "enabled": false},
+        ]})).unwrap();
+        let source = app.s.doc.clone();
+        let doc_steps = app.s.history_len();
+        let state = |app: &App| app.array_panel.settings.clone().unwrap();
+        let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
+        let pixels = |app: &App| anicraft_render::render_frame(&app.s.doc, 0, 1.0).unwrap().to_rgba8();
+        let find = |app: &mut App, label: &str| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(label)).unwrap_or_else(|| panic!("missing {label}"));
+        let press = |app: &mut App, label: &str| {
+            let (_, node) = find(app, label);
+            click(&ctx, app, &node);
+        };
+        let set = |app: &mut App, name: &str, value| {
+            let (id, control) = find(app, name);
+            assert_eq!(control.role(), Role::SpinButton);
+            set_number(&ctx, app, id, value);
+        };
+
+        press(&mut app, "Array type");
+        press(&mut app, "Linear");
+        for label in ["Transform", "Colour Effect", "Adjust Color 1"] { press(&mut app, label); }
+        assert!(nodes(&ctx, &mut app).iter().all(|(_, n)| n.label() != Some("Adjust Color 1 Hue")));
+        assert!(find(&mut app, "Adjust Color 2 Hue").1.is_disabled());
+        press(&mut app, "Adjust Color 2 (off)");
+        press(&mut app, "Adjust Color 1");
+        for parameter in ["Brightness", "Contrast", "Saturation", "Hue"] {
+            let (_, control) = find(&mut app, &format!("Adjust Color 1 {parameter}"));
+            assert!(!control.is_disabled());
+            assert_eq!(control.role(), Role::SpinButton);
+        }
+        let initial = state(&app);
+        assert_eq!(initial.stops[0].value.filters, initial.source_defaults.filters);
+        assert_eq!(initial.stops[1].value.filters, initial.source_defaults.filters);
+        let baseline = pixels(&app);
+        let b = find(&mut app, "Adjust Color 1 Brightness").1.bounds().unwrap();
+        let from = pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        let before_drag = steps(&app);
+        drag_gizmo(&ctx, &mut app, from, vec2(18.0, 0.0), false);
+        let to = from + vec2(36.0, 0.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        assert_eq!(steps(&app), before_drag + 1);
+        assert_ne!(state(&app).stops[0].value.filters[0], initial.stops[0].value.filters[0]);
+        set(&mut app, "Adjust Color 1 Contrast", 31.0);
+        set(&mut app, "Adjust Color 1 Saturation", 130.0);
+        press(&mut app, "Adjust Color 1 Hue");
+        frame(&ctx, &mut app, vec![]);
+        let before_typing = steps(&app);
+        frame(&ctx, &mut app, vec![Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: Modifiers::COMMAND }, Event::Text("-180".to_owned())]);
+        frame(&ctx, &mut app, vec![key(Key::Enter, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Enter, false)]);
+        assert_eq!(steps(&app), before_typing + 1);
+        let left = &mut app.array_panel.settings.as_mut().unwrap().stops[0].value;
+        assert!(matches!(left.filters[0], Filter::AdjustColor { contrast: 31.0, saturation: 100.0, hue: -180.0, .. }));
+        left.outbound = Some(Easing::QuadIn);
+        app.array_panel.refresh(&mut app.s);
+        let first_pixels = pixels(&app);
+        assert_ne!(first_pixels, baseline);
+        let (_, last) = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label().is_some_and(|label| label.starts_with("Array stop 2 of"))).unwrap();
+        click(&ctx, &mut app, &last);
+        assert_eq!(state(&app).stops[1].value.filters, initial.stops[1].value.filters);
+        set(&mut app, "Adjust Color 1 Hue", 180.0);
+        let preview = pixels(&app);
+        assert_ne!(preview, first_pixels);
+        let authored = state(&app);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(pixels(&app), first_pixels);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(state(&app), authored);
+        press(&mut app, "Array: add a property stop");
+        let inserted = state(&app);
+        let stop = &inserted.stops[1];
+        assert_eq!(stop.value, ArrayPropertyStop { offset: stop.value.offset, ..authored.stops[0].value.clone() });
+        press(&mut app, "Remove array stop");
+        assert_eq!(state(&app), authored);
+        press(&mut app, "Cancel");
+        assert_eq!(app.s.doc, source);
+        assert_eq!(app.s.history_len(), doc_steps);
+        press(&mut app, "Array type");
+        press(&mut app, "Linear");
+        assert_eq!(state(&app), authored);
+        assert_eq!(pixels(&app), preview);
+        press(&mut app, "Commit");
+        assert_eq!(pixels(&app), preview);
+        assert_eq!(app.s.history_len(), doc_steps + 1);
     }
 
     #[test]

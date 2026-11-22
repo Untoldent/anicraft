@@ -590,7 +590,7 @@ colour pickers with opacity, Quality, Type (Inner, Outer, Full), and Knockout. A
 Bevel angle going from 350° to 10° passes through 0°. **Gradient Glow** and **Gradient Bevel**
 offer the same blur, strength, offset, quality, type, and knockout controls, with a gradient ramp
 and the same shortest-arc angle behaviour. Every copy keeps the source's filter order, on/off
-states, Blur quality, and Adjust Color settings.
+states, and Blur quality.
 
 In either gradient filter card, select a ramp marker to edit its colour and opacity. Drag it or
 use its percentage field to move it between neighbouring markers. Gradient Glow pins the first
@@ -598,6 +598,11 @@ marker at 0%. Gradient Bevel pins the midpoint at 50%, and its neighbouring mark
 their original side of the midpoint. Both pinned markers stay transparent. The source filter
 determines the ramp's marker count and order. Select a different Array stop on the upper track
 to set different ramp values for the same markers.
+
+**Adjust Color** has draggable and typeable Brightness, Contrast, and Saturation fields from
+−100 to 100 and Hue from −180° to 180°. A Hue transition from −180° to 180° goes through 0°.
+It runs in the source's filter stack and works alongside the Array stop's **Colour Effect**.
+An off Adjust Color card shows its original settings read-only.
 
 Use **Filters** under **Easing** to ease the numbers, colours, and matching ramp positions.
 Quality, Type, and switches hold their value until the next authored Array stop.

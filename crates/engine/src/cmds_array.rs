@@ -302,7 +302,7 @@ impl ArrayPropertyStop {
 
     pub fn supports_filter(filter: &Filter) -> bool {
         matches!(filter, Filter::Blur { .. } | Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. }
-            | Filter::GradientGlow { .. } | Filter::GradientBevel { .. })
+            | Filter::GradientGlow { .. } | Filter::GradientBevel { .. } | Filter::AdjustColor { .. })
     }
 
     /// Authored values as shown in Properties, apart from the distribution's position.
@@ -622,7 +622,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and unsupported filters. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Legacy filter lists may omit all Gradient Bevel entries to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -689,14 +689,13 @@ fn parse_stop_filters(stop: &Value, defaults: &[Filter]) -> Result<Vec<Filter>> 
             let entries = crate::cmds_filter::parse_entries(list, defaults.len())?;
             if entries.is_empty() { return Ok(defaults.to_vec()); }
             let stack_error = || EngineError::Param("Array stop filters must match the supported source filters in stack order".into());
-            // Earlier commands left all Gradient Bevel entries at their source values.
-            let omit_bevel_ramps = entries.len() != defaults.len();
-            if omit_bevel_ramps && entries.len() != defaults.iter().filter(|f| !matches!(f, Filter::GradientBevel { .. })).count() {
-                return Err(stack_error());
-            }
+            // Earlier commands can omit entire filter families added in later milestones.
+            let has_bevel_ramps = entries.iter().any(|entry| matches!(entry.filter, Filter::GradientBevel { .. }));
+            let has_adjust_color = entries.iter().any(|entry| matches!(entry.filter, Filter::AdjustColor { .. }));
             let mut entries = entries.into_iter().zip(list.as_array().into_iter().flatten());
-            return defaults.iter().map(|source| {
-                if omit_bevel_ramps && matches!(source, Filter::GradientBevel { .. }) {
+            let filters = defaults.iter().map(|source| {
+                if (!has_bevel_ramps && matches!(source, Filter::GradientBevel { .. }))
+                    || (!has_adjust_color && matches!(source, Filter::AdjustColor { .. })) {
                     return Ok(source.clone());
                 }
                 let (mut entry, raw) = entries.next().ok_or_else(stack_error)?;
@@ -714,7 +713,9 @@ fn parse_stop_filters(stop: &Value, defaults: &[Filter]) -> Result<Vec<Filter>> 
                     }
                 }
                 Ok(entry.filter.sanitized())
-            }).collect();
+            }).collect::<Result<Vec<_>>>()?;
+            if entries.next().is_some() { return Err(stack_error()); }
+            return Ok(filters);
         }
         (None, Some(blurs)) => blurs,
         (None, None) => return Ok(defaults.to_vec()),
@@ -869,6 +870,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             if !stop.filters.is_empty() && let Some(stack) = el.kind.filters_mut() {
                 let supported = stack.iter_mut().filter(|entry| ArrayPropertyStop::supports_filter(&entry.filter));
                 for (entry, filter) in supported.zip(stop.filters) {
+                    if !entry.enabled && matches!(entry.filter, Filter::AdjustColor { .. }) { continue; }
                     // The Blur stop still controls sizes alone. Preserve its source quality,
                     // including values from older imported documents.
                     match (&mut entry.filter, filter) {
@@ -902,6 +904,100 @@ mod tests {
     use anicraft_doc::{ColorTransform, Rgba};
 
     fn st(p: f32, alpha: f32) -> ArrayPropertyStop { ArrayPropertyStop::new(p, alpha) }
+
+    #[test]
+    fn adjust_color_eases_each_signed_parameter_without_wrapping_hue() {
+        let filter = |[brightness, contrast, saturation, hue]: [f32; 4]| Filter::AdjustColor { brightness, contrast, saturation, hue };
+        let start = [-100.0, -60.0, 40.0, -180.0];
+        let end = [100.0, 100.0, -100.0, 180.0];
+        let make = |offset, values, outbound| ArrayPropertyStop {
+            filters: vec![filter(values)], outbound: Some(outbound), ..st(offset, 1.0)
+        };
+        let mut stops = [make(0.0, start, Easing::QuadIn), make(0.5, end, Easing::QuadOut), make(1.0, start, Easing::Linear)];
+        let global = ArrayEasing { preset: Easing::QuadIn, ..Default::default() };
+        let segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        let linear = ArrayEasing { filters: false, ..segment.clone() };
+        for (easing, values) in [
+            (&global, [-75.0, -40.0, 22.5, -135.0]),
+            (&segment, [-50.0, -20.0, 5.0, -90.0]),
+            (&linear, [0.0, 20.0, -30.0, 0.0]),
+        ] {
+            assert_eq!(easing.properties(&stops, 0.25).filters, [filter(values)]);
+        }
+        assert_eq!(segment.properties(&stops, 0.5).filters, [filter(end)]);
+        assert_eq!(segment.properties(&stops, 0.75).filters, [filter([-50.0, -20.0, 5.0, -90.0])]);
+        assert_eq!(linear.properties(&stops, 0.375).filters[0].param(FilterParam::Hue), Some(90.0));
+        stops[0].outbound = Some(Easing::BackOut);
+        assert_eq!(segment.properties(&stops, 0.25).filters, [filter(end)]);
+        let overshoot = ArrayEasing { preset: Easing::BackOut, ..global };
+        let sample = overshoot.properties(&stops, 0.5);
+        let [Filter::AdjustColor { brightness: -100.0, contrast, saturation, hue: -180.0 }] = sample.filters.as_slice() else { panic!() };
+        assert!((-100.0..-60.0).contains(contrast));
+        assert!((40.0..=100.0).contains(saturation) && *saturation > 40.0);
+    }
+
+    #[test]
+    fn adjust_color_arrays_keep_the_stack_and_compose_with_instance_colour() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 40, "y": 40, "w": 32, "h": 32, "fill": "#4478b0", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Filtered", "kind": "movie_clip"})).unwrap();
+        s.execute("element.set_color_effect", &json!({"green_multiplier": 50, "alpha_multiplier": 50})).unwrap();
+        let source_colour = s.selected_elements()[0].1.color;
+        let mut filters = vec![json!({"type": "blur", "quality": 3}), json!({"type": "drop_shadow", "quality": 3}),
+            json!({"type": "glow", "quality": 3}), json!({"type": "bevel", "quality": 3}),
+            json!({"type": "gradient_glow", "quality": 3}), json!({"type": "gradient_bevel", "quality": 3})];
+        let adjust = |brightness, contrast, saturation, hue, enabled| json!({"type": "adjust_color", "brightness": brightness,
+            "contrast": contrast, "saturation": saturation, "hue": hue, "enabled": enabled});
+        filters.insert(1, adjust(-12, 4, 16, -160, true));
+        filters.extend([adjust(8, 12, -28, 40, true), adjust(-7, 10, 15, 30, false)]);
+        s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
+        let source_doc = s.doc.clone();
+        let source_selection = s.selection.clone();
+        let source_stack = s.selected_elements()[0].1.kind.filters().unwrap().to_vec();
+        let mut edited = filters.clone();
+        edited[1] = adjust(32, 24, -32, 120, false);
+        edited[7] = adjust(-16, -24, 48, -100, true);
+        edited[8] = adjust(100, -100, 100, -180, true);
+        let colour = ColorEffect::Brightness(0.4);
+        let params = json!({"count": 3, "start_x": 56, "start_y": 56, "dx": 120,
+            "property_stops": [{"offset": 0}, {"offset": 1, "filters": edited, "color_effect": colour}]});
+        let render = |s: &Session| anicraft_render::render_frame(&s.doc, 0, 1.0).unwrap().to_rgba8();
+        s.preview_array(&params).unwrap();
+        let copies = s.selected_elements();
+        assert_eq!(copies[0].1.kind.filters().unwrap(), source_stack);
+        for copy in &copies {
+            let stack = copy.1.kind.filters().unwrap();
+            assert!(anicraft_doc::filters_pair_up(stack, &source_stack));
+            assert!(stack.iter().zip(&source_stack).all(|(entry, source)| entry.enabled == source.enabled));
+            assert_eq!(stack[8], source_stack[8]);
+        }
+        let middle = copies[1].1.kind.filters().unwrap();
+        assert_eq!(middle[1].filter, Filter::AdjustColor { brightness: 10.0, contrast: 14.0, saturation: -8.0, hue: -20.0 });
+        assert_eq!(middle[7].filter, Filter::AdjustColor { brightness: -4.0, contrast: -6.0, saturation: 10.0, hue: -30.0 });
+        assert_eq!(copies[2].1.color, colour.nested(&source_colour));
+        let preview = render(&s);
+        s.finish_array_preview(false);
+        assert_eq!(s.doc, source_doc);
+        assert_eq!(s.selection, source_selection);
+        let mut colour_only = params.clone();
+        colour_only["property_stops"][1]["filters"].as_array_mut().unwrap().retain(|entry| entry["type"] != "adjust_color");
+        s.preview_array(&colour_only).unwrap();
+        assert_eq!(s.selected_elements()[2].1.kind.filters().unwrap(), source_stack, "legacy lists keep source Adjust Color values");
+        assert_ne!(render(&s), preview);
+        s.finish_array_preview(false);
+        let mut filters_only = params.clone();
+        filters_only["property_stops"][1].as_object_mut().unwrap().remove("color_effect");
+        s.preview_array(&filters_only).unwrap();
+        assert_ne!(render(&s), preview);
+        s.finish_array_preview(false);
+        s.preview_array(&params).unwrap();
+        s.finish_array_preview(true);
+        assert_eq!(render(&s), preview);
+        s.undo().unwrap();
+        assert_eq!(s.doc, source_doc);
+        s.redo().unwrap();
+        assert_eq!(render(&s), preview);
+    }
 
     #[test]
     fn independent_stops_can_fade_out_then_back_in() {

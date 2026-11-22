@@ -260,8 +260,8 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   changes how quickly that middle value is approached.
 - The source instance provides the complete filter stack, including its order and on/off states.
   Each entry has a collapsible card in **Filters**, including multiple entries of the same kind.
-  Blur, Drop Shadow, Glow, Bevel, Gradient Glow, and Gradient Bevel cards edit the current stop.
-  Adjust Color uses the source settings. Preview and Commit preserve the stack structure.
+  All seven filter families are available as stop cards. Preview and Commit preserve the stack
+  structure.
 - **Blur** retains its X and Y size fields and uses the source quality. **Drop Shadow** and
   **Glow** use the shared Properties controls for Blur X/Y, Strength, Colour, Quality, Inner,
   and Knockout. Drop Shadow also offers Angle, Distance, and Hide Object. **Bevel** uses the
@@ -273,18 +273,25 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   draggable or typeable position. The pinned stops at 0% for Gradient Glow and 50% for Gradient
   Bevel can change RGB and stay fixed at zero opacity. Drop Shadow, Bevel, Gradient Glow, and
   Gradient Bevel angles use the shortest arc. An exact half turn follows the authored direction.
+- **Adjust Color** shares the Properties drag-and-type fields for Brightness, Contrast, and
+  Saturation (−100 to 100) and Hue (−180° to 180°). Hue interpolates through its signed range,
+  so a transition from −180° to 180° passes through 0°. Filters easing applies to all four
+  values, including safe clamping on overshoot. Adjust Color stays in its source filter-stack
+  position and works alongside the independent **Colour Effect** section.
 - Both ramps retain the source ramp's count and order. Each editable colour stop can move between
   its neighbours. Gradient Bevel ramp stops stay on their original side of the midpoint. Add or
   remove colour stops in the source's Properties panel before starting the Array. Inserting an
   Array property stop copies all the preceding stop's ramp values and its outbound ease.
-- The default stops start with the source values. Moving a stop preserves its values. An off
-  filter can store stop values while staying off. If the source stack changes while a draft is
+- The default stops start with the source values. Moving a stop preserves its values. Disabled
+  Adjust Color entries show their source values read-only. Other off filters can store stop
+  values while staying off. If the source stack changes while a draft is
   inactive, reopening the draft initializes the filter values from the current source. Other
   stop properties carry over. Edits made during one opening of a filter colour picker undo together.
 - `array.create` accepts a `filters` list at each stop with one object per supported source entry
   in stack order. Omitted or empty lists use the source values. Existing `blurs` lists still set
-  the Blur X/Y values in Blur order. Earlier `filters` lists that omit all Gradient Bevel entries
-  keep those entries at their source settings. An omitted `stops` field inherits the source ramp.
+  the Blur X/Y values in Blur order. Earlier `filters` lists can omit all entries of Gradient
+  Bevel or Adjust Color to keep those entries at their source settings. An omitted `stops` field
+  inherits the source ramp.
   A supplied ramp matches the source count and order and keeps its pin in the same slot.
 - Property families share one set of stop positions.
 - Future z-order interpolation can sample numeric depths and then sort copies
@@ -300,8 +307,7 @@ the named presets and curve thumbnails used by Classic and Motion Tweens
 automatically. The default is Global with Linear, and the default section starts collapsed to
 keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
 Distribution, Transform, Colour Effect, and Filters start checked and each use ordinary linear
-progression when unchecked. Filters is available when the source has Blur, Drop Shadow, Glow,
-Bevel, Gradient Glow, or Gradient Bevel.
+progression when unchecked. Filters is available when the source has a filter.
 
 - **Global** remaps the complete 0–100% progression before looking up values along the track.
   Intermediate values can be reached sooner or later while the authored stops stay in place.
@@ -446,7 +452,9 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
     eased positions and RGBA, and the transparent pin at 0%.
 17. **Gradient Bevel stops** reuse the shared ramp editor with the transparent midpoint at 50%
     and ordered interpolation on each side of the pin.
-18. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
+18. **Adjust Color stops** complete all seven filter families with independent signed Brightness,
+    Contrast, Saturation, and Hue controls.
+19. Later: Grid, Path/node placement, more stop properties, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
