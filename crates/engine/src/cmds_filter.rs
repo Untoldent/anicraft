@@ -37,10 +37,11 @@ pub fn specs() -> Vec<CommandSpec> {
 /// be "#rrggbb" or "#rrggbbaa", values are brought into range, at most [`MAX_FILTERS`].
 pub(crate) fn parse_list(list: Option<&Value>) -> Result<Vec<FilterEntry>> {
     let list = list.ok_or_else(|| EngineError::Param("param 'filters' is required (a list; [] removes them)".into()))?;
-    parse_entries(list, MAX_FILTERS)
+    Ok(parse_entries(list, MAX_FILTERS)?.iter().map(FilterEntry::sanitized).collect())
 }
 
-/// Array edits an existing stack, which may exceed the limit for creating a stack.
+/// Decode before sanitizing. Array validates ramp order first and may edit an existing stack
+/// that exceeds the limit for creating one.
 pub(crate) fn parse_entries(list: &Value, max: usize) -> Result<Vec<FilterEntry>> {
     let mut list = list.clone();
     fn hex_colors(v: &mut Value, keys: &[&str]) -> Result<()> {
@@ -66,8 +67,7 @@ pub(crate) fn parse_entries(list: &Value, max: usize) -> Result<Vec<FilterEntry>
             }
         }
     }
-    let filters: Vec<FilterEntry> = serde_json::from_value(list).map_err(|e| EngineError::Param(format!("'filters' must be a list of {{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, …values, enabled?: bool}}: {e}")))?;
-    Ok(filters.iter().map(FilterEntry::sanitized).collect())
+    serde_json::from_value(list).map_err(|e| EngineError::Param(format!("'filters' must be a list of {{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, …values, enabled?: bool}}: {e}")))
 }
 
 /// What to select for a filter command.

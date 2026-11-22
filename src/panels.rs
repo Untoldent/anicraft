@@ -1753,9 +1753,10 @@ fn blur_quality_rows(ui: &mut egui::Ui, layout: FilterRows, fname: &str, bx: &mu
     });
 }
 
-/// Shared Drop Shadow, Glow, and Bevel settings. The caller owns history and the filter stack.
+/// Shared effect settings. The caller owns history and the filter stack.
 pub(crate) fn effect_filter_rows(ui: &mut egui::Ui, layout: FilterRows, fname: &str, filter: &mut anicraft_engine::doc::Filter, changed: &mut Option<&'static str>) -> Option<Id> {
     use anicraft_engine::doc::Filter;
+    let pin = anicraft_engine::doc::pinned_stop(filter);
     match filter {
         Filter::DropShadow { blur_x, blur_y, strength, quality, angle, distance, color, inner, knockout, hide_object } => {
             blur_quality_rows(ui, layout, fname, blur_x, blur_y, quality, changed);
@@ -1789,6 +1790,15 @@ pub(crate) fn effect_filter_rows(ui: &mut egui::Ui, layout: FilterRows, fname: &
                 }
             });
             offset_row(ui, layout, fname, angle, distance, tr_noop!("Bevel offset"), changed);
+            side_rows(ui, layout, fname, side, knockout, changed);
+            picker
+        }
+        Filter::GradientGlow { blur_x, blur_y, strength, quality, angle, distance, stops, side, knockout }
+        | Filter::GradientBevel { blur_x, blur_y, strength, quality, angle, distance, stops, side, knockout } => {
+            let picker = ramp_editor(ui, layout, fname, stops, pin, changed);
+            blur_quality_rows(ui, layout, fname, blur_x, blur_y, quality, changed);
+            strength_row(ui, layout, fname, strength, changed);
+            offset_row(ui, layout, fname, angle, distance, tr_noop!("Filter offset"), changed);
             side_rows(ui, layout, fname, side, knockout, changed);
             picker
         }
@@ -2018,19 +2028,10 @@ fn filter_rows(app: &mut App, ui: &mut egui::Ui, current: &[anicraft_engine::doc
                 }
             });
             let f = &mut entry.filter;
-            let pin = anicraft_engine::doc::pinned_stop(f);
             match f {
                 Filter::Blur { blur_x, blur_y, quality } => blur_quality_rows(ui, FilterRows::Properties, fname, blur_x, blur_y, quality, &mut changed),
-                Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. } => {
+                Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. } | Filter::GradientGlow { .. } | Filter::GradientBevel { .. } => {
                     effect_filter_rows(ui, FilterRows::Properties, fname, f, &mut changed);
-                }
-                Filter::GradientGlow { blur_x, blur_y, strength, quality, angle, distance, stops, side, knockout } | Filter::GradientBevel { blur_x, blur_y, strength, quality, angle, distance, stops, side, knockout } => {
-                    // The ramp first: it is what makes the filter.
-                    ramp_editor(ui, fname, stops, pin, &mut changed);
-                    blur_quality_rows(ui, FilterRows::Properties, fname, blur_x, blur_y, quality, &mut changed);
-                    strength_row(ui, FilterRows::Properties, fname, strength, &mut changed);
-                    offset_row(ui, FilterRows::Properties, fname, angle, distance, tr_noop!("Filter offset"), &mut changed);
-                    side_rows(ui, FilterRows::Properties, fname, side, knockout, &mut changed);
                 }
                 Filter::AdjustColor { brightness, contrast, saturation, hue } => {
                     for (v, label, range) in [(brightness, tr!("Brightness"), 100.0), (contrast, tr!("Contrast"), 100.0), (saturation, tr!("Saturation"), 100.0), (hue, tr!("Hue"), 180.0)] {
@@ -2178,14 +2179,15 @@ pub(crate) fn alpha_swatch(ui: &mut egui::Ui, c: &mut Rgba, name: &str) -> egui:
 }
 
 /// A gradient filter's ramp, as Animate's: a strip of its colours over a checkerboard, a
-/// marker under it per stop. Click a marker to pick that stop (its colour, position and Remove
-/// below), drag it to move it (between its neighbours), click the strip to add a stop there.
+/// marker under it per stop. Click to select a marker, or drag it between its neighbours.
+/// The Properties editor also lets the user add and remove stops.
 /// The pinned stop (Gradient Glow's start, Gradient Bevel's middle) can't move or go, and
 /// stays transparent.
-fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::doc::GradientStop>, pin: Option<f32>, changed: &mut Option<&'static str>) {
+fn ramp_editor(ui: &mut egui::Ui, layout: FilterRows, fname: &str, stops: &mut Vec<anicraft_engine::doc::GradientStop>, pin: Option<f32>, changed: &mut Option<&'static str>) -> Option<Id> {
     use anicraft_engine::doc::{GradientStop, MAX_RAMP_STOPS, REST_SNAP, ramp_at};
+    let edits_topology = matches!(layout, FilterRows::Properties);
     let sel_id = ui.id().with("ramp_stop");
-    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0);
+    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(usize::from(!edits_topology && stops.len() > 1));
     let is_pinned = |s: &GradientStop| pin.is_some_and(|p| (s.offset - p).abs() < 1e-4);
     // Where each stop may move (the ramp is in order): between its neighbours, and clear of the
     // pinned stop, so stops keep their order (and the pick, and a drag, stay on the same stop).
@@ -2200,12 +2202,16 @@ fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::
             if lo <= hi { (lo, hi) } else { (here, here) }
         })
         .collect();
-    row_prose(ui, tr!("Gradient"), |ui| {
+    layout.show(ui, tr!("Gradient"), |ui| {
         ui.vertical(|ui| {
             let w = ui.available_width().clamp(80.0, 200.0);
-            let (strip, resp) = ui.allocate_exact_size(vec2(w, 16.0), Sense::click());
-            a11y::control(ui, &resp, WidgetType::Button, &tr!("{filter} gradient: add a colour stop", filter = fname), None);
-            let resp = resp.on_hover_text(tr!("Click to add a colour stop"));
+            let (strip, resp) = ui.allocate_exact_size(vec2(w, 16.0), if edits_topology { Sense::click() } else { Sense::hover() });
+            let resp = if edits_topology {
+                a11y::control(ui, &resp, WidgetType::Button, &tr!("{filter} gradient: add a colour stop", filter = fname), None);
+                resp.on_hover_text(tr!("Click to add a colour stop"))
+            } else {
+                resp.on_hover_text(tr!("The source filter sets the number and order of colour stops"))
+            };
             let p = ui.painter();
             // A checkerboard under the ramp shows its opacity.
             let cell = 4.0;
@@ -2258,7 +2264,7 @@ fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::
                 let edge = if i == sel { T.accent } else if r.hovered() { T.text } else { T.control_edge };
                 ui.painter().add(egui::Shape::convex_polygon(body.to_vec(), to_color32(st.color.with_alpha(1.0)), Stroke::new(if i == sel { 2.0 } else { 1.0 }, edge)));
             }
-            if resp.clicked() && stops.len() < MAX_RAMP_STOPS {
+            if edits_topology && resp.clicked() && stops.len() < MAX_RAMP_STOPS {
                 // Where the pointer clicked; from the keyboard or a screen reader, the middle of
                 // the widest gap. Never on the pinned stop.
                 let gap = stops.windows(2).filter_map(|w| if let [a, b] = w { Some((b.offset - a.offset, (a.offset + b.offset) / 2.0)) } else { None }).max_by(|a, b| a.0.total_cmp(&b.0)).map_or(0.5, |g| g.1);
@@ -2278,19 +2284,25 @@ fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::
     });
     sel = sel.min(stops.len().saturating_sub(1));
     let mut remove = false;
+    let mut picker = None;
     let count = stops.len();
     if let Some(st) = stops.get_mut(sel) {
         let pinned = is_pinned(st);
-        row(ui, tr!("Stop"), |ui| {
-            if pinned {
+        layout.show(ui, tr!("Stop"), |ui| with_type(ui, Type::Data, |ui| {
+            let swatch = if pinned {
                 // Colour only: this stop stays transparent.
                 let mut c = rgb(st.color);
-                if crate::colour::button(ui, &mut c).named(&tr!("{filter} stop colour", filter = fname)).on_hover_text(tr!("Stop colour (this stop stays transparent)")).changed() {
+                let swatch = crate::colour::button(ui, &mut c).named(&tr!("{filter} stop colour", filter = fname)).on_hover_text(tr!("Stop colour (this stop stays transparent)"));
+                if swatch.changed() {
                     st.color = Rgba::new(f32::from(c[0]) / 255.0, f32::from(c[1]) / 255.0, f32::from(c[2]) / 255.0, 0.0);
-                    *changed = Some(tr_noop!("Colour stop"));
                 }
-            } else if alpha_swatch(ui, &mut st.color, &tr!("{filter} stop colour", filter = fname)).changed() {
+                swatch
+            } else {
+                alpha_swatch(ui, &mut st.color, &tr!("{filter} stop colour", filter = fname))
+            };
+            if swatch.changed() {
                 *changed = Some(tr_noop!("Colour stop"));
+                picker = Some(crate::colour::swatch_popup_id(swatch.id));
             }
             let mut pct = st.offset * 100.0;
             let r = ui.add_enabled(!pinned, egui::DragValue::new(&mut pct).suffix(" %").speed(0.5).range(0.0..=100.0).max_decimals(0)).named(&tr!("{filter} stop position", filter = fname));
@@ -2299,10 +2311,10 @@ fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::
                 st.offset = (pct / 100.0).clamp(lo, hi);
                 *changed = Some(tr_noop!("Move colour stop"));
             }
-            if ui.add_enabled(!pinned && count > 2, egui::Button::new(tr!("Remove")).small()).named(&tr!("Remove {filter} colour stop", filter = fname)).on_hover_text(tr!("Remove this colour stop")).clicked() {
+            if edits_topology && ui.add_enabled(!pinned && count > 2, egui::Button::new(tr!("Remove")).small()).named(&tr!("Remove {filter} colour stop", filter = fname)).on_hover_text(tr!("Remove this colour stop")).clicked() {
                 remove = true;
             }
-        });
+        }));
     }
     if remove && sel < stops.len() {
         stops.remove(sel);
@@ -2310,6 +2322,7 @@ fn ramp_editor(ui: &mut egui::Ui, fname: &str, stops: &mut Vec<anicraft_engine::
         *changed = Some(tr_noop!("Remove colour stop"));
     }
     ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    picker
 }
 
 /// Which of the text style rows' values differ across the characters (or paragraphs) they show
