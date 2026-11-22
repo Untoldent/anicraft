@@ -587,18 +587,20 @@ card. **Blur** offers X and Y sizes in stage pixels. **Drop Shadow** and **Glow*
 Strength, a Colour picker, Quality, Inner, and Knockout. Drop Shadow has Angle, Distance, and
 Hide Object. **Bevel** offers Blur X/Y, Strength, Angle, Distance, separate Shadow and Highlight
 colour pickers with opacity, Quality, Type (Inner, Outer, Full), and Knockout. A Drop Shadow or
-Bevel angle going from 350° to 10° passes through 0°. **Gradient Glow** offers the same blur,
-strength, offset, quality, type, and knockout controls, with a gradient ramp and the same
-shortest-arc angle behaviour. Every copy keeps the source's filter order,
-on/off states, Blur quality, and the settings of other filters.
+Bevel angle going from 350° to 10° passes through 0°. **Gradient Glow** and **Gradient Bevel**
+offer the same blur, strength, offset, quality, type, and knockout controls, with a gradient ramp
+and the same shortest-arc angle behaviour. Every copy keeps the source's filter order, on/off
+states, Blur quality, and Adjust Color settings.
 
-In the Gradient Glow card, select a ramp marker to edit its colour and opacity. Drag the marker
-or use its percentage field to move it between neighbouring markers. The first marker stays at
-0% and transparent. The source filter determines the ramp's marker count and order. Select a
-different Array stop on the upper track to set different ramp values for the same markers.
+In either gradient filter card, select a ramp marker to edit its colour and opacity. Drag it or
+use its percentage field to move it between neighbouring markers. Gradient Glow pins the first
+marker at 0%. Gradient Bevel pins the midpoint at 50%, and its neighbouring markers stay on
+their original side of the midpoint. Both pinned markers stay transparent. The source filter
+determines the ramp's marker count and order. Select a different Array stop on the upper track
+to set different ramp values for the same markers.
 
-Use **Filters** under **Easing** to ease the numbers, colours, and matching Gradient Glow ramp
-positions. Quality, Type, and switches hold their value until the next authored Array stop.
+Use **Filters** under **Easing** to ease the numbers, colours, and matching ramp positions.
+Quality, Type, and switches hold their value until the next authored Array stop.
 Edits from one opening of a filter colour picker undo together.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults

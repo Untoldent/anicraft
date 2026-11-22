@@ -1221,7 +1221,16 @@ fn gpu_matches_the_oracle_on_filtered_symbols_in_context() {
     gradient_stack.push(F::GradientGlow { blur_x: 9.0, blur_y: 11.0, strength: 1.5, angle: 310.0, distance: 5.0, quality: 3,
         stops: stops(&[(0.0, Rgba::TRANSPARENT), (0.3, Rgba::new(0.42, 0.17, 0.86, 0.55)), (1.0, Rgba::new(0.1, 0.85, 0.75, 1.0))]),
         side: FilterSide::Full, knockout: false });
-    for (name, filters) in [("High-quality Blur, Drop Shadow, Glow and Bevel", high_quality), ("High-quality mixed stack with Gradient Glow", gradient_stack)] {
+    let mut gradient_bevel_stack = gradient_stack.clone();
+    gradient_bevel_stack.push(F::GradientBevel { blur_x: 10.0, blur_y: 8.0, strength: 1.9, angle: 35.0, distance: 6.0, quality: 3,
+        stops: stops(&[(0.0, Rgba::WHITE), (0.32, Rgba::new(0.94, 0.72, 0.3, 0.6)), (0.5, Rgba::TRANSPARENT),
+            (0.8, Rgba::new(0.35, 0.18, 0.52, 0.6)), (1.0, Rgba::new(0.14, 0.26, 0.38, 1.0))]),
+        side: FilterSide::Full, knockout: false });
+    for (name, filters) in [
+        ("High-quality Blur, Drop Shadow, Glow and Bevel", high_quality),
+        ("High-quality mixed stack with Gradient Glow", gradient_stack),
+        ("High-quality mixed stack with Gradient Bevel", gradient_bevel_stack),
+    ] {
         let mut items = vec![bg.clone()];
         items.extend(symbol_items(0));
         scenes.push((name, DisplayList {

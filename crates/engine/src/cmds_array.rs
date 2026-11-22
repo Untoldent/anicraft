@@ -7,10 +7,11 @@
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
-use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, FilterParam, MAX_BLUR};
+use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, FilterParam, GradientStop, MAX_BLUR, REST_SNAP, pinned_stop};
 use anicraft_geom::{Affine, Decomposed, Vec2};
 use serde_json::{Value, json};
-use std::ops::Range;
+use std::cmp::Ordering;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 const MAX_COPIES: u32 = 500;
@@ -146,7 +147,8 @@ impl ArrayEasing {
                         if let Some(value) = source.param(param) { filter.set_param(param, value); }
                     }
                     if let (Filter::Bevel { side, .. }, Filter::Bevel { side: held_side, .. })
-                        | (Filter::GradientGlow { side, .. }, Filter::GradientGlow { side: held_side, .. }) = (filter, source)
+                        | (Filter::GradientGlow { side, .. }, Filter::GradientGlow { side: held_side, .. })
+                        | (Filter::GradientBevel { side, .. }, Filter::GradientBevel { side: held_side, .. }) = (filter, source)
                     {
                         *side = *held_side;
                     }
@@ -229,7 +231,8 @@ fn blend_filter(from: &Filter, to: &Filter, t: f32) -> Filter {
     let mut target = to.clone();
     if let (Filter::DropShadow { angle, .. }, Filter::DropShadow { angle: target_angle, .. })
         | (Filter::Bevel { angle, .. }, Filter::Bevel { angle: target_angle, .. })
-        | (Filter::GradientGlow { angle, .. }, Filter::GradientGlow { angle: target_angle, .. }) = (from, &mut target)
+        | (Filter::GradientGlow { angle, .. }, Filter::GradientGlow { angle: target_angle, .. })
+        | (Filter::GradientBevel { angle, .. }, Filter::GradientBevel { angle: target_angle, .. }) = (from, &mut target)
     {
         let delta = *target_angle - *angle;
         // Both authored directions are normalized. Keep exact half turns in their
@@ -237,19 +240,35 @@ fn blend_filter(from: &Filter, to: &Filter, t: f32) -> Filter {
         if delta.abs() > 180.0 { *target_angle -= delta.signum() * 360.0; }
     }
     let Some(mut blended) = from.lerp(&target, t) else { return from.clone() };
-    if let Filter::GradientGlow { stops, .. } = &mut blended
-        && let Some((pin, rest)) = stops.split_first_mut()
+    if let (Filter::GradientGlow { stops, .. }, Filter::GradientGlow { stops: source, .. })
+        | (Filter::GradientBevel { stops, .. }, Filter::GradientBevel { stops: source, .. }) = (&mut blended, from)
+        && let Some(pin) = pinned_stop(from)
+        && let Some(pin_index) = source.iter().position(|stop| stop.offset == pin)
     {
-        // When an ease overshoots, constrain offsets in place. Sorting would change which
-        // colour belongs to each source slot, and moving a stop onto zero could replace the pin.
-        pin.offset = 0.0;
-        let mut previous = anicraft_doc::REST_SNAP;
-        for stop in rest {
-            stop.offset = stop.offset.max(previous).min(1.0);
+        // Constrain overshoot in source order, keeping each colour on its side of the pin.
+        let mut previous = 0.0;
+        for (index, stop) in stops.iter_mut().enumerate() {
+            let range = ramp_slot_range(pin, index.cmp(&pin_index));
+            stop.offset = stop.offset.max(previous).clamp(*range.start(), *range.end());
             previous = stop.offset;
         }
     }
     blended.sanitized()
+}
+
+fn ramp_slot_range(pin: f32, side: Ordering) -> RangeInclusive<f32> {
+    match side {
+        Ordering::Less => 0.0..=(pin - REST_SNAP).max(0.0),
+        Ordering::Equal => pin..=pin,
+        Ordering::Greater => (pin + REST_SNAP)..=1.0,
+    }
+}
+
+fn ramp_matches_source(stops: &[GradientStop], source: &[GradientStop], pin: f32) -> bool {
+    let Some(pin_index) = source.iter().position(|stop| stop.offset == pin) else { return false };
+    stops.len() == source.len()
+        && stops.iter().enumerate().all(|(index, stop)| ramp_slot_range(pin, index.cmp(&pin_index)).contains(&stop.offset))
+        && stops.iter().zip(stops.iter().skip(1)).all(|(a, b)| a.offset <= b.offset)
 }
 
 fn supported_filters(stack: &[FilterEntry]) -> Vec<Filter> {
@@ -282,7 +301,8 @@ impl ArrayPropertyStop {
     }
 
     pub fn supports_filter(filter: &Filter) -> bool {
-        matches!(filter, Filter::Blur { .. } | Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. } | Filter::GradientGlow { .. })
+        matches!(filter, Filter::Blur { .. } | Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. }
+            | Filter::GradientGlow { .. } | Filter::GradientBevel { .. })
     }
 
     /// Authored values as shown in Properties, apart from the distribution's position.
@@ -602,7 +622,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and unsupported filters. Drop Shadow, Glow, Bevel and Gradient Glow quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel and Gradient Glow angles take the shortest arc. Gradient Glow ramps inherit the source ramp when stops is omitted. Authored ramps keep the source stop count in position order, with the first stop transparent at 0%. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and unsupported filters. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Legacy filter lists may omit all Gradient Bevel entries to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -668,26 +688,33 @@ fn parse_stop_filters(stop: &Value, defaults: &[Filter]) -> Result<Vec<Filter>> 
         (Some(list), None) => {
             let entries = crate::cmds_filter::parse_entries(list, defaults.len())?;
             if entries.is_empty() { return Ok(defaults.to_vec()); }
-            if entries.len() != defaults.len() || entries.iter().zip(defaults).any(|(entry, source)| {
-                std::mem::discriminant(&entry.filter) != std::mem::discriminant(source)
-            }) {
-                return Err(EngineError::Param("Array stop filters must match the supported source filters in stack order".into()));
+            let stack_error = || EngineError::Param("Array stop filters must match the supported source filters in stack order".into());
+            // Earlier commands left all Gradient Bevel entries at their source values.
+            let omit_bevel_ramps = entries.len() != defaults.len();
+            if omit_bevel_ramps && entries.len() != defaults.iter().filter(|f| !matches!(f, Filter::GradientBevel { .. })).count() {
+                return Err(stack_error());
             }
-            return entries.into_iter().zip(defaults).zip(list.as_array().into_iter().flatten())
-                .map(|((mut entry, source), raw)| {
-                    if let (Filter::GradientGlow { stops, .. }, Filter::GradientGlow { stops: source, .. }) = (&mut entry.filter, source) {
-                        if raw.get("stops").is_none() {
-                            stops.clone_from(source);
-                        } else if stops.len() != source.len()
-                            || !stops.first().is_some_and(|stop| stop.offset == 0.0)
-                            || !stops.iter().skip(1).all(|stop| (anicraft_doc::REST_SNAP..=1.0).contains(&stop.offset))
-                            || stops.iter().zip(stops.iter().skip(1)).any(|(a, b)| a.offset > b.offset)
-                        {
-                            return Err(EngineError::Param("Array Gradient Glow ramps must retain the source stop count, a stop at 0%, and ordered positions".into()));
-                        }
+            let mut entries = entries.into_iter().zip(list.as_array().into_iter().flatten());
+            return defaults.iter().map(|source| {
+                if omit_bevel_ramps && matches!(source, Filter::GradientBevel { .. }) {
+                    return Ok(source.clone());
+                }
+                let (mut entry, raw) = entries.next().ok_or_else(stack_error)?;
+                if std::mem::discriminant(&entry.filter) != std::mem::discriminant(source) {
+                    return Err(stack_error());
+                }
+                if let (Filter::GradientGlow { stops, .. }, Filter::GradientGlow { stops: source_ramp, .. })
+                    | (Filter::GradientBevel { stops, .. }, Filter::GradientBevel { stops: source_ramp, .. }) = (&mut entry.filter, source)
+                    && let Some(pin) = pinned_stop(source)
+                {
+                    if raw.get("stops").is_none() {
+                        stops.clone_from(source_ramp);
+                    } else if !ramp_matches_source(stops, source_ramp, pin) {
+                        return Err(EngineError::Param(format!("Array {} ramps must retain the source stop count and order with the pin at {}%", source.label(), pin * 100.0)));
                     }
-                    Ok(entry.filter.sanitized())
-                }).collect();
+                }
+                Ok(entry.filter.sanitized())
+            }).collect();
         }
         (None, Some(blurs)) => blurs,
         (None, None) => return Ok(defaults.to_vec()),
@@ -1083,6 +1110,122 @@ mod tests {
         assert_eq!(render(&s), preview);
         s.undo().unwrap();
         assert_eq!(s.doc, base);
+        s.redo().unwrap();
+        assert_eq!(render(&s), preview);
+    }
+
+    #[test]
+    fn gradient_bevel_eases_both_halves_but_keeps_the_midpoint_and_steps() {
+        use anicraft_doc::FilterSide;
+        let make = |offset, end| {
+            let (left, right) = if end { (0.484375, 0.515625) } else { (0.015625, 0.984375) };
+            let (l, pin, r) = if end {
+                (Rgba::new(0.25, 0.75, 1.0, 0.625), Rgba::hex(0xff0000), Rgba::new(1.0, 0.25, 0.75, 0.75))
+            } else {
+                (Rgba::new(0.75, 0.25, 0.0, 0.125), Rgba::hex(0x0000ff), Rgba::new(0.0, 0.75, 0.25, 0.25))
+            };
+            ArrayPropertyStop {
+                outbound: Some(if end { Easing::QuadOut } else { Easing::QuadIn }),
+                filters: vec![Filter::GradientBevel {
+                    stops: [(0.0, Rgba::WHITE), (left, l), (0.5, pin.with_alpha(0.0)), (right, r), (1.0, Rgba::BLACK)]
+                        .into_iter().map(|(offset, color)| GradientStop { offset, color }).collect(),
+                    blur_x: if end { 20.0 } else { 4.0 }, blur_y: if end { 30.0 } else { 6.0 },
+                    angle: if end { 10.0 } else { 350.0 }, distance: if end { 24.0 } else { -8.0 },
+                    strength: if end { 6.0 } else { 2.0 }, quality: if end { 3 } else { 1 },
+                    side: if end { FilterSide::Full } else { FilterSide::Inner }, knockout: end,
+                }],
+                ..st(offset, 1.0)
+            }
+        };
+        let mut stops = [make(0.0, false), make(0.5, true), make(1.0, false)];
+        let global = ArrayEasing { preset: Easing::QuadIn, ..Default::default() };
+        let segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        let linear = ArrayEasing { filters: false, ..global.clone() };
+        for (ease, f) in [(&global, 0.125), (&segment, 0.25), (&linear, 0.5)] {
+            let sample = ease.properties(&stops, 0.25);
+            let [Filter::GradientBevel { stops: ramp, blur_x, blur_y, angle, distance, strength, quality, side, knockout }] = sample.filters.as_slice() else { panic!() };
+            assert_eq!((*blur_x, *blur_y, *angle, *distance, *strength), (4.0 + 16.0 * f, 6.0 + 24.0 * f, (350.0 + 20.0 * f) % 360.0, -8.0 + 32.0 * f, 2.0 + 4.0 * f));
+            assert_eq!((*quality, *side, *knockout), (1, FilterSide::Inner, false));
+            assert_eq!(ramp.iter().map(|stop| stop.offset).collect::<Vec<_>>(), [0.0, 0.015625 + 0.46875 * f, 0.5, 0.984375 - 0.46875 * f, 1.0]);
+            assert_eq!(ramp[1].color, Rgba::new(0.75 - 0.5 * f, 0.25 + 0.5 * f, f, 0.125 + 0.5 * f));
+            assert_eq!(ramp[2].color, Rgba::new(f, 0.0, 1.0 - f, 0.0));
+            assert_eq!(ramp[3].color, Rgba::new(f, 0.75 - 0.5 * f, 0.25 + 0.5 * f, 0.25 + 0.5 * f));
+        }
+        assert_eq!(segment.properties(&stops, 0.5).filters, stops[1].filters);
+        assert!(matches!(global.properties(&stops, 0.5).filters[0], Filter::GradientBevel { quality: 3, side: FilterSide::Full, knockout: true, .. }));
+        assert_eq!(segment.properties(&stops, 0.75).filters[0].param(FilterParam::Angle), Some(355.0));
+        stops[0].outbound = Some(Easing::BackOut);
+        let sample = segment.properties(&stops, 0.25);
+        let [Filter::GradientBevel { stops: ramp, quality: 1, side: FilterSide::Inner, knockout: false, .. }] = sample.filters.as_slice() else { panic!() };
+        assert_eq!(ramp.iter().map(|stop| stop.offset).collect::<Vec<_>>(), [0.0, 0.5 - REST_SNAP, 0.5, 0.5 + REST_SNAP, 1.0]);
+        assert_eq!(ramp[2].color.a, 0.0);
+        assert!(ramp[1].color.b > ramp[3].color.b && ramp[1].color.a < ramp[3].color.a);
+    }
+
+    #[test]
+    fn gradient_bevel_array_preserves_duplicate_ramps_and_bakes_the_rendered_preview() {
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 40, "y": 40, "w": 32, "h": 32, "fill": "#778899", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Box", "kind": "movie_clip"})).unwrap();
+        let source_ramp = json!([
+            {"offset": 0.125, "color": "#fcdf9280"}, {"offset": 0.35, "color": "#ffda43a0"},
+            {"offset": 0.5, "color": "#00000000"}, {"offset": 0.75, "color": "#5e451c80"},
+        ]);
+        let edited_ramp = json!([
+            {"offset": 0.375, "color": "#31a2f7c0"}, {"offset": 0.4, "color": "#37d9d580"},
+            {"offset": 0.5, "color": "#ffffff80"}, {"offset": 0.95, "color": "#821030ff"},
+        ]);
+        let glow = json!({"type": "gradient_glow", "quality": 3});
+        let bevel = |ramp| json!({"type": "gradient_bevel", "quality": 3, "side": "full", "stops": ramp});
+        s.execute("element.set_filters", &json!({"filters": [
+            bevel(&source_ramp), {"type": "adjust_color", "brightness": 11, "enabled": false},
+            glow, {"type": "gradient_bevel", "enabled": false},
+        ]})).unwrap();
+        let source_doc = s.doc.clone();
+        let source = s.selected_elements()[0].1.kind.filters().unwrap().to_vec();
+        let ramp = |entry: &FilterEntry| match &entry.filter {
+            Filter::GradientBevel { stops, .. } => stops.clone(),
+            _ => panic!("expected Gradient Bevel"),
+        };
+        assert_eq!(ramp(&source[3]), anicraft_doc::default_bevel_ramp());
+        let params = json!({"count": 3, "start_x": 56, "start_y": 56, "dx": 100,
+            "property_stops": [{"offset": 0}, {"offset": 1, "filters": [bevel(&edited_ramp), glow,
+                {"type": "gradient_bevel", "strength": 3, "enabled": true}]}]});
+        for (slot, offset) in [(0, -0.1), (1, 0.5), (1, 0.55), (1, 0.5 - REST_SNAP * 0.5), (2, 0.49), (3, 0.4), (3, 1.1)] {
+            let mut invalid = params.clone();
+            invalid["property_stops"][1]["filters"][0]["stops"][slot]["offset"] = json!(offset);
+            assert!(s.preview_array(&invalid).is_err(), "accepted slot {slot} at {offset}");
+            assert_eq!(s.doc, source_doc);
+        }
+        let mut invalid = params.clone();
+        invalid["property_stops"][1]["filters"][0]["stops"].as_array_mut().unwrap().pop();
+        assert!(s.preview_array(&invalid).is_err());
+        let render = |s: &Session| anicraft_render::render_frame(&s.doc, 0, 1.0).unwrap().data;
+        let initial = render(&s);
+        s.preview_array(&params).unwrap();
+        let copies = s.selected_elements();
+        assert_eq!(copies[0].1.kind.filters().unwrap(), source);
+        for copy in &copies {
+            let stack = copy.1.kind.filters().unwrap();
+            assert!(anicraft_doc::filters_pair_up(stack, &source));
+            assert!(stack.iter().zip(&source).all(|(entry, original)| entry.enabled == original.enabled));
+            assert_eq!(stack[1..3], source[1..3]);
+            assert_eq!(ramp(&stack[3]), ramp(&source[3]));
+        }
+        let middle = copies[1].1.kind.filters().unwrap();
+        let middle_ramp = ramp(&middle[0]);
+        assert_eq!(middle_ramp.len(), 4);
+        assert_eq!((middle_ramp[0].offset, middle_ramp[2].offset, middle_ramp[2].color.a), (0.25, 0.5, 0.0));
+        assert_eq!(middle[3].filter.param(FilterParam::Strength), Some(200.0));
+        let preview = render(&s);
+        assert_ne!(preview, initial);
+        s.finish_array_preview(false);
+        assert_eq!(s.doc, source_doc);
+        s.preview_array(&params).unwrap();
+        s.finish_array_preview(true);
+        assert_eq!(render(&s), preview);
+        s.undo().unwrap();
+        assert_eq!(s.doc, source_doc);
         s.redo().unwrap();
         assert_eq!(render(&s), preview);
     }

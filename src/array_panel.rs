@@ -556,6 +556,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     let shadow_glow_sample = matches!(view, "array-shadow-glow" | "array-glow-shadow");
     let bevel_sample = view == "array-bevel";
     let gradient_glow_sample = view == "array-gradient-glow";
+    let gradient_bevel_sample = view == "array-gradient-bevel";
     let transform_sample = blur_sample || colour_sample || segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
@@ -588,6 +589,13 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             "angle": 25, "distance": 9, "quality": 3, "side": "outer", "strength": 1.7,
             "stops": [{"offset": 0, "color": "#ffffff00"}, {"offset": 0.2, "color": "#30136850"},
                 {"offset": 0.65, "color": "#6451edcc"}, {"offset": 1, "color": "#2ad9c9ff"}]}]}));
+    } else if gradient_bevel_sample {
+        app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
+        app.run("element.set_filters", json!({"filters": [{"type": "gradient_bevel", "blur_x": 9, "blur_y": 8,
+            "angle": 40, "distance": 12, "quality": 3, "side": "full", "strength": 2.2,
+            "stops": [{"offset": 0, "color": "#fff1abff"}, {"offset": 0.25, "color": "#f6ae4cbf"},
+                {"offset": 0.5, "color": "#00000000"}, {"offset": 0.75, "color": "#872bb1ae"},
+                {"offset": 1, "color": "#431775ff"}]}]}));
     } else if blur_sample || shadow_glow_sample {
         app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
         let blur = json!({"type": "blur", "blur_x": 1.5, "blur_y": 0, "quality": 2});
@@ -620,7 +628,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.view.zoom = 1.0;
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
-    if gradient_glow_sample {
+    if gradient_glow_sample || gradient_bevel_sample {
         app.dock.right.size = Some(360.0);
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
@@ -706,6 +714,27 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                             entry.color = Rgba::hex(rgb).with_alpha(opacity);
                         }
                         if let Some(entry) = stops.get_mut(1) { entry.offset = offset; }
+                    }
+                }
+                app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
+            }
+            "array-gradient-bevel" => {
+                settings.count = 5;
+                settings.linear.end[0] += 75.0;
+                for (stop, (left, right, highlight, shadow)) in settings.stops.iter_mut().zip([
+                    (0.15, 0.78, 0xffedaa, 0x681e8b), (0.29, 0.72, 0xcaff9a, 0x204da2), (0.39, 0.86, 0xc3fcff, 0x125d70),
+                ]) {
+                    stop.value.alpha = 1.0;
+                    stop.value.filters.clone_from(&settings.source_defaults.filters);
+                    if let Some(Filter::GradientBevel { stops, .. }) = stop.value.filters.first_mut()
+                        && let [start, before, _, after, end] = stops.as_mut_slice()
+                    {
+                        start.color = Rgba::hex(highlight);
+                        before.offset = left;
+                        before.color = start.color.with_alpha(0.8);
+                        after.offset = right;
+                        after.color = Rgba::hex(shadow).with_alpha(0.72);
+                        end.color = Rgba::hex(shadow);
                     }
                 }
                 app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
@@ -1042,7 +1071,7 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
                 } else {
                     let mut off = false;
                     ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, &mut off, label))
-                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, Glow, Bevel, or Gradient Glow."));
+                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, Glow, Bevel, Gradient Glow, or Gradient Bevel."));
                 }
                 if (index + 1).is_multiple_of(columns) {
                     ui.end_row();
@@ -1465,10 +1494,26 @@ mod tests {
     #[test]
     #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
     fn high_quality_gradient_glow_stack_gpu_drag_lifecycle() {
+        high_quality_filter_gpu_drag_lifecycle(high_quality_gradient_glow_stack());
+    }
+
+    #[cfg(gpu_stage)]
+    #[test]
+    #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
+    fn high_quality_gradient_bevel_stack_gpu_drag_lifecycle() {
+        let mut filters = high_quality_gradient_glow_stack();
+        filters.push(json!({"type": "gradient_bevel", "side": "full", "quality": 3, "blur_x": 10, "blur_y": 8,
+            "stops": [{"offset": 0, "color": "#f2cf58ff"}, {"offset": 0.32, "color": "#e7875ca0"},
+                {"offset": 0.5, "color": "#00000000"}, {"offset": 0.8, "color": "#513189a0"}, {"offset": 1, "color": "#234362ff"}]}));
+        high_quality_filter_gpu_drag_lifecycle(filters);
+    }
+
+    #[cfg(gpu_stage)]
+    fn high_quality_gradient_glow_stack() -> Vec<Value> {
         let mut filters = high_quality_bevel_stack();
         filters.push(json!({"type": "gradient_glow", "side": "full", "quality": 3, "blur_x": 9, "blur_y": 11,
             "stops": [{"offset": 0, "color": "#ffffff00"}, {"offset": 0.3, "color": "#6231dd88"}, {"offset": 1, "color": "#20d8bfff"}]}));
-        high_quality_filter_gpu_drag_lifecycle(filters);
+        filters
     }
 
     #[cfg(gpu_stage)]
@@ -2462,19 +2507,31 @@ mod tests {
 
     #[test]
     fn linear_array_gradient_glow_card_edits_corresponding_ramp_stops() {
+        edit_array_gradient_card("gradient_glow", "Gradient Glow");
+    }
+
+    #[test]
+    fn linear_array_gradient_bevel_card_edits_corresponding_ramp_stops() {
+        edit_array_gradient_card("gradient_bevel", "Gradient Bevel");
+    }
+
+    fn edit_array_gradient_card(kind: &str, title: &str) {
         use anicraft_engine::doc::GradientStop;
         let (mut app, ctx) = linear_app();
         app.dock.right.size = Some(450.0);
         app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
-        app.s.execute("element.set_filters", &json!({"filters": [{"type": "gradient_glow", "stops": [
-            {"offset": 0, "color": "#ffffff00"}, {"offset": 0.25, "color": "#7090ffaa"},
-            {"offset": 0.75, "color": "#d0db77ee"}, {"offset": 1, "color": "#300000ff"},
-        ]}]})).unwrap();
+        let bevel = kind == "gradient_bevel";
+        let mut stops = vec![
+            json!({"offset": 0, "color": "#ffffff00"}), json!({"offset": 0.25, "color": "#7090ffaa"}),
+            json!({"offset": 0.75, "color": "#d0db77ee"}), json!({"offset": 1, "color": "#300000ff"}),
+        ];
+        if bevel { stops.insert(2, json!({"offset": 0.5, "color": "#00113300"})); }
+        app.s.execute("element.set_filters", &json!({"filters": [{"type": kind, "stops": stops}]})).unwrap();
         let source = app.s.doc.clone();
         let doc_steps = app.s.history_len();
-        let find = |app: &mut App, label| nodes(&ctx, app).into_iter()
+        let find = |app: &mut App, label: &str| nodes(&ctx, app).into_iter()
             .find(|(_, n)| n.label() == Some(label)).unwrap_or_else(|| panic!("missing {label}"));
-        let press = |app: &mut App, label| {
+        let press = |app: &mut App, label: &str| {
             let (_, node) = find(app, label);
             click(&ctx, app, &node);
         };
@@ -2483,13 +2540,13 @@ mod tests {
         let settings = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
         let ramp = |app: &App, slot: usize| -> Vec<GradientStop> {
             let stop = &app.array_panel.settings.as_ref().unwrap().stops[slot];
-            let Filter::GradientGlow { stops, .. } = &stop.value.filters[0] else { panic!() };
+            let (Filter::GradientGlow { stops, .. } | Filter::GradientBevel { stops, .. }) = &stop.value.filters[0] else { panic!() };
             stops.clone()
         };
         let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
         let render = |app: &App| anicraft_render::render_frame(&app.s.doc, 0, 1.0).unwrap().data;
         let set_offset = |app: &mut App, pct| {
-            let field = find(app, "Gradient Glow stop position").0;
+            let field = find(app, &format!("{title} stop position")).0;
             set_number(&ctx, app, field, pct);
         };
         let select_array_stop = |app: &mut App, prefix| {
@@ -2499,22 +2556,24 @@ mod tests {
 
         press(&mut app, "Array type");
         press(&mut app, "Linear");
-        for label in ["Transform", "Colour Effect", "Gradient Glow", "Gradient Glow"] { press(&mut app, label); }
+        for label in ["Transform", "Colour Effect", title, title] { press(&mut app, label); }
         assert!(app.s.array_preview_active());
         let controls = nodes(&ctx, &mut app);
-        for label in ["Gradient Glow blur X", "Gradient Glow blur Y", "Gradient Glow strength", "Gradient Glow angle",
-            "Gradient Glow distance", "Gradient Glow stop colour", "Gradient Glow stop position", "Gradient Glow quality High",
-            "Gradient Glow type Inner", "Gradient Glow type Outer", "Gradient Glow type Full", "Gradient Glow knockout"] {
-            assert!(controls.iter().any(|(_, n)| n.label() == Some(label) && !n.is_disabled()), "missing enabled {label}");
+        for control in ["blur X", "blur Y", "strength", "angle", "distance", "stop colour", "stop position", "quality High",
+            "type Inner", "type Outer", "type Full", "knockout"] {
+            let label = format!("{title} {control}");
+            assert!(controls.iter().any(|(_, n)| n.label() == Some(label.as_str()) && !n.is_disabled()), "missing enabled {label}");
         }
-        for label in ["Uses source settings", "Gradient Glow gradient: add a colour stop", "Remove Gradient Glow colour stop"] {
-            assert!(controls.iter().all(|(_, n)| n.label() != Some(label)), "unexpected {label}");
+        for label in ["Uses source settings".into(), format!("{title} gradient: add a colour stop"), format!("Remove {title} colour stop")] {
+            assert!(controls.iter().all(|(_, n)| n.label() != Some(label.as_str())), "unexpected {label}");
         }
-        press(&mut app, "Gradient Glow colour stop 1 at 0% (fixed)");
-        assert!(find(&mut app, "Gradient Glow stop position").1.is_disabled());
-        assert_eq!((ramp(&app, 0)[0].offset, ramp(&app, 0)[0].color.a), (0.0, 0.0));
-        press(&mut app, "Gradient Glow colour stop 2 at 25%");
-        let b = find(&mut app, "Gradient Glow colour stop 2 at 25%").1.bounds().unwrap();
+        let (pin_index, pin_description, pin) = if bevel { (2, "3 at 50%", 0.5) } else { (0, "1 at 0%", 0.0) };
+        press(&mut app, &format!("{title} colour stop {pin_description} (fixed)"));
+        assert!(find(&mut app, &format!("{title} stop position")).1.is_disabled());
+        assert_eq!((ramp(&app, 0)[pin_index].offset, ramp(&app, 0)[pin_index].color.a), (pin, 0.0));
+        let marker = format!("{title} colour stop 2 at 25%");
+        press(&mut app, &marker);
+        let b = find(&mut app, &marker).1.bounds().unwrap();
         let from = pos2(((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32);
         let history = steps(&app);
         let baseline = render(&app);
@@ -2525,13 +2584,13 @@ mod tests {
         frame(&ctx, &mut app, vec![pointer_button(to, false)]);
         assert_eq!(steps(&app), history + 1);
         set_offset(&mut app, 90.0);
-        assert_eq!(ramp(&app, 0)[1].offset, 0.75, "typing beyond the next stop keeps the ramp ordered");
+        assert_eq!(ramp(&app, 0)[1].offset, if bevel { 0.498 } else { 0.75 }, "typing beyond the next stop keeps the ramp ordered");
         set_offset(&mut app, 40.0);
 
         let edit_colour = |app: &mut App, typed, rgba: [u8; 4], slot| {
             let before = settings(app);
             let history = steps(app);
-            press(app, "Gradient Glow stop colour");
+            press(app, &format!("{title} stop colour"));
             press(app, "Hex colour");
             for value in ["#aabbcc20", typed] {
                 history_key(&ctx, app, Key::A, Modifiers::NONE);
@@ -2553,10 +2612,17 @@ mod tests {
         let left = ramp(&app, 0);
         select_array_stop(&mut app, "Array stop 2 of");
         assert_eq!(ramp(&app, 1)[1].offset, 0.25);
-        set_offset(&mut app, 60.0);
+        if bevel {
+            press(&mut app, &format!("{title} colour stop 4 at 75%"));
+            set_offset(&mut app, 10.0);
+            assert_eq!(ramp(&app, 1)[3].offset, 0.502);
+            assert_eq!((ramp(&app, 1)[2].offset, ramp(&app, 1)[2].color.a), (0.5, 0.0));
+        }
+        press(&mut app, &marker);
+        set_offset(&mut app, if bevel { 45.0 } else { 60.0 });
         edit_colour(&mut app, "#11bbd6c0", [17, 187, 214, 192], 1);
         assert_eq!(ramp(&app, 0), left);
-        assert_eq!(ramp(&app, 1)[1].offset, 0.6);
+        assert_eq!(ramp(&app, 1)[1].offset, if bevel { 0.45 } else { 0.6 });
         let preview = render(&app);
         assert_ne!(preview, baseline);
         let authored = settings(&app);

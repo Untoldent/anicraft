@@ -2187,8 +2187,10 @@ fn ramp_editor(ui: &mut egui::Ui, layout: FilterRows, fname: &str, stops: &mut V
     use anicraft_engine::doc::{GradientStop, MAX_RAMP_STOPS, REST_SNAP, ramp_at};
     let edits_topology = matches!(layout, FilterRows::Properties);
     let sel_id = ui.id().with("ramp_stop");
-    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(usize::from(!edits_topology && stops.len() > 1));
     let is_pinned = |s: &GradientStop| pin.is_some_and(|p| (s.offset - p).abs() < 1e-4);
+    let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or_else(|| {
+        if edits_topology { 0 } else { stops.iter().position(|stop| !is_pinned(stop)).unwrap_or(0) }
+    });
     // Where each stop may move (the ramp is in order): between its neighbours, and clear of the
     // pinned stop, so stops keep their order (and the pick, and a drag, stay on the same stop).
     let clear = 2.0 * REST_SNAP;

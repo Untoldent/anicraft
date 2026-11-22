@@ -486,6 +486,14 @@ in the latter half. Direct3D 12 measured 3.98 ms p50 and 6.03 ms p95, with 112.2
 `cargo test --locked high_quality_bevel_stack_gpu_drag_lifecycle -- --ignored --nocapture --test-threads=1`
 to repeat the test.
 
+The Gradient Bevel review repeated the editor workload with ten instances, each with High-quality
+Blur, Drop Shadow, Glow, Bevel, Gradient Glow, and Gradient Bevel. On the Windows Intel Arc adapter,
+the first Direct3D 12 run exceeded the test's 15-second stage-settle deadline. Two reruns on the
+same adapter completed all eight Radial-to-Linear switches and 80 pointer moves, including one
+after the other verification workloads had finished. Pointer-frame p95 was 10.51 ms on the first
+successful rerun and 6.91 ms on the isolated rerun. The Vulkan run completed with a 15.97 ms
+pointer-frame p95. The cause of the initial timeout remains undetermined.
+
 To exercise the failing paint path separately, run a **debug build** with isolated logs and
 recovery files. The fixture destroys AniCraft's test device just before the painter runs.
 The replacement process should open the **Recover unsaved work** dialog. The Vulkan and

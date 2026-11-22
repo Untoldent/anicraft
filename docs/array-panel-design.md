@@ -260,32 +260,32 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   changes how quickly that middle value is approached.
 - The source instance provides the complete filter stack, including its order and on/off states.
   Each entry has a collapsible card in **Filters**, including multiple entries of the same kind.
-  Blur, Drop Shadow, Glow, Bevel, and Gradient Glow cards edit the current stop. Other cards show that they use the
-  source settings. Preview and Commit preserve the stack structure and unsupported values.
+  Blur, Drop Shadow, Glow, Bevel, Gradient Glow, and Gradient Bevel cards edit the current stop.
+  Adjust Color uses the source settings. Preview and Commit preserve the stack structure.
 - **Blur** retains its X and Y size fields and uses the source quality. **Drop Shadow** and
   **Glow** use the shared Properties controls for Blur X/Y, Strength, Colour, Quality, Inner,
   and Knockout. Drop Shadow also offers Angle, Distance, and Hide Object. **Bevel** uses the
   shared controls for Blur X/Y, Strength, Angle, Distance, Shadow Colour, Highlight Colour,
   Quality, Type (Inner, Outer, Full), and Knockout. Both colour pickers include opacity.
-  **Gradient Glow** uses the Properties ramp editor alongside Blur X/Y, Strength, Angle, Distance,
-  Quality, Type, and Knockout. Its ramp markers select individual colours independently of the
-  Array stop track. The selected ramp stop has a colour picker and a draggable or typeable
-  position. The pinned 0% stop can change RGB and stays fixed at zero opacity.
-  Drop Shadow, Bevel, and Gradient Glow angles use the shortest arc. An exact half turn follows
-  the authored direction.
-- Gradient Glow ramp stops retain the source ramp's count and order. Each editable colour stop
-  can move between its neighbours. Add or remove colour stops in the source's Properties panel
-  before starting the Array. Inserting an Array property stop copies all the preceding stop's
-  ramp values and its outbound ease.
+  **Gradient Glow** and **Gradient Bevel** use the Properties ramp editor alongside Blur X/Y,
+  Strength, Angle, Distance, Quality, Type, and Knockout. Ramp markers select individual colours
+  independently of the Array stop track. The selected ramp stop has a colour picker and a
+  draggable or typeable position. The pinned stops at 0% for Gradient Glow and 50% for Gradient
+  Bevel can change RGB and stay fixed at zero opacity. Drop Shadow, Bevel, Gradient Glow, and
+  Gradient Bevel angles use the shortest arc. An exact half turn follows the authored direction.
+- Both ramps retain the source ramp's count and order. Each editable colour stop can move between
+  its neighbours. Gradient Bevel ramp stops stay on their original side of the midpoint. Add or
+  remove colour stops in the source's Properties panel before starting the Array. Inserting an
+  Array property stop copies all the preceding stop's ramp values and its outbound ease.
 - The default stops start with the source values. Moving a stop preserves its values. An off
   filter can store stop values while staying off. If the source stack changes while a draft is
   inactive, reopening the draft initializes the filter values from the current source. Other
   stop properties carry over. Edits made during one opening of a filter colour picker undo together.
-- `array.create` accepts a `filters` list at each stop with one Blur, Drop Shadow, Glow, Bevel, or Gradient Glow
-  object per supported source entry in stack order. Omitted or empty lists use the source values.
-  Existing `blurs` lists still set the Blur X/Y values in Blur order. An omitted Gradient Glow
-  `stops` field inherits the source ramp. A supplied ramp must match its stop count and position
-  order, starting at 0%.
+- `array.create` accepts a `filters` list at each stop with one object per supported source entry
+  in stack order. Omitted or empty lists use the source values. Existing `blurs` lists still set
+  the Blur X/Y values in Blur order. Earlier `filters` lists that omit all Gradient Bevel entries
+  keep those entries at their source settings. An omitted `stops` field inherits the source ramp.
+  A supplied ramp matches the source count and order and keeps its pin in the same slot.
 - Property families share one set of stop positions.
 - Future z-order interpolation can sample numeric depths and then sort copies
   stably, since visual stacking is discrete.
@@ -301,7 +301,7 @@ automatically. The default is Global with Linear, and the default section starts
 keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
 Distribution, Transform, Colour Effect, and Filters start checked and each use ordinary linear
 progression when unchecked. Filters is available when the source has Blur, Drop Shadow, Glow,
-Bevel, or Gradient Glow.
+Bevel, Gradient Glow, or Gradient Bevel.
 
 - **Global** remaps the complete 0–100% progression before looking up values along the track.
   Intermediate values can be reached sooner or later while the authored stops stay in place.
@@ -328,10 +328,10 @@ Bevel, or Gradient Glow.
   Global overshoot continues from the track endpoint's value using the nearest usable stop span.
   Colour Effect easing applies to all colour values, including Alpha. Filters easing applies to
   continuous filter numbers and colours, including the RGBA channels and positions of matching
-  Gradient Glow ramp stops. Overshooting ramp positions stay in order and can meet at a shared
-  position. Quality and switches, including Bevel and Gradient Glow Type, hold from each authored
-  stop until the next using uneased progression. Colour, Scale, and filter parameters remain in
-  their valid ranges. Transform Rotation uses the unwrapped authored degrees.
+  Gradient Glow and Gradient Bevel ramp stops. Overshooting ramp positions stay in order and can
+  meet at a shared position on the same side of the pin. Quality, Type, and switches hold from
+  each authored stop until the next using uneased progression. Colour, Scale, and filter
+  parameters remain in their valid ranges. Transform Rotation uses the unwrapped authored degrees.
 
 ## Future distribution modes (not in this milestone)
 
@@ -444,7 +444,9 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
     and stepped Quality, Type, and Knockout using the existing filter renderer.
 16. **Gradient Glow stops** add the shared ramp editor with source-defined stop order and count,
     eased positions and RGBA, and the transparent pin at 0%.
-17. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
+17. **Gradient Bevel stops** reuse the shared ramp editor with the transparent midpoint at 50%
+    and ordered interpolation on each side of the pin.
+18. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
