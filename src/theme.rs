@@ -1146,15 +1146,27 @@ pub fn section_with_header<R>(ui: &mut egui::Ui, id: &str, style: Section, title
 }
 
 fn section_body<R>(ui: &mut egui::Ui, id: &str, style: Section, title: &str, detail: Option<&str>, default_open: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, Option<R>) {
-    use egui::{Sense, StrokeKind, pos2, vec2};
     let key = ui.make_persistent_id(("section", id));
-    let mut open = ui.data_mut(|d| *d.get_temp_mut_or(key, default_open));
+    let before = ui.data_mut(|d| *d.get_temp_mut_or(key, default_open));
+    let mut open = before;
+    let result = section_content(ui, style, title, detail, &mut open, add);
+    if open != before { ui.data_mut(|d| d.insert_temp(key, open)); }
+    result
+}
+
+/// A collapsible section whose open state is owned by its panel.
+pub(crate) fn section_with_state<R>(ui: &mut egui::Ui, style: Section, title: &str, open: &mut bool, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    section_content(ui, style, title, None, open, add).1
+}
+
+fn section_content<R>(ui: &mut egui::Ui, style: Section, title: &str, detail: Option<&str>, open: &mut bool, add: impl FnOnce(&mut egui::Ui) -> R) -> (egui::Response, Option<R>) {
+    use egui::{Sense, StrokeKind, pos2, vec2};
     let height = if style == Section::Band { 32.0 } else { TARGET };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     if resp.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_temp(key, open));
+        *open = !*open;
     }
+    let open = *open;
     let enabled = ui.is_enabled();
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, enabled, open, title));
     let p = ui.painter();

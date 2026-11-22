@@ -494,6 +494,11 @@ after the other verification workloads had finished. Pointer-frame p95 was 10.51
 successful rerun and 6.91 ms on the isolated rerun. The Vulkan run completed with a 15.97 ms
 pointer-frame p95. The cause of the initial timeout remains undetermined.
 
+During Circle and Spiral UI verification, `stage_work_is_submitted_only_inside_the_frame`
+failed in the parallel workspace run at the assertion that submissions wait between frames.
+The test passed in a process by itself. The rest of the workspace suite and the exhaustive
+command fuzzer passed separately.
+
 To exercise the failing paint path separately, run a **debug build** with isolated logs and
 recovery files. The fixture destroys AniCraft's test device just before the painter runs.
 The replacement process should open the **Recover unsaved work** dialog. The Vulkan and

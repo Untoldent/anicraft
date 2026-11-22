@@ -547,11 +547,10 @@ in place and updates the spacing. The button beside **Dim Stage** shows or hides
 controls and the white instance pivot markers in both modes. **Dim Stage** brings the Array in front
 of the faded surroundings. Turn it off to see the document's stacking.
 
-**Closed Loop** is on by default for Radial arrays. It evenly spaces a full circle without
-doubling the first instance at the seam and limits Sweep to one turn in either direction.
-Turn it off to place instances at both ends of an arc or to make multiple turns. **Spiral Offset**
-changes the radius per turn. Positive values grow the spiral outward in either direction.
-Negative values shrink it to the centre. Zero keeps the radius constant. **Centre Drift X/Y**
+Use the **Circle** and **Spiral** buttons under **Distribution** for Radial Arrays. Circle starts
+selected. Choose Spiral to spread the instances along a spiral, then tune **Sweep** and
+**Spiral Offset**. Positive offset grows the spiral outward, and negative offset shrinks it
+toward the centre. Circle keeps your offset ready for the next switch. **Centre Drift X/Y**
 moves the local centre by that many pixels per turn in either sweep direction.
 Drag **Centre** or the curved guide on the stage to move the array. Drag **Start** to set
 the radius and starting angle. Drag **End** to place the endpoint and add or remove turns. At a
@@ -583,7 +582,8 @@ The **Colour Effect** target under **Easing** changes how all these values progr
 changes made before closing the picker undo together.
 
 Open **Filters** to see the source instance's filter stack. Each entry has its own collapsible
-card. **Blur** offers X and Y sizes in stage pixels. **Drop Shadow** and **Glow** also offer
+card. Cards start collapsed. Click each header to expand it. Open cards stay open when you change
+stops or distribution modes. **Blur** offers X and Y sizes in stage pixels. **Drop Shadow** and **Glow** also offer
 Strength, a Colour picker, Quality, Inner, and Knockout. Drop Shadow has Angle, Distance, and
 Hide Object. **Bevel** offers Blur X/Y, Strength, Angle, Distance, separate Shadow and Highlight
 colour pickers with opacity, Quality, Type (Inner, Outer, Full), and Knockout. A Drop Shadow or

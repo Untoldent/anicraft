@@ -164,6 +164,7 @@ pub struct State {
     error: Option<String>,
     reset_pending: bool,
     stop_editor_epoch: u64,
+    open_filter_cards: Vec<bool>,
     selected_stop: Option<usize>,
     show_gizmo: bool,
     dim_stage: bool,
@@ -179,6 +180,7 @@ impl Default for State {
             error: None,
             reset_pending: false,
             stop_editor_epoch: 0,
+            open_filter_cards: Vec::new(),
             selected_stop: None,
             show_gizmo: true,
             dim_stage: true,
@@ -237,6 +239,7 @@ impl State {
             match s.preview_array(&settings.params(mode)) {
                 Ok(()) => {
                     self.active = Some(Active { mode, history: EditHistory::default() });
+                    self.open_filter_cards = vec![false; settings.source_filters.len()];
                     self.selected_stop = self.selected_stop.filter(|id| settings.stops.iter().any(|stop| stop.marker_id() == *id))
                         .or_else(|| settings.stops.first().map(PropertyStop::marker_id));
                     self.settings = Some(settings);
@@ -552,7 +555,7 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 pub(crate) fn screenshot(app: &mut App, view: &str) {
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
-    let blur_sample = matches!(view, "array-blur" | "array-blur-spiral");
+    let blur_sample = matches!(view, "array-blur" | "array-blur-spiral" | "array-blur-circle");
     let shadow_glow_sample = matches!(view, "array-shadow-glow" | "array-glow-shadow");
     let bevel_sample = view == "array-bevel";
     let gradient_glow_sample = view == "array-gradient-glow";
@@ -637,8 +640,9 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.dock.right.size = Some(360.0);
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
-    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced" | "array-blur-spiral") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
+    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced" | "array-blur-spiral" | "array-blur-circle") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
     app.array_panel.select_mode(&mut app.s, Some(mode));
+    if view != "array-blur-circle" { app.array_panel.open_filter_cards.fill(true); }
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
     app.array_panel.dim_stage = view != "array-polish-off";
     if let Some(settings) = &mut app.array_panel.settings {
@@ -672,7 +676,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                 stop.value.rotation = rotation;
                 stop.value.alpha = alpha;
             }
-            if mode == Mode::Radial {
+            if mode == Mode::Radial && view != "array-blur-circle" {
                 settings.radial.centre = [270.0, 185.0];
                 settings.radial.closed_loop = false;
                 settings.radial.sweep = 630.0;
@@ -683,7 +687,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             }
         }
         match view {
-            "array-blur" | "array-blur-spiral" => {
+            "array-blur" | "array-blur-spiral" | "array-blur-circle" => {
                 for (stop, [blur_x, blur_y]) in settings.stops.iter_mut().zip([[1.5, 0.0], [22.0, 3.0], [4.0, 26.0]]) {
                     stop.value.alpha = 1.0;
                     stop.value.filters = vec![Filter::Blur { blur_x, blur_y, quality: 2 }];
@@ -918,11 +922,9 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
             let mut gesture = ctx.dragged_id().or_else(|| ctx.drag_stopped_id()).map(|id| EditGesture::Pointer(viewport, id))
                 .or_else(|| focused_text(ctx).map(|id| EditGesture::Text(viewport, id)));
             let before = state.before_edit(gesture);
-            let changed = state.settings.as_mut().is_some_and(|settings| {
-                ui.add_enabled_ui(!state.reset_pending, |ui| {
-                    settings_ui(ui, settings, mode, state.stop_editor_epoch, &mut state.selected_stop, &mut app.scale_lock, &mut gesture)
-                }).inner
-            });
+            let changed = ui.add_enabled_ui(!state.reset_pending, |ui| {
+                settings_ui(ui, state, mode, &mut app.scale_lock, &mut gesture)
+            }).inner;
             if changed {
                 state.record_edit(before, gesture);
                 state.refresh(&mut app.s);
@@ -986,7 +988,8 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
     }).inner
 }
 
-fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epoch: u64, selected_stop: &mut Option<usize>, scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
+fn settings_ui(ui: &mut Ui, state: &mut State, mode: Mode, scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
+    let State { settings: Some(settings), stop_editor_epoch, selected_stop, open_filter_cards, .. } = state else { return false };
     let easing_open = settings.easing != ArrayEasing::default();
     let mut changed = crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
         let index = settings.stops.iter().position(|stop| Some(stop.marker_id()) == *selected_stop).unwrap_or(0);
@@ -996,10 +999,10 @@ fn settings_ui(ui: &mut Ui, settings: &mut Settings, mode: Mode, stop_editor_epo
     }).unwrap_or(false);
     ui.add_space(4.0);
     section(ui, "array_stops", Section::Rule, tr!("Property stops"), None, |ui| {
-        let id = ui.make_persistent_id(("array_stop_bar", stop_editor_epoch));
+        let id = ui.make_persistent_id(("array_stop_bar", *stop_editor_epoch));
         let before = *selected_stop;
         changed |= crate::colour_panel::array_stop_bar(ui, id, &mut settings.stops, selected_stop, |ui, stop| {
-            stop_properties(ui, stop, &settings.source_filters, scale_lock, gesture)
+            stop_properties(ui, stop, &settings.source_filters, open_filter_cards, scale_lock, gesture)
         });
         if *selected_stop != before { ui.ctx().request_repaint(); }
     });
@@ -1098,16 +1101,29 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
 }
 
 fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
-    let mut changed = coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut radial.centre, " px");
+    use crate::{icons::Icon, timeline::icon_button};
+    let previous = radial.closed_loop;
+    ui.horizontal(|ui| {
+        if icon_button(ui, tr!("Circle"), Some(previous), Icon::Oval).clicked() {
+            radial.closed_loop = true;
+        }
+        if icon_button(ui, tr!("Spiral"), Some(!previous), Icon::Spiral).clicked() {
+            radial.closed_loop = false;
+        }
+    });
+    let mut changed = previous != radial.closed_loop;
+    if changed && !radial.closed_loop {
+        if radial.spiral_offset == 0.0 { radial.spiral_offset = 48.0; }
+        if radial.sweep == 0.0 { radial.sweep = CLOSED_SWEEP_LIMIT; }
+    }
+    changed |= coordinates(ui, tr!("Centre"), [tr!("Centre X"), tr!("Centre Y")], &mut radial.centre, " px");
     let range = -RADIAL_FIELD_LIMIT..=RADIAL_FIELD_LIMIT;
     changed |= field(ui, tr!("Radius"), &mut radial.radius, " px", 0.0..=RADIAL_FIELD_LIMIT);
     changed |= field(ui, tr!("Start angle"), &mut radial.start, " °", range.clone());
-    let loop_changed = crate::theme::checkbox(ui, &mut radial.closed_loop, tr!("Closed Loop")).changed();
     let limit = radial.sweep_limit().min(RADIAL_FIELD_LIMIT);
-    if loop_changed && radial.closed_loop {
+    if !previous && radial.closed_loop {
         radial.sweep = radial.sweep.clamp(-limit, limit);
     }
-    changed |= loop_changed;
     changed |= field(ui, tr!("Sweep"), &mut radial.sweep, " °", -limit..=limit);
     if !radial.closed_loop {
         changed |= field(ui, tr!("Spiral Offset"), &mut radial.spiral_offset, tr!(" px/turn"), range);
@@ -1118,7 +1134,7 @@ fn radial_fields(ui: &mut Ui, radial: &mut Radial) -> bool {
     changed
 }
 
-fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, source_filters: &[FilterEntry], scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
+fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, source_filters: &[FilterEntry], open_filter_cards: &mut [bool], scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
     egui::Frame::new()
         .fill(T.panel_alt)
         .stroke(egui::Stroke::new(1.0, T.border))
@@ -1134,16 +1150,16 @@ fn stop_properties(ui: &mut Ui, stop: &mut PropertyStop, source_filters: &[Filte
                 ui.push_id(("colour", marker), |ui| colour_stop(ui, &mut stop.value, gesture)).inner
             }).unwrap_or(false);
             let filters = !source_filters.is_empty() && section(ui, "array_stop_filters", Section::Rule, tr!("Filters"), None, |ui| {
-                ui.push_id(("filters", marker), |ui| filter_stops(ui, source_filters, &mut stop.value.filters, gesture)).inner
+                ui.push_id(("filters", marker), |ui| filter_stops(ui, source_filters, &mut stop.value.filters, open_filter_cards, gesture)).inner
             }).unwrap_or(false);
             transform || colour || filters
         }).inner
 }
 
-fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], gesture: &mut Option<EditGesture>) -> bool {
+fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], open_cards: &mut [bool], gesture: &mut Option<EditGesture>) -> bool {
     let mut filters = filters.iter_mut();
     let mut changed = false;
-    for (slot, entry) in source.iter().enumerate() {
+    for (slot, (entry, open)) in source.iter().zip(open_cards).enumerate() {
         let label = crate::i18n::t(entry.filter.label());
         let label = if source.len() == 1 { label.to_owned() } else { tr!("{filter} {slot}", filter = label, slot = slot + 1) };
         let filter = if ArrayPropertyStop::supports_filter(&entry.filter) { filters.next() } else { None };
@@ -1155,7 +1171,7 @@ fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], ges
                 .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    changed |= section(ui, "array_filter", Section::Rule, &heading, None, |ui| {
+                    changed |= crate::theme::section_with_state(ui, Section::Rule, &heading, open, |ui| {
                         let Some(filter) = filter else {
                             ui.label(text(Type::Caption, tr!("Uses source settings")));
                             return false;
@@ -1683,6 +1699,10 @@ mod tests {
     fn blur_x_grip(ctx: &egui::Context, app: &mut App) -> Pos2 {
         for label in ["Transform", "Colour Effect"] {
             let header = nodes(ctx, app).into_iter().find(|(_, node)| node.label() == Some(label)).unwrap().1;
+            click(ctx, app, &header);
+        }
+        if !app.array_panel.open_filter_cards.first().copied().unwrap_or(false) {
+            let header = nodes(ctx, app).into_iter().find(|(_, node)| node.label() == Some("Blur")).unwrap().1;
             click(ctx, app, &header);
         }
         let field = nodes(ctx, app).into_iter().find(|(_, node)| {
@@ -2382,7 +2402,7 @@ mod tests {
             let copies = app.s.selected_elements();
             copies[0].1.kind.filters().unwrap()[0].filter.clone()
         };
-        for name in ["Transform", "Colour Effect"] {
+        for name in ["Transform", "Colour Effect", "Blur 1"] {
             let header = node(&mut app, None, name).1;
             click(&ctx, &mut app, &header);
         }
@@ -2463,7 +2483,7 @@ mod tests {
             .find(|(_, n)| n.label() == Some(name)).unwrap_or_else(|| panic!("missing {name}"));
         let state = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
         let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
-        for label in ["Transform", "Colour Effect"] {
+        for label in ["Transform", "Colour Effect", "Drop Shadow 1"] {
             let header = node(&mut app, label).1;
             click(&ctx, &mut app, &header);
         }
@@ -2568,7 +2588,7 @@ mod tests {
 
         press(&mut app, "Array type");
         press(&mut app, "Linear");
-        for label in ["Transform", "Colour Effect", "Adjust Color 1"] { press(&mut app, label); }
+        for label in ["Transform", "Colour Effect", "Adjust Color 2 (off)"] { press(&mut app, label); }
         assert!(nodes(&ctx, &mut app).iter().all(|(_, n)| n.label() != Some("Adjust Color 1 Hue")));
         assert!(find(&mut app, "Adjust Color 2 Hue").1.is_disabled());
         press(&mut app, "Adjust Color 2 (off)");
@@ -2687,7 +2707,7 @@ mod tests {
 
         press(&mut app, "Array type");
         press(&mut app, "Linear");
-        for label in ["Transform", "Colour Effect", title, title] { press(&mut app, label); }
+        for label in ["Transform", "Colour Effect", title] { press(&mut app, label); }
         assert!(app.s.array_preview_active());
         let controls = nodes(&ctx, &mut app);
         for control in ["blur X", "blur Y", "strength", "angle", "distance", "stop colour", "stop position", "quality High",
@@ -2799,7 +2819,7 @@ mod tests {
         press(&mut app, "Array type");
         press(&mut app, "Linear");
         assert!(app.s.array_preview_active());
-        for label in ["Transform", "Colour Effect", "Filters", "Filters", "Bevel"] { press(&mut app, label); }
+        for label in ["Transform", "Colour Effect", "Filters", "Filters"] { press(&mut app, label); }
         assert!(nodes(&ctx, &mut app).iter().all(|(_, n)| n.label() != Some("Bevel distance")), "the closed Bevel card hides its controls");
         press(&mut app, "Bevel");
         let controls = nodes(&ctx, &mut app);
@@ -2854,7 +2874,7 @@ mod tests {
             .find(|(_, n)| n.label() == Some(name)).unwrap_or_else(|| panic!("missing {name}"));
         let state = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
         let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
-        for label in ["Transform", "Colour Effect"] {
+        for label in ["Transform", "Colour Effect", "Bevel"] {
             let header = node(&mut app, label).1;
             click(&ctx, &mut app, &header);
         }
@@ -3383,6 +3403,46 @@ mod tests {
     }
 
     #[test]
+    fn filter_cards_share_expansion_across_stops_and_modes_by_slot() {
+        let (mut app, ctx) = linear_app();
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [
+            {"type": "blur", "blur_x": 7}, {"type": "blur", "blur_x": 20},
+        ]})).unwrap();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let shown = |app: &mut App, name: &str| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(name)).map(|(_, n)| n);
+        let press = |app: &mut App, name: &str| {
+            let header = shown(app, name).unwrap();
+            click(&ctx, app, &header);
+        };
+        let initial = app.array_panel.settings.clone();
+        let preview = app.s.doc.clone();
+        for slot in ["Blur 1 blur X", "Blur 2 blur X"] { assert!(shown(&mut app, slot).is_none()); }
+        press(&mut app, "Blur 1");
+        assert_eq!(shown(&mut app, "Blur 1 blur X").unwrap().numeric_value(), Some(7.0));
+        assert!(shown(&mut app, "Blur 2 blur X").is_none());
+        press(&mut app, "Blur 2");
+        assert!(shown(&mut app, "Blur 1 blur X").is_some());
+        assert_eq!(shown(&mut app, "Blur 2 blur X").unwrap().numeric_value(), Some(20.0));
+        press(&mut app, "Blur 1");
+        assert_eq!(app.s.doc, preview);
+        assert!(!app.array_panel.can_step(false));
+        let last = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label().is_some_and(|label| label.starts_with("Array stop 2 of"))).unwrap().1;
+        click(&ctx, &mut app, &last);
+        assert!(shown(&mut app, "Blur 1 blur X").is_none());
+        assert!(shown(&mut app, "Blur 2 blur X").is_some());
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert!(shown(&mut app, "Blur 1 blur X").is_none());
+        assert!(shown(&mut app, "Blur 2 blur X").is_some());
+        assert_eq!(app.array_panel.settings, initial);
+        app.array_panel.finish(&mut app.s, false);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        for slot in ["Blur 1 blur X", "Blur 2 blur X"] { assert!(shown(&mut app, slot).is_none()); }
+        assert_eq!(app.array_panel.settings, initial);
+    }
+
+    #[test]
     fn radial_panel_keeps_winding_in_open_mode_and_limits_a_closed_loop() {
         let (mut app, ctx) = linear_app();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
@@ -3394,14 +3454,26 @@ mod tests {
             let input = fields.iter().find(|(_, n)| n.role() == Role::SpinButton && n.label() == Some(label)).unwrap().0;
             set_number(&ctx, app, input, value);
         };
-        let toggle_loop = |app: &mut App| {
+        let choice = |app: &mut App, label| {
             let shown = nodes(&ctx, app);
-            click(&ctx, app, &shown.iter().find(|(_, n)| n.label() == Some("Closed Loop")).unwrap().1);
+            shown.into_iter().find(|(_, n)| n.label() == Some(label)).unwrap().1
         };
         let shows_offset = |app: &mut App| nodes(&ctx, app).iter().any(|(_, n)| n.value() == Some("Spiral Offset"));
         assert!(app.array_panel.settings.as_ref().unwrap().radial.closed_loop);
+        assert_eq!(choice(&mut app, "Circle").toggled(), Some(egui::accesskit::Toggled::True));
+        assert_eq!(choice(&mut app, "Spiral").toggled(), Some(egui::accesskit::Toggled::False));
         assert!(!shows_offset(&mut app));
-        toggle_loop(&mut app);
+        let spiral = choice(&mut app, "Spiral");
+        click(&ctx, &mut app, &spiral);
+        assert_eq!(choice(&mut app, "Circle").toggled(), Some(egui::accesskit::Toggled::False));
+        assert_eq!(choice(&mut app, "Spiral").toggled(), Some(egui::accesskit::Toggled::True));
+        let radial = app.array_panel.settings.as_ref().unwrap().radial;
+        let last = app.s.selected_elements().last().unwrap().1.transform.translation();
+        assert!((last.x - radial.centre[0] - radial.radius - 48.0).abs() < 0.001);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(choice(&mut app, "Circle").toggled(), Some(egui::accesskit::Toggled::True));
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(choice(&mut app, "Spiral").toggled(), Some(egui::accesskit::Toggled::True));
         assert!(shows_offset(&mut app));
         set_field(&mut app, "Spiral Offset", 15.0);
         set_field(&mut app, "Centre Drift X", 32.0);
@@ -3416,13 +3488,17 @@ mod tests {
             let radius = (last.x - x as f32).hypot(last.y - y as f32);
             assert!((radius - radial.radius - 15.0 * radial.sweep.abs() / 360.0).abs() < 0.001);
         }
-        toggle_loop(&mut app);
+        let circle = choice(&mut app, "Circle");
+        click(&ctx, &mut app, &circle);
+        assert_eq!(choice(&mut app, "Circle").toggled(), Some(egui::accesskit::Toggled::True));
+        assert_eq!(choice(&mut app, "Spiral").toggled(), Some(egui::accesskit::Toggled::False));
         assert!(!shows_offset(&mut app));
         assert!(!nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("Centre Drift X")));
         let radial = &app.array_panel.settings.as_ref().unwrap().radial;
         assert!(radial.closed_loop);
         assert_eq!(radial.sweep, -360.0);
-        toggle_loop(&mut app);
+        let spiral = choice(&mut app, "Spiral");
+        click(&ctx, &mut app, &spiral);
         assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.spiral_offset, 15.0);
         assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.centre_drift, [32.0, -18.0]);
     }

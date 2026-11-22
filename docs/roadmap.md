@@ -18,6 +18,7 @@ configuration while the original instance stays selected. The selected-stop card
 scales and multi-turn rotation in Transform, and Alpha, Brightness, Tint and Advanced channels
 in Colour Effect. The default stops start with the source instance's values. An inserted stop
 copies the prior stop's entire snapshot, including its outbound ease.
+Radial Arrays offer Circle and Spiral buttons. Filter cards start collapsed in each Array session.
 Filter stops support all seven families, including signed Adjust Color values. Both gradient filters
 interpolate corresponding ramp positions with a fixed source stop count, order, and transparent pin.
 Quality, Type, and switches hold at the authored stops. Copies preserve the source filter stack and

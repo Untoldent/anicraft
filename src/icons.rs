@@ -79,6 +79,7 @@ pub enum Icon {
     InsertBlankKeyframe,
     ClipStage,
     ArrayHandles,
+    Spiral,
     Plus,
     Trash,
     Copy,
@@ -94,7 +95,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 76] = [
+    pub const ALL: [Icon; 77] = [
         Icon::PanelProperties,
         Icon::PanelSwatches,
         Icon::PanelLibrary,
@@ -109,6 +110,7 @@ impl Icon {
         Icon::Ellipsis,
         Icon::ClipStage,
         Icon::ArrayHandles,
+        Icon::Spiral,
         Icon::InsertFrame,
         Icon::InsertKeyframe,
         Icon::InsertBlankKeyframe,
@@ -289,12 +291,14 @@ impl Icon {
             Icon::PanelOutput => ("anicraft-panel-output", false),
             Icon::PanelActions => ("anicraft-panel-actions", false),
             Icon::ArrayHandles => ("anicraft-array-handles", false),
+            Icon::Spiral => ("anicraft-spiral", false),
         }
     }
 }
 
 static FILES: &[(&str, &str)] = &[
     ("anicraft-array-handles", include_str!("../assets/icons/anicraft-array-handles.svg")),
+    ("anicraft-spiral", include_str!("../assets/icons/anicraft-spiral.svg")),
     ("mouse-pointer-2", include_str!("../assets/icons/mouse-pointer-2.svg")),
     ("navigation", include_str!("../assets/icons/navigation.svg")),
     ("scaling", include_str!("../assets/icons/scaling.svg")),

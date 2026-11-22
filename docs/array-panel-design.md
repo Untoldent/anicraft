@@ -148,17 +148,20 @@ is required now.
 
 ### Radial and spiral distribution
 
-**Closed Loop** starts on with a 360° sweep. It uses `N` intervals and limits Sweep to
+The adjacent **Circle** and **Spiral** icon buttons select the Radial distribution. Circle
+starts selected with a 360° sweep. It uses `N` intervals and limits Sweep to
 −360° through 360°. The first instance occupies Start and the final instance leaves one
-interval at the seam. With Closed Loop off, `N−1` intervals place the first and last instances
+interval at the seam. Spiral uses `N−1` intervals to place the first and last instances
 at both endpoints. One instance always occupies Start. Editing Sweep keeps the chosen topology
 at every angle, including at full turns and across positive and negative sweep boundaries.
 
-Open distributions reveal **Spiral Offset** and **Centre Drift X/Y** and accept multiple turns
+Spiral reveals **Spiral Offset** and **Centre Drift X/Y** and accepts multiple turns
 in either direction. At a fraction `t` of the distribution, angular travel is `Sweep × t` and
 the unsigned turn count is `abs(Sweep × t) / 360°`. The local centre is `Centre + Centre Drift × turns`.
 The radius around that centre is `max(0, Radius + Spiral Offset × turns)`. Both rates are in
-pixels per turn and default to zero. With zero offset, successive turns keep the same radius.
+pixels per turn. Selecting Spiral seeds a zero offset at 48 pixels per turn and a zero sweep at
+one turn. Circle retains the offset and drift for the next switch and uses a fixed radius and
+centre. A zero offset entered while editing Spiral keeps successive turns at the same radius.
 After the radius reaches zero, the rest of an inward spiral follows the drifting centre.
 **Rotate instances** uses signed angular travel and places each registration point on the curve.
 
@@ -178,7 +181,7 @@ After the radius reaches zero, the rest of an inward spiral follows the drifting
   its winding count across 0°/360°. With drift active, place End under the drag point by solving
   Sweep and Spiral Offset near the current winding. Hold the last valid placement if the local
   solution cannot reach the pointer. The numeric Sweep field changes angular travel alone.
-- Closed Loop stops at ±360°, where Start and End share one geometric point. A drag past
+- Circle stops at ±360°, where Start and End share one geometric point. A drag past
   that point holds the full turn until the pointer retraces the seam. The final instance still
   sits one interval before Start.
 - Keep coincident handles independently reachable at a full circle, zero sweep, or the centre.
@@ -260,6 +263,8 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   changes how quickly that middle value is approached.
 - The source instance provides the complete filter stack, including its order and on/off states.
   Each entry has a collapsible card in **Filters**, including multiple entries of the same kind.
+  Cards start collapsed in each Array session. Their expansion follows source-stack positions
+  when switching stops or distribution modes.
   All seven filter families are available as stop cards. Preview and Commit preserve the stack
   structure.
 - **Blur** retains its X and Y size fields and uses the source quality. **Drop Shadow** and
