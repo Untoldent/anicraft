@@ -1206,13 +1206,22 @@ fn gpu_matches_the_oracle_on_every_filter() {
 #[test]
 fn gpu_matches_the_oracle_on_filtered_symbols_in_context() {
     let Some(g) = gpu() else { return };
-    use anicraft_doc::Filter as F;
+    use anicraft_doc::{Filter as F, FilterParam, FilterSide};
     let blur = F::Blur { blur_x: 4.0, blur_y: 4.0, quality: 2 };
     let shadow = F::DropShadow { blur_x: 4.0, blur_y: 4.0, strength: 1.0, quality: 1, angle: 45.0, distance: 5.0, color: Rgba::BLACK, inner: false, knockout: false, hide_object: false };
     let glow = F::Glow { blur_x: 6.0, blur_y: 6.0, strength: 1.5, quality: 1, color: Rgba::new(1.0, 0.9, 0.0, 1.0), inner: false, knockout: false };
     let white = Some(Rgba::WHITE);
     let bg = item(Path::rect(0.0, 0.0, 80.0, 64.0), Paint::Solid(Rgba::new(0.3, 0.6, 0.4, 1.0)));
     let mut scenes: Vec<(&str, DisplayList)> = Vec::new();
+    let bevel = F::Bevel { blur_x: 5.0, blur_y: 7.0, strength: 1.8, angle: 310.0, distance: 8.0, quality: 3,
+        shadow_color: Rgba::new(0.3, 0.02, 0.35, 0.7), highlight_color: Rgba::new(0.9, 0.8, 0.6, 0.55), side: FilterSide::Full, knockout: false };
+    let mut high_quality = vec![blur.clone(), shadow.clone(), glow.clone(), bevel];
+    for filter in &mut high_quality { assert!(filter.set_param(FilterParam::Quality, 3.0)); }
+    let mut items = vec![bg.clone()];
+    items.extend(symbol_items(0));
+    scenes.push(("High-quality Blur, Drop Shadow, Glow and Bevel", DisplayList {
+        links: Vec::new(), clip_modes: Vec::new(), items, clip_parents: Vec::new(), groups: vec![filtered_group(high_quality)],
+    }));
     // Several filters in a row, at part opacity, multiplied.
     let mut grp = filtered_group(vec![shadow.clone(), glow.clone(), F::AdjustColor { brightness: 10.0, contrast: 0.0, saturation: -40.0, hue: 25.0 }]);
     (grp.alpha, grp.blend) = (0.7, BlendMode::Multiply);

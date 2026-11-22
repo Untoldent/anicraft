@@ -554,6 +554,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
     let blur_sample = matches!(view, "array-blur" | "array-blur-spiral");
     let shadow_glow_sample = matches!(view, "array-shadow-glow" | "array-glow-shadow");
+    let bevel_sample = view == "array-bevel";
     let transform_sample = blur_sample || colour_sample || segment_sample || matches!(view, "array-transform" | "array-transform-radial" | "array-easing-global");
     let open_radial = view.strip_prefix("array-radial-open:").and_then(|setup| {
         let mut values = setup.split(',');
@@ -575,7 +576,12 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
     }
     app.run("modify.convert_to_symbol", json!({"name": "Array sample"}));
-    if blur_sample || shadow_glow_sample {
+    if bevel_sample {
+        app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
+        app.run("element.set_filters", json!({"filters": [{"type": "bevel", "blur_x": 8, "blur_y": 8,
+            "angle": 350, "distance": 8, "quality": 3, "side": "full", "strength": 1.8,
+            "shadow_color": "#391946", "highlight_color": "#fff0b4"}]}));
+    } else if blur_sample || shadow_glow_sample {
         app.run("symbol.set_kind", json!({"kind": "movie_clip"}));
         let blur = json!({"type": "blur", "blur_x": 1.5, "blur_y": 0, "quality": 2});
         let mut filters = vec![blur];
@@ -601,7 +607,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         }
     }
     app.tool = crate::app::Tool::Select;
-    if shadow_glow_sample {
+    if shadow_glow_sample || bevel_sample {
         // Keep the mixed-filter capture at a fixed scale and draw the artwork before capture.
         app.view.fit = false;
         app.view.zoom = 1.0;
@@ -657,6 +663,22 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                 for (stop, [blur_x, blur_y]) in settings.stops.iter_mut().zip([[1.5, 0.0], [22.0, 3.0], [4.0, 26.0]]) {
                     stop.value.alpha = 1.0;
                     stop.value.filters = vec![Filter::Blur { blur_x, blur_y, quality: 2 }];
+                }
+                app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
+            }
+            "array-bevel" => {
+                settings.count = 5;
+                settings.linear.end[0] += 110.0;
+                for (stop, (direction, shadow, highlight)) in settings.stops.iter_mut().zip([
+                    (350.0, 0x391946, 0xfff0b4), (25.0, 0x2c194d, 0xbef5f3), (85.0, 0x401641, 0xf5c5ff),
+                ]) {
+                    stop.value.alpha = 1.0;
+                    stop.value.filters.clone_from(&settings.source_defaults.filters);
+                    if let Some(Filter::Bevel { angle, shadow_color, highlight_color, .. }) = stop.value.filters.first_mut() {
+                        *angle = direction;
+                        *shadow_color = Rgba::hex(shadow);
+                        *highlight_color = Rgba::hex(highlight);
+                    }
                 }
                 app.array_panel.selected_stop = settings.stops.get(1).map(PropertyStop::marker_id);
             }
@@ -992,7 +1014,7 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
                 } else {
                     let mut off = false;
                     ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, &mut off, label))
-                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, or Glow."));
+                        .inner.on_disabled_hover_text(tr!("Available when the source has Blur, Drop Shadow, Glow, or Bevel."));
                 }
                 if (index + 1).is_multiple_of(columns) {
                     ui.end_row();
@@ -1072,7 +1094,7 @@ fn filter_stops(ui: &mut Ui, source: &[FilterEntry], filters: &mut [Filter], ges
                             }).inner && blur_x.is_finite() && blur_y.is_finite()
                         } else {
                             let mut edit = None;
-                            if let Some(popup) = crate::panels::shadow_glow_rows(ui, crate::panels::FilterRows::Array, &label, &mut values, &mut edit) {
+                            if let Some(popup) = crate::panels::effect_filter_rows(ui, crate::panels::FilterRows::Array, &label, &mut values, &mut edit) {
                                 *gesture = Some(EditGesture::Picker(ui.ctx().viewport_id(), popup));
                             }
                             edit.is_some()
@@ -1401,6 +1423,18 @@ mod tests {
     #[test]
     #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
     fn high_quality_shadow_glow_gpu_drag_lifecycle() {
+        high_quality_filter_gpu_drag_lifecycle(false);
+    }
+
+    #[cfg(gpu_stage)]
+    #[test]
+    #[ignore = "requires a native hardware GPU; exercises the real shared-device stage"]
+    fn high_quality_bevel_stack_gpu_drag_lifecycle() {
+        high_quality_filter_gpu_drag_lifecycle(true);
+    }
+
+    #[cfg(gpu_stage)]
+    fn high_quality_filter_gpu_drag_lifecycle(bevel_stack: bool) {
         use eframe::egui_wgpu::{RenderState, Renderer, wgpu};
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
@@ -1421,9 +1455,12 @@ mod tests {
         app.view.zoom = 1.0;
         app.s.execute("element.translate", &json!({"dx": 100, "dy": 230})).unwrap();
         app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
-        app.s.execute("element.set_filters", &json!({"filters": [
-            {"type": "drop_shadow", "quality": 3}, {"type": "glow", "quality": 3}
-        ]})).unwrap();
+        let mut filters = vec![json!({"type": "drop_shadow", "quality": 3}), json!({"type": "glow", "quality": 3})];
+        if bevel_stack {
+            filters.insert(0, json!({"type": "blur", "blur_x": 3, "blur_y": 2, "quality": 3}));
+            filters.push(json!({"type": "bevel", "side": "full", "quality": 3}));
+        }
+        app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
         let base = app.s.doc.clone();
         let steps = app.s.history_len();
         let settled = |app: &App| app.stage_cache.ready.0 == app.stage_cache.ready.1
@@ -1634,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_glow_stops_invalidate_warmed_blur_and_active_effects_use_exact_tiles() {
+    fn filter_stop_edits_invalidate_warmed_blur_and_active_effects_use_exact_tiles() {
         use anicraft_engine::doc::FilterParam;
         let (mut app, ctx) = filtered_app(10);
         app.array_panel.finish(&mut app.s, false);
@@ -1642,29 +1679,37 @@ mod tests {
             {"type": "blur", "blur_x": 8, "blur_y": 8, "quality": 2},
             {"type": "drop_shadow", "distance": 14, "enabled": false},
             {"type": "glow", "color": "#3296ee", "enabled": false},
+            {"type": "bevel", "side": "full", "distance": 5, "enabled": false},
         ]);
         app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
         warm_filtered(&ctx, &mut app);
-        let generation = app.s.array_translation_generation();
-        let settings = app.array_panel.settings.as_mut().unwrap();
-        assert!(settings.stops[0].value.filters[1].set_param(FilterParam::Distance, 48.0));
-        assert!(settings.stops[0].value.filters[2].set_param(FilterParam::Strength, 240.0));
-        app.array_panel.refresh(&mut app.s);
-        frame(&ctx, &mut app, vec![]);
-        assert_ne!(app.s.array_translation_generation(), generation);
-        assert!(!app.stage_cache.filtered_array_warmed());
-        assert!(app.stage_cache.filtered_array_presented().is_none());
-        warm_filtered(&ctx, &mut app);
+        for (slot, param, value) in [(1, FilterParam::Distance, 48.0), (2, FilterParam::Strength, 240.0), (3, FilterParam::Distance, 18.0)] {
+            let generation = app.s.array_translation_generation();
+            let settings = app.array_panel.settings.as_mut().unwrap();
+            assert!(settings.stops[0].value.filters[slot].set_param(param, value));
+            app.array_panel.refresh(&mut app.s);
+            frame(&ctx, &mut app, vec![]);
+            assert_ne!(app.s.array_translation_generation(), generation);
+            assert!(!app.stage_cache.filtered_array_warmed());
+            assert!(app.stage_cache.filtered_array_presented().is_none());
+            warm_filtered(&ctx, &mut app);
+        }
 
         app.array_panel.finish(&mut app.s, false);
         filters[1]["enabled"] = json!(true);
         filters[2]["enabled"] = json!(true);
+        filters[3]["enabled"] = json!(true);
         app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
-        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.filters[1].param(FilterParam::Distance), Some(14.0));
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().stops[0].value.filters[3].param(FilterParam::Distance), Some(5.0));
         for _ in 0..12 { frame(&ctx, &mut app, vec![]); }
-        assert!(app.s.array_translation_generation().is_some());
+        let old = app.s.array_translation_generation();
+        assert!(old.is_some());
+        let new = app.array_panel.settings.as_mut().unwrap();
+        assert!(new.stops[0].value.filters[3].set_param(FilterParam::Angle, 220.0));
+        app.array_panel.refresh(&mut app.s);
+        assert_ne!(app.s.array_translation_generation(), old);
         assert!(!app.stage_cache.filtered_array_warmed());
         let from = screen(&app, app.array_panel.gizmo_endpoints().unwrap().end);
         let to = from + vec2(27.5, 8.25);
@@ -2374,6 +2419,161 @@ mod tests {
         history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
         assert_eq!(state(&app), inserted);
         assert_eq!(app.array_panel.selected_stop, Some(stop.marker_id()));
+    }
+
+    #[test]
+    fn linear_array_opens_the_source_bevel_editor_and_commits_the_edited_preview() {
+        use anicraft_engine::doc::FilterParam;
+        let (mut app, ctx) = linear_app();
+        app.dock.right.size = Some(450.0);
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [{"type": "bevel"}]})).unwrap();
+        let source = app.s.doc.clone();
+        let doc_steps = app.s.history_len();
+        let find = |app: &mut App, label: &str| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(label)).unwrap_or_else(|| panic!("missing {label}"));
+        let press = |app: &mut App, label| {
+            let (_, node) = find(app, label);
+            click(&ctx, app, &node);
+        };
+        let marker = |app: &mut App, prefix: &str| {
+            let (_, node) = nodes(&ctx, app).into_iter().find(|(_, n)| n.label().is_some_and(|label| label.starts_with(prefix))).unwrap();
+            click(&ctx, app, &node);
+        };
+        let pixels = |app: &App| anicraft_engine::render::render_frame(&app.s.doc, 0, 1.0).unwrap().data;
+
+        press(&mut app, "Array type");
+        press(&mut app, "Linear");
+        assert!(app.s.array_preview_active());
+        for label in ["Transform", "Colour Effect", "Filters", "Filters", "Bevel"] { press(&mut app, label); }
+        assert!(nodes(&ctx, &mut app).iter().all(|(_, n)| n.label() != Some("Bevel distance")), "the closed Bevel card hides its controls");
+        press(&mut app, "Bevel");
+        let controls = nodes(&ctx, &mut app);
+        for label in ["Bevel blur X", "Bevel blur Y", "Bevel strength", "Bevel angle", "Bevel distance",
+            "Bevel shadow colour", "Bevel highlight colour", "Bevel quality Low", "Bevel quality Medium", "Bevel quality High",
+            "Bevel type Inner", "Bevel type Outer", "Bevel type Full", "Bevel knockout"] {
+            assert!(controls.iter().any(|(_, n)| n.label() == Some(label) && !n.is_disabled()), "missing enabled {label}");
+        }
+        assert!(controls.iter().all(|(_, n)| n.label() != Some("Uses source settings") && n.value() != Some("Uses source settings")));
+
+        let baseline = pixels(&app);
+        let distance = find(&mut app, "Bevel distance").0;
+        set_number(&ctx, &mut app, distance, 30.0);
+        let first_edit = pixels(&app);
+        assert_ne!(first_edit, baseline, "editing the first stop updates the real preview pixels");
+        marker(&mut app, "Array stop 2 of");
+        let distance = find(&mut app, "Bevel distance").0;
+        set_number(&ctx, &mut app, distance, 12.0);
+        let preview = pixels(&app);
+        assert_ne!(preview, first_edit, "the other stop edits the preview independently");
+        let distances: Vec<_> = app.s.selected_elements().iter().map(|(_, e)| {
+            e.kind.filters().unwrap()[0].filter.param(FilterParam::Distance).unwrap()
+        }).collect();
+        assert_eq!(distances.first(), Some(&30.0));
+        assert_eq!(distances.last(), Some(&12.0));
+        assert!(distances.windows(2).all(|pair| pair[0] > pair[1]), "{distances:?}");
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(pixels(&app), first_edit);
+        assert!(app.s.array_preview_active());
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(pixels(&app), preview);
+        press(&mut app, "Commit");
+        assert!(!app.s.array_preview_active());
+        assert_eq!(app.s.history_len(), doc_steps + 1);
+        assert_eq!(pixels(&app), preview);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.s.doc, source);
+        history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+        assert_eq!(pixels(&app), preview);
+    }
+
+    #[test]
+    fn bevel_controls_keep_rgba_picker_gestures_and_left_stop_inheritance() {
+        use anicraft_engine::doc::{FilterColor, FilterParam, FilterSide};
+        let (mut app, ctx) = linear_app();
+        app.dock.right.size = Some(450.0);
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [{"type": "bevel"}]})).unwrap();
+        let original = app.s.doc.clone();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let node = |app: &mut App, name: &str| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(name)).unwrap_or_else(|| panic!("missing {name}"));
+        let state = |app: &App| app.array_panel.settings.as_ref().unwrap().clone();
+        let steps = |app: &App| app.array_panel.active.as_ref().unwrap().history.undo.len();
+        for label in ["Transform", "Colour Effect"] {
+            let header = node(&mut app, label).1;
+            click(&ctx, &mut app, &header);
+        }
+        let strength = node(&mut app, "Bevel strength").1.bounds().unwrap();
+        let from = pos2(((strength.x0 + strength.x1) / 2.0) as f32, ((strength.y0 + strength.y1) / 2.0) as f32);
+        let history = steps(&app);
+        begin_drag(&ctx, &mut app, from);
+        let to = from + vec2(24.0, 0.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(to)]);
+        assert!(state(&app).stops[0].value.filters[0].param(FilterParam::Strength) > Some(100.0));
+        frame(&ctx, &mut app, vec![pointer_button(to, false)]);
+        assert_eq!(steps(&app), history + 1);
+        for (label, param, value) in [
+            ("Bevel blur X", FilterParam::BlurX, 12.0), ("Bevel blur Y", FilterParam::BlurY, 19.0),
+            ("Bevel strength", FilterParam::Strength, 220.0), ("Bevel angle", FilterParam::Angle, 350.0),
+            ("Bevel distance", FilterParam::Distance, -9.0),
+        ] {
+            let field = node(&mut app, label).0;
+            set_number(&ctx, &mut app, field, value);
+            assert_eq!(state(&app).stops[0].value.filters[0].param(param), Some(value as f32));
+        }
+        for label in ["Bevel quality High", "Bevel type Outer", "Bevel type Full", "Bevel knockout"] {
+            let target_node = node(&mut app, label).0;
+            frame(&ctx, &mut app, vec![Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Click, target_tree: TreeId::ROOT, target_node, data: None,
+            })]);
+        }
+        let filter = state(&app).stops[0].value.filters[0].clone();
+        assert!(matches!(filter, Filter::Bevel { quality: 3, side: FilterSide::Full, knockout: true, .. }), "{filter:?}");
+
+        for (label, colour, final_hex, channels) in [
+            ("Bevel shadow colour", FilterColor::Shadow, "#195ab680", [25, 90, 182, 128]),
+            ("Bevel highlight colour", FilterColor::Highlight, "#fefdbea0", [254, 253, 190, 160]),
+        ] {
+            let before = state(&app);
+            let history = steps(&app);
+            let swatch = node(&mut app, label).1;
+            click(&ctx, &mut app, &swatch);
+            let hex = node(&mut app, "Hex colour").1;
+            click(&ctx, &mut app, &hex);
+            for typed in ["#aabbcc20", final_hex] {
+                history_key(&ctx, &mut app, Key::A, Modifiers::NONE);
+                frame(&ctx, &mut app, vec![Event::Text(typed.to_owned())]);
+            }
+            let [r, g, b, a] = channels.map(|v| v as f32 / 255.0);
+            let edited = state(&app);
+            assert_eq!(edited.stops[0].value.filters[0].color(colour), Some(Rgba::new(r, g, b, a)));
+            assert_eq!(steps(&app), history);
+            frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+            frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+            assert_eq!(steps(&app), history + 1);
+            history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+            assert_eq!(state(&app), before);
+            history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
+            assert_eq!(state(&app), edited);
+        }
+        let left = &mut app.array_panel.settings.as_mut().unwrap().stops[0].value;
+        left.outbound = Some(Easing::QuadOut);
+        app.array_panel.refresh(&mut app.s);
+        let authored = state(&app);
+        let track = node(&mut app, "Array: add a property stop").1;
+        click(&ctx, &mut app, &track);
+        let inserted = state(&app);
+        let stop = &inserted.stops[1];
+        assert_eq!(stop.value, ArrayPropertyStop { offset: stop.value.offset, ..authored.stops[0].value.clone() });
+        assert_eq!(app.array_panel.selected_stop, Some(stop.marker_id()));
+        assert_eq!(inserted.stops[2].value, authored.stops[1].value);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(state(&app), authored);
+        app.array_panel.finish(&mut app.s, false);
+        assert_eq!(app.s.doc, original);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert_eq!(state(&app).stops, authored.stops);
     }
 
     #[test]

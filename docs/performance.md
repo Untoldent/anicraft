@@ -477,6 +477,15 @@ the latter half. Direct3D 12 measured 2.43 ms p50 and 5.73 ms p95, with a 46.9 M
 and a 34.2 MiB latter-half peak. The test waits for GPU startup separately, so these timings
 start once the stage is rendering on the selected device.
 
+The Bevel milestone adds a repeat of the editor regression with ten instances, each with
+High-quality Blur, Drop Shadow, Glow, and Bevel. On the same Windows Intel Arc adapter,
+Vulkan measured 4.06 ms p50 and 7.99 ms p95, with a 39.5 MiB live allocation peak overall and
+in the latter half. Direct3D 12 measured 3.98 ms p50 and 6.03 ms p95, with 112.2 MiB overall and
+106.9 MiB in the latter half. Both runs settled to exact stage tiles after each drag. Set
+`WGPU_BACKEND` to `vulkan` or `dx12` and run
+`cargo test --locked high_quality_bevel_stack_gpu_drag_lifecycle -- --ignored --nocapture --test-threads=1`
+to repeat the test.
+
 To exercise the failing paint path separately, run a **debug build** with isolated logs and
 recovery files. The fixture destroys AniCraft's test device just before the painter runs.
 The replacement process should open the **Recover unsaved work** dialog. The Vulkan and

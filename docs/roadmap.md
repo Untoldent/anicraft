@@ -18,9 +18,9 @@ configuration while the original instance stays selected. The selected-stop card
 scales and multi-turn rotation in Transform, and Alpha, Brightness, Tint and Advanced channels
 in Colour Effect. The default stops start with the source instance's values. An inserted stop
 copies the prior stop's entire snapshot, including its outbound ease.
-Filter stops interpolate Blur sizes and Drop Shadow and Glow values and colours. Quality and
-switches for Drop Shadow and Glow hold at the authored stops. Copies preserve the source filter
-stack and on/off states.
+Filter stops interpolate Blur sizes and Drop Shadow, Glow, and Bevel values and colours. Quality,
+Bevel Type, and switches hold at the authored stops. Copies preserve the source filter stack and
+on/off states.
 An active Array session has its own undo and redo for geometry and stop edits, coalesced by gesture.
 The Easing section offers global and independent outbound presets for distribution, transform,
 colour and continuous filter parameters. Quit resolves an active Array before asking about unsaved documents.

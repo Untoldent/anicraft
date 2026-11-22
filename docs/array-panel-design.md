@@ -260,17 +260,20 @@ parameters, playback offset for Graphic symbols, stacking depth, and easing.
   changes how quickly that middle value is approached.
 - The source instance provides the complete filter stack, including its order and on/off states.
   Each entry has a collapsible card in **Filters**, including multiple entries of the same kind.
-  Blur, Drop Shadow, and Glow cards edit the current stop. Other cards show that they use the
+  Blur, Drop Shadow, Glow, and Bevel cards edit the current stop. Other cards show that they use the
   source settings. Preview and Commit preserve the stack structure and unsupported values.
 - **Blur** retains its X and Y size fields and uses the source quality. **Drop Shadow** and
   **Glow** use the shared Properties controls for Blur X/Y, Strength, Colour, Quality, Inner,
-  and Knockout. Drop Shadow also offers Angle, Distance, and Hide Object. Shadow direction
-  uses the shortest arc. An exact half turn follows the authored direction.
+  and Knockout. Drop Shadow also offers Angle, Distance, and Hide Object. **Bevel** uses the
+  shared controls for Blur X/Y, Strength, Angle, Distance, Shadow Colour, Highlight Colour,
+  Quality, Type (Inner, Outer, Full), and Knockout. Both colour pickers include opacity.
+  Drop Shadow and Bevel angles use the shortest arc. An exact half turn follows the authored
+  direction.
 - The default stops start with the source values. Moving a stop preserves its values. An off
   filter can store stop values while staying off. If the source stack changes while a draft is
   inactive, reopening the draft initializes the filter values from the current source. Other
   stop properties carry over. Edits made during one opening of a filter colour picker undo together.
-- `array.create` accepts a `filters` list at each stop with one Blur, Drop Shadow, or Glow
+- `array.create` accepts a `filters` list at each stop with one Blur, Drop Shadow, Glow, or Bevel
   object per supported source entry in stack order. Omitted or empty lists use the source values.
   Existing `blurs` lists still set the Blur X/Y values in Blur order.
 - Property families share one set of stop positions.
@@ -287,7 +290,8 @@ the named presets and curve thumbnails used by Classic and Motion Tweens
 automatically. The default is Global with Linear, and the default section starts collapsed to
 keep the stop editor in reach. Creating and editing custom curves remains in the tween editors.
 Distribution, Transform, Colour Effect, and Filters start checked and each use ordinary linear
-progression when unchecked. Filters is available when the source has Blur, Drop Shadow, or Glow.
+progression when unchecked. Filters is available when the source has Blur, Drop Shadow, Glow,
+or Bevel.
 
 - **Global** remaps the complete 0–100% progression before looking up values along the track.
   Intermediate values can be reached sooner or later while the authored stops stay in place.
@@ -313,8 +317,8 @@ progression when unchecked. Filters is available when the source has Blur, Drop 
 - In Per Segment mode, a property that overshoots continues the current segment's interpolation.
   Global overshoot continues from the track endpoint's value using the nearest usable stop span.
   Colour Effect easing applies to all colour values, including Alpha. Filters easing applies to
-  continuous filter numbers and colours. Drop Shadow and Glow Quality, Inner, Knockout, and
-  Hide Object hold from each authored stop until the next using uneased progression.
+  continuous filter numbers and all RGBA channels of the Bevel colours. Quality and switches,
+  including Bevel Type, hold from each authored stop until the next using uneased progression.
   Colour, Scale, and filter parameters remain in their valid ranges. Transform Rotation uses
   the unwrapped authored degrees.
 
@@ -332,6 +336,67 @@ progression when unchecked. Filters is available when the source has Blur, Drop 
 - Source can eventually be multiple selected instances, a group, a drawing
   object, or mergeable raw artwork. Initially limit to one symbol instance,
   with explicit feedback.
+
+## Deferred Features
+
+### Create Unique Symbols
+
+Add an off-by-default checkbox tentatively named **Create Unique Symbols**. With it enabled,
+Array Commit would create a separate, sequentially numbered Symbol definition for each
+instance. An Array sourced from `Box` would generate `Box_1`, `Box_2`, `Box_3`, and so on.
+Each clone would inherit the source Symbol's contents and animation timeline and could be
+edited independently after Commit.
+
+Naming collisions, the treatment of other references to the original Symbol, and Undo
+behaviour remain open.
+
+### Grid Array
+
+- Use a rectangular gizmo with Start at the upper-left corner and End at the lower-right.
+  Drag either corner to resize the grid and change item spacing. Drag the box to translate
+  the entire grid. Items may overlap when the grid is too small.
+- Provide independent row and column counts with a lock, and independent row and column
+  spacing fields with a separate lock.
+- Give each property stop two graphical axis toggles, **Columns** (`|||`) and **Rows** (`≡`).
+  Both start enabled and control which axes that stop affects.
+- Provide offset controls with a draggable numeric amount, an **Every N** frequency, and
+  row and column axis toggles. For example, shift every third row horizontally by 50 px
+  for a staggered or polka-dot arrangement.
+
+Open questions include whether the spacing lock keeps spacing equal or preserves the grid's
+aspect ratio, how property-stop effects combine when both axes are enabled, and precisely
+how the offset amount, frequency, and axis toggles interact.
+
+### Array to Timeline
+
+Array-to-timeline conversion could take three forms.
+
+- Animate one Symbol through the Array's positions across frames.
+- Reveal Array elements sequentially.
+- Stagger animation start times across multiple instances or independently cloned Symbols.
+
+Explore how Spiral, Radial, Linear, and Grid distributions would map to timeline instructions.
+Grid traversal order and whether animation guides would help or be required remain open.
+
+### Alternative Drop Shadow compositing
+
+Keep ordinary per-instance shadow compositing as the default. Explore an option that composites
+each instance's shadow behind all Array instances, including those earlier in the stack.
+A single collective shadow for the whole Array is a separate compositing approach.
+The rendering implications remain open.
+
+### Spiral Drawing Tool
+
+The current Tools panel and drawing command registry have no standalone Spiral Drawing Tool.
+Explore adding one to AniCraft's main Tools panel. It would draw an editable vector spiral
+path with a stroke, without requiring an Array or a Symbol selection. Offer stroke colour,
+thickness, and the applicable options from AniCraft's existing stroke controls.
+
+The Spiral Array's `RadialDistribution::point` already evaluates a continuous curve. Its
+Centre, Start, and End handles and guide translation are candidates for reuse. A drawing tool
+would sample or fit that curve into an editable path. Open questions include the initial drag
+gesture, how to expose sweep and radial growth, whether Centre Drift belongs in the drawing
+tool, and whether the spiral remains parametric after drawing or becomes ordinary path nodes.
 
 ## Milestone sequence and acceptance criteria
 
@@ -364,7 +429,9 @@ progression when unchecked. Filters is available when the source has Blur, Drop 
     gestures and renders exact artwork at rest.
 14. **Drop Shadow and Glow stops** add colour, continuous filter values and held switches and quality.
     Mixed active stacks use the ordinary renderer. Eligible Blur-only previews retain their drag cache.
-15. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
+15. **Bevel stops** add independent shadow and highlight RGBA colours, shortest-arc angles,
+    and stepped Quality, Type, and Knockout using the existing filter renderer.
+16. Later: Grid, Path/node placement, more stop properties, other filter interpolation, custom easing,
     Chaos, multi-selection, optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

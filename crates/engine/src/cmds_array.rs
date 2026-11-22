@@ -145,6 +145,9 @@ impl ArrayEasing {
                     for param in FilterParam::STEPPED {
                         if let Some(value) = source.param(param) { filter.set_param(param, value); }
                     }
+                    if let (Filter::Bevel { side, .. }, Filter::Bevel { side: held_side, .. }) = (filter, source) {
+                        *side = *held_side;
+                    }
                 }
             }
         }
@@ -222,7 +225,9 @@ struct LegacyBlur {
 fn blend_filter(from: &Filter, to: &Filter, t: f32) -> Filter {
     if from == to { return from.clone(); }
     let mut target = to.clone();
-    if let (Filter::DropShadow { angle, .. }, Filter::DropShadow { angle: target_angle, .. }) = (from, &mut target) {
+    if let (Filter::DropShadow { angle, .. }, Filter::DropShadow { angle: target_angle, .. })
+        | (Filter::Bevel { angle, .. }, Filter::Bevel { angle: target_angle, .. }) = (from, &mut target)
+    {
         let delta = *target_angle - *angle;
         // Both authored directions are normalized. Keep exact half turns in their
         // authored direction and unwrap the destination when the shorter route crosses zero.
@@ -261,7 +266,7 @@ impl ArrayPropertyStop {
     }
 
     pub fn supports_filter(filter: &Filter) -> bool {
-        matches!(filter, Filter::Blur { .. } | Filter::DropShadow { .. } | Filter::Glow { .. })
+        matches!(filter, Filter::Blur { .. } | Filter::DropShadow { .. } | Filter::Glow { .. } | Filter::Bevel { .. })
     }
 
     /// Authored values as shown in Properties, apart from the distribution's position.
@@ -581,7 +586,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and unsupported filters. Drop Shadow and Glow quality and switches hold until the next authored stop without easing. Shadow directions take the shortest arc. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and unsupported filters. Drop Shadow, Glow and Bevel quality and switches, including Bevel type, hold until the next authored stop without easing. Drop Shadow and Bevel angles take the shortest arc. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -929,6 +934,109 @@ mod tests {
         assert!(c.a > 0.75 && c.a <= 1.0);
         for (f, expected) in overshot.filters.iter().zip(&stops[0].filters) {
             for p in FilterParam::STEPPED { assert_eq!(f.param(p), expected.param(p)); }
+        }
+    }
+
+    #[test]
+    fn bevel_eases_both_rgba_colours_and_all_numbers_but_holds_options() {
+        use anicraft_doc::{FilterColor, FilterSide};
+        let start = Filter::Bevel {
+            blur_x: 4.0, blur_y: 6.0, strength: 2.0, angle: 350.0, distance: -8.0,
+            shadow_color: Rgba::new(0.75, 0.25, 0.0, 0.125), highlight_color: Rgba::new(0.0, 0.25, 0.75, 1.0),
+            quality: 1, side: FilterSide::Inner, knockout: false,
+        };
+        let middle = Filter::Bevel {
+            blur_x: 20.0, blur_y: 30.0, strength: 6.0, angle: 10.0, distance: 24.0,
+            shadow_color: Rgba::new(0.25, 0.75, 1.0, 0.625), highlight_color: Rgba::new(1.0, 0.75, 0.25, 0.25),
+            quality: 3, side: FilterSide::Outer, knockout: true,
+        };
+        let mut end = start.clone();
+        if let Filter::Bevel { side, .. } = &mut end { *side = FilterSide::Full; }
+        let stop = |offset, filter| ArrayPropertyStop { filters: vec![filter], outbound: Some(Easing::QuadIn), ..st(offset, 1.0) };
+        let mut stops = [stop(0.0, start.clone()), stop(0.5, middle), stop(1.0, end)];
+        let global = ArrayEasing { preset: Easing::QuadIn, ..Default::default() };
+        let segment = ArrayEasing { mode: ArrayEaseMode::PerSegment, ..global.clone() };
+        let linear = ArrayEasing { filters: false, ..global.clone() };
+        for (ease, f) in [(&global, 0.125), (&segment, 0.25), (&linear, 0.5)] {
+            assert_eq!(ease.properties(&stops, 0.25).filters, [Filter::Bevel {
+                blur_x: 4.0 + 16.0 * f, blur_y: 6.0 + 24.0 * f, strength: 2.0 + 4.0 * f,
+                angle: (350.0 + 20.0 * f) % 360.0, distance: -8.0 + 32.0 * f,
+                shadow_color: Rgba::new(0.75 - 0.5 * f, 0.25 + 0.5 * f, f, 0.125 + 0.5 * f),
+                highlight_color: Rgba::new(f, 0.25 + 0.5 * f, 0.75 - 0.5 * f, 1.0 - 0.75 * f),
+                quality: 1, side: FilterSide::Inner, knockout: false,
+            }]);
+        }
+        let ahead = ArrayEasing { preset: Easing::QuadOut, ..global.clone() };
+        for (ease, at, side, quality, knockout) in [
+            (&ahead, 0.375, FilterSide::Inner, 1, false),
+            (&global, 0.5, FilterSide::Outer, 3, true),
+            (&segment, 0.75, FilterSide::Outer, 3, true),
+            (&global, 1.0, FilterSide::Full, 1, false),
+        ] {
+            let sample = ease.properties(&stops, at);
+            assert!(matches!(sample.filters.as_slice(), [Filter::Bevel { side: s, quality: q, knockout: k, .. }]
+                if (*s, *q, *k) == (side, quality, knockout)));
+        }
+        let reverse = ArrayPropertyStop::sample(&stops[1..], 0.75);
+        assert_eq!(reverse.filters[0].param(FilterParam::Angle), Some(0.0));
+        stops[0].outbound = Some(Easing::BackOut);
+        let overshot = segment.properties(&stops, 0.25);
+        assert_eq!(overshot.filters[0].color(FilterColor::Highlight).unwrap().r, 1.0);
+        assert!(overshot.filters[0].param(FilterParam::Distance) > Some(24.0));
+        assert!(matches!(overshot.filters[0], Filter::Bevel { side: FilterSide::Inner, quality: 1, knockout: false, .. }));
+    }
+
+    #[test]
+    fn bevel_arrays_keep_duplicate_entries_and_bake_the_rendered_preview() {
+        use anicraft_doc::FilterSide;
+        let mut s = Session::default();
+        s.execute("draw.rect", &json!({"x": 48, "y": 48, "w": 32, "h": 32, "fill": "#778899", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Box", "kind": "movie_clip"})).unwrap();
+        let authored = json!([
+            {"type": "blur", "blur_x": 3, "blur_y": 5, "quality": 3},
+            {"type": "bevel", "angle": 350, "quality": 3, "shadow_color": "#341b35", "highlight_color": "#d0edff"},
+            {"type": "adjust_color", "brightness": 12, "enabled": false},
+            {"type": "drop_shadow", "quality": 3}, {"type": "glow", "quality": 3},
+            {"type": "bevel", "distance": 21, "quality": 3, "enabled": false},
+        ]);
+        s.execute("element.set_filters", &json!({"filters": authored})).unwrap();
+        let base = s.doc.clone();
+        let (id, source) = s.selected_elements().first().map(|(_, element)| (element.id, element.kind.filters().unwrap().to_vec())).unwrap();
+        let mut stop_filters = authored.as_array().unwrap().clone();
+        stop_filters.remove(2);
+        stop_filters[1] = json!({"type": "bevel", "angle": 10, "side": "full", "knockout": true, "distance": 13, "quality": 3, "shadow_color": "#e61513", "highlight_color": "#41fb57", "enabled": false});
+        stop_filters[4]["distance"] = json!(31);
+        stop_filters[4]["enabled"] = json!(true);
+        let render = |s: &Session| anicraft_render::render_frame(&s.doc, 0, 1.0).unwrap().data;
+        for mode in ["linear", "radial"] {
+            let mut p = json!({"mode": mode, "count": 3, "start_x": 64, "start_y": 70, "dx": 100,
+                "center_x": 180, "center_y": 170, "radius": 48, "closed_loop": false, "sweep_angle": -480,
+                "spiral_offset": 12, "drift_x": 16, "drift_y": 8, "property_stops": [{"offset": 0}, {"offset": 1}]});
+            s.preview_array(&p).unwrap();
+            let uniform = render(&s);
+            p["property_stops"][1]["filters"] = json!(stop_filters);
+            s.preview_array(&p).unwrap();
+            let copies = s.selected_elements();
+            assert_eq!(copies[0].1.kind.filters().unwrap(), source);
+            for (i, (_, copy)) in copies.iter().enumerate().skip(1) {
+                let stack = copy.kind.filters().unwrap();
+                assert!(anicraft_doc::filters_pair_up(stack, &source));
+                assert!(stack.iter().zip(&source).all(|(entry, original)| entry.enabled == original.enabled));
+                for unchanged in [0, 2, 3, 4] { assert_eq!(stack[unchanged], source[unchanged]); }
+                assert_eq!(stack[5].filter.param(FilterParam::Distance), Some(21.0 + i as f32 * 5.0));
+            }
+            assert!(matches!(copies[2].1.kind.filters().unwrap()[1].filter, Filter::Bevel { side: FilterSide::Full, knockout: true, .. }));
+            let preview = render(&s);
+            assert_ne!(preview, uniform, "edited Bevel must change real pixels");
+            assert_eq!(s.committed_document().0, &base);
+            s.finish_array_preview(false);
+            assert_eq!(s.doc, base);
+            s.preview_array(&p).unwrap();
+            s.finish_array_preview(true);
+            assert_eq!(render(&s), preview);
+            s.undo().unwrap();
+            assert_eq!(s.doc, base);
+            s.select_only([id]);
         }
     }
 

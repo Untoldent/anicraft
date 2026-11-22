@@ -585,11 +585,14 @@ changes made before closing the picker undo together.
 Open **Filters** to see the source instance's filter stack. Each entry has its own collapsible
 card. **Blur** offers X and Y sizes in stage pixels. **Drop Shadow** and **Glow** also offer
 Strength, a Colour picker, Quality, Inner, and Knockout. Drop Shadow has Angle, Distance, and
-Hide Object. A shadow going from 350° to 10° passes through 0°. Every copy keeps the source's
-filter order, on/off states, Blur quality, and the settings of other filters.
+Hide Object. **Bevel** offers Blur X/Y, Strength, Angle, Distance, separate Shadow and Highlight
+colour pickers with opacity, Quality, Type (Inner, Outer, Full), and Knockout. A Drop Shadow or
+Bevel angle going from 350° to 10° passes through 0°. Every copy keeps the source's filter order,
+on/off states, Blur quality, and the settings of other filters.
 
-Use **Filters** under **Easing** to ease the numbers and colours. Quality and switches hold
-their value until the next authored stop. Edits from one opening of a filter colour picker undo together.
+Use **Filters** under **Easing** to ease the numbers and colours. Quality, Bevel Type, and
+switches hold their value until the next authored stop. Edits from one opening of a filter
+colour picker undo together.
 
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
