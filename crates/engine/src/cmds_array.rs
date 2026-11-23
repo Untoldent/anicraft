@@ -636,7 +636,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse? (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid positions remain evenly spaced. Properties and their easing follow row-major order. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid positions remain evenly spaced. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -755,6 +755,33 @@ fn parse_stop_filters(stop: &Value, defaults: &[Filter]) -> Result<Vec<Filter>> 
     Ok(filters)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridPropertyDistribution {
+    X,
+    #[default]
+    Both,
+    Y,
+}
+
+impl GridPropertyDistribution {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Both => "xy",
+            Self::Y => "y",
+        }
+    }
+
+    fn parse(params: &Value) -> Result<Self> {
+        match opt_str(params, "property_distribution")? {
+            Some("x") => Ok(Self::X),
+            Some("y") => Ok(Self::Y),
+            None | Some("xy") => Ok(Self::Both),
+            Some(_) => Err(EngineError::Param("grid property_distribution must be x, xy or y".into())),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct GridDistribution {
     rows: u32,
@@ -762,6 +789,7 @@ struct GridDistribution {
     start: Vec2,
     spacing: Vec2,
     flip_on_reverse: bool,
+    property_distribution: GridPropertyDistribution,
 }
 
 impl GridDistribution {
@@ -785,6 +813,7 @@ impl GridDistribution {
                 opt_f32(params, "spacing_y")?.unwrap_or(60.0),
             ),
             flip_on_reverse: opt_bool(params, "flip_on_reverse")?.unwrap_or(true),
+            property_distribution: GridPropertyDistribution::parse(params)?,
         })
     }
 
@@ -832,6 +861,14 @@ impl Layout {
     }
 
     fn progress(self, index: u32, count: u32) -> f64 {
+        if let Self::Grid(grid) = self {
+            let (axis_index, axis_count) = match grid.property_distribution {
+                GridPropertyDistribution::X => (index % grid.columns, grid.columns),
+                GridPropertyDistribution::Y => (index / grid.columns, grid.rows),
+                GridPropertyDistribution::Both => (index, count),
+            };
+            return f64::from(axis_index) / f64::from(axis_count.saturating_sub(1).max(1));
+        }
         let closed_loop = matches!(self, Layout::Radial(radial) if radial.closed_loop);
         let divisor = count.saturating_sub(u32::from(!closed_loop)).max(1);
         f64::from(index) / f64::from(divisor)
@@ -2311,6 +2348,84 @@ mod tests {
         assert!(s.doc == expected.doc && s.selection == expected.selection);
         let (_, command) = s.history.steps().last().unwrap();
         assert_eq!(command.unwrap(), &[crate::history::Recorded::new("array.create", &p)]);
+    }
+
+    #[test]
+    fn grid_property_distribution_reuses_the_full_stop_sampler() {
+        let mut s = radial_source();
+        s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters": [{"type": "blur", "blur_x": 2, "blur_y": 3}]})).unwrap();
+        let source = s.doc.clone();
+        let selection = s.selection.clone();
+        let stops: Vec<_> = [0.0, 0.5, 1.0].into_iter().map(|t| json!({
+            "offset": t, "alpha": 1.0 - t * 0.5, "scale_x": 1.0 + t,
+            "scale_y": 1.0 + 2.0 * t, "rotation": 45.0 * t,
+            "color_effect": ColorEffect::Brightness(t),
+            "filters": [{"type": "blur", "blur_x": 2.0 + 8.0 * t, "blur_y": 3}],
+            "outbound_ease": "QuadIn",
+        })).collect();
+        let mut p = json!({"mode": "grid", "rows": 3, "columns": 4, "start_x": 120, "start_y": 100,
+            "spacing_x": -25, "spacing_y": -30, "easing": {"mode": "per_segment"},
+            "source_values": true, "property_stops": stops});
+        s.preview_array(&p).unwrap();
+        let legacy = s.doc.clone();
+        p["property_distribution"] = json!("xy");
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.doc, legacy);
+
+        for (rows, columns) in [(3, 4), (1, 4), (3, 1), (1, 1)] {
+            p["rows"] = json!(rows);
+            p["columns"] = json!(columns);
+            for flip in [false, true] {
+                p["flip_on_reverse"] = json!(flip);
+                for mode in ["x", "y", "xy"] {
+                    p["property_distribution"] = json!(mode);
+                    s.preview_array(&p).unwrap();
+                    for (i, (_, copy)) in s.selected_elements().into_iter().enumerate() {
+                        let (x, y) = (i % columns, i / columns);
+                        let (step, count) = match mode {
+                            "x" => (x, columns),
+                            "y" => (y, rows),
+                            _ => (i, rows * columns),
+                        };
+                        let progress = step as f32 / (count - 1).max(1) as f32;
+                        let start = if progress < 0.5 { 0.0 } else { 0.5 };
+                        let t = start + ((progress - start) * 2.0).powi(2) * 0.5;
+                        let close = |a: f32, b: f32| assert!((a - b).abs() < 0.0001, "{mode} {i}: {a} != {b}");
+                        let at = copy.transform.translation();
+                        assert_eq!(at, Vec2::new(120.0 - 25.0 * x as f32, 100.0 - 30.0 * y as f32));
+                        let angle = (45.0 * t).to_radians();
+                        let (sin, cos) = angle.sin_cos();
+                        close(copy.transform.m[0], cos * (1.0 + t) * if flip && columns > 1 { -1.0 } else { 1.0 });
+                        close(copy.transform.m[1], sin * (1.0 + t) * if flip && rows > 1 { -1.0 } else { 1.0 });
+                        close(copy.color.alpha(), 1.0 - t * 0.5);
+                        let color = ColorEffect::Brightness(t).with_alpha(1.0 - t * 0.5);
+                        let expected = color.transform();
+                        let actual = copy.color.transform();
+                        for (a, b) in actual.mul.into_iter().chain(actual.add).zip(expected.mul.into_iter().chain(expected.add)) {
+                            close(a, b);
+                        }
+                        let [entry] = copy.kind.filters().unwrap() else { panic!("expected one filter") };
+                        let Filter::Blur { blur_x, blur_y, .. } = entry.filter else { panic!("expected blur") };
+                        close(blur_x, 2.0 + 8.0 * t);
+                        assert_eq!(blur_y, 3.0);
+                    }
+                }
+            }
+        }
+
+        p["rows"] = json!(3);
+        p["columns"] = json!(4);
+        p["property_distribution"] = json!("y");
+        s.preview_array(&p).unwrap();
+        let preview = s.doc.clone();
+        s.finish_array_preview(true);
+        assert_eq!(s.doc, preview);
+        s.undo().unwrap();
+        assert_eq!(s.doc, source);
+        assert_eq!(s.selection, selection);
+        s.execute("array.create", &p).unwrap();
+        assert_eq!(s.doc, preview);
     }
 
     #[test]

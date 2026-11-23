@@ -582,8 +582,12 @@ Use **Easing** above the property track to change how values progress along the 
 applies across the whole track. **Per Segment** lets you select a stop and set how the next
 segment eases. The final stop's Ease picker is disabled. Choose which families to ease under **Apply to**.
 The curve thumbnails use the same named presets as Classic and Motion Tweens.
-Grid spacing stays even. Grid samples the property stops and their easing across each row
-from Start, then continues onto the next row.
+Grid spacing stays even. In **Property Distribution**, choose **X** to repeat the
+progression across each row, or **Y** to repeat it down each column. **X + Y**, the
+default, samples in order across each row from Start, then continues onto the next
+row. The choice applies to all stops and their easing, including transforms, colour
+effects, and filters. A sampling axis with just one instance uses the start of the
+progression.
 
 Distribution changes the placement along Linear and Radial paths. **Back Out** can place copies past End
 or across a closed loop's seam.

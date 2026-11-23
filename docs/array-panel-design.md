@@ -219,9 +219,17 @@ transformation point. Signed spacing permits axis reversals and overlap.
   both axes mirrors both directions. Turning it off keeps the artwork's orientation in
   every quadrant. The toggle affects the artwork after stop transforms and leaves positions
   and row-major ordering intact.
-- Transform, Colour Effect, and Filters sample the existing stop track in row-major order
-  from 0% to 100%, with Global or Per Segment easing. Grid positions stay evenly spaced.
-  Distribution easing is available for Linear and Radial. During position-only edits,
+- **Property Distribution** selects one mode for all stops. **X + Y** is the default and
+  preserves the existing row-major progression, using the instance index from Start divided
+  by the total count minus one. **X** samples the column index divided by columns minus one
+  and repeats across rows. **Y** samples the row index divided by rows minus one and repeats
+  across columns. A single-instance sampling axis uses 0% progression. Indices follow
+  logical order from Start in every quadrant.
+- The chosen progression feeds the existing Transform, Colour Effect, and Filters stop
+  sampler with Global or Per Segment easing. Grid positions stay evenly spaced. The
+  distribution mode is part of session Undo/Redo and the retained Grid draft. Existing
+  command parameters that omit the setting use **X + Y**.
+- Distribution easing for placement is available for Linear and Radial. During position-only edits,
   Grid reuses the preview instances and eligible stage tiles. Changes to the effective
   mirror orientation rebuild the preview and its tile coverage.
 
@@ -411,26 +419,10 @@ spacing, and orientation, and participate in Array session Undo/Redo.
 Numeric fields, text fields, and other keyboard-editable controls should keep
 their arrow-key behavior while focused.
 
-### Grid property axes and offsets
+### Grid offsets
 
-The next milestone gives each property stop graphical **X (Columns)** and **Y (Rows)**
-toggles, both enabled by default.
-
-- **X only** interpolates horizontally from Start as Linear Array does. Every row
-  repeats the same progression.
-- **Y only** interpolates vertically from Start. Every column repeats the same
-  progression.
-- **X and Y** preserve the current Grid property-stop interpolation exactly.
-- At least one axis is active. Turning off the only active axis enables the other.
-  For example, clicking X when X is the only active axis switches to Y only.
-  Clicking Y when X is the only active axis enables both. Clicking X when both
-  are active leaves Y only.
-
-A new stop inherits its axis selection from the stop immediately to its left, with
-the same first-stop fallback as property and easing inheritance.
-
-Staggering is deferred. An offset amount, an **Every N** frequency, and row and column
-axis toggles could shift every third row horizontally by 50 px, for example.
+An offset amount, an **Every N** frequency, and row and column controls could shift every
+third row horizontally by 50 px, for example.
 
 ### Array to Timeline
 
@@ -506,7 +498,9 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
 20. Grid placement, rectangular stage gizmo, counts and spacing, locks, and optional
     mirroring when crossing either axis. Grid properties follow row-major order.
 
-Later: Grid property axes and offsets, Path/node placement, more stop properties,
+21. Global Grid Property Distribution with X, X + Y, and Y modes.
+
+Later: Grid offsets, keyboard nudging, Path/node placement, more stop properties,
 custom easing, Chaos, multi-selection, and optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

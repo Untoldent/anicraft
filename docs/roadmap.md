@@ -20,8 +20,8 @@ in Colour Effect. The default stops start with the source instance's values. An 
 copies the prior stop's entire snapshot, including its outbound ease.
 Radial Arrays offer Circle and Spiral buttons. Grid Arrays have a rectangular gizmo, linked or
 independent row and column counts and spacing, and optional artwork mirroring when an axis
-reverses. Grid property stops sample in row-major order. Axis targeting and alternating offsets
-are pending. Filter cards start collapsed in each Array session.
+reverses. Grid Property Distribution samples stops across columns, down rows, or in row-major
+order. Alternating offsets are pending. Filter cards start collapsed in each Array session.
 Filter stops support all seven families, including signed Adjust Color values. Both gradient filters
 interpolate corresponding ramp positions with a fixed source stop count, order, and transparent pin.
 Quality, Type, and switches hold at the authored stops. Copies preserve the source filter stack and

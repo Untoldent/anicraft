@@ -6,7 +6,7 @@ use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, GridGeometry, RADIAL_FI
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
+use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ColorEffect, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
@@ -25,6 +25,7 @@ struct GridSettings {
     geometry: GridGeometry,
     counts_locked: bool,
     flip_on_reverse: bool,
+    property_distribution: GridPropertyDistribution,
 }
 
 impl GridSettings {
@@ -33,6 +34,7 @@ impl GridSettings {
             geometry: GridGeometry { start, counts: [3, 3], spacing: [60.0; 2], spacing_locked: false },
             counts_locked: false,
             flip_on_reverse: true,
+            property_distribution: GridPropertyDistribution::default(),
         }
     }
 
@@ -136,6 +138,7 @@ impl Settings {
                     "mode": "grid", "rows": rows, "columns": columns,
                     "start_x": x, "start_y": y, "spacing_x": sx, "spacing_y": sy,
                     "flip_on_reverse": self.grid.flip_on_reverse,
+                    "property_distribution": self.grid.property_distribution.key(),
                 })
             }
             Mode::Radial => json!({
@@ -1167,6 +1170,22 @@ fn grid_fields(ui: &mut Ui, grid: &mut GridSettings) -> bool {
         if icon_button(ui, label, Some(grid.flip_on_reverse), Icon::Flip).clicked() {
             grid.flip_on_reverse = !grid.flip_on_reverse;
         }
+    });
+    form_row(ui, FORM_LABEL_DOCK, tr!("Property Distribution"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for (mode, label, icon) in [
+                (GridPropertyDistribution::X, tr!("X"), Icon::DistributeH),
+                (GridPropertyDistribution::Both, tr!("X + Y"), Icon::Rect),
+                (GridPropertyDistribution::Y, tr!("Y"), Icon::DistributeV),
+            ] {
+                ui.vertical(|ui| {
+                    if icon_button(ui, label, Some(grid.property_distribution == mode), icon).clicked() {
+                        grid.property_distribution = mode;
+                    }
+                    ui.label(text(Type::Caption, label));
+                });
+            }
+        });
     });
     *grid != before
 }
@@ -2432,6 +2451,47 @@ mod tests {
         assert_eq!(current(&app).geometry.endpoints(), grid.geometry.endpoints());
         history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
         assert_eq!(current(&app), grid);
+    }
+
+    #[test]
+    fn grid_property_distribution_buttons_keep_draft_geometry_and_history() {
+        let (mut app, ctx) = linear_app();
+        screenshot(&mut app, "array-grid");
+        app.array_panel.settings.as_mut().unwrap().stops.last_mut().unwrap().value.alpha = 0.25;
+        app.array_panel.refresh(&mut app.s);
+        let initial = app.array_panel.settings.clone().unwrap();
+        let original = app.s.doc.clone();
+        assert_eq!(initial.grid.property_distribution, GridPropertyDistribution::Both);
+        let choice = |app: &mut App, label| {
+            nodes(&ctx, app).into_iter()
+                .find(|(_, node)| node.role() == Role::Button && node.label() == Some(label))
+                .unwrap().1
+        };
+        let both = choice(&mut app, "X + Y");
+        assert_eq!(both.toggled(), Some(egui::accesskit::Toggled::True));
+        let x = choice(&mut app, "X");
+        click(&ctx, &mut app, &x);
+        let mut expected = initial.clone();
+        expected.grid.property_distribution = GridPropertyDistribution::X;
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&expected));
+        assert_ne!(app.s.doc, original);
+        let y = choice(&mut app, "Y");
+        click(&ctx, &mut app, &y);
+        expected.grid.property_distribution = GridPropertyDistribution::Y;
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&expected));
+        assert_eq!(choice(&mut app, "X").toggled(), Some(egui::accesskit::Toggled::False));
+        assert_eq!(choice(&mut app, "Y").toggled(), Some(egui::accesskit::Toggled::True));
+        let preview = app.s.doc.clone();
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().grid.property_distribution, GridPropertyDistribution::X);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::SHIFT);
+        assert_eq!(app.s.doc, preview);
+        app.array_panel.finish(&mut app.s, false);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert_eq!(app.array_panel.settings.as_ref(), Some(&expected));
+        assert_eq!(app.s.doc, preview);
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.doc, preview);
     }
 
     #[test]
