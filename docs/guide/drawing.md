@@ -536,16 +536,36 @@ layers.
 
 ### Arrays
 
-Select one symbol instance on the active layer and open **Window › Array**. Choose **Linear**
-or **Radial** from **Array type** to see the preview. The instance count includes the original.
+Select one symbol instance on the active layer and open **Window › Array**. Choose **Linear**,
+**Grid**, or **Radial** from **Array type** to see the preview. The instance count includes the original.
 Switch types to compare arrangements while keeping each type's positions and the property stops.
 
 In a Linear array, drag the **Start** or **End** circle on the stage, or drag the line to move
 both. Drag or type values in the panel to edit the coordinates, direction, length, and X/Y
 spacing. Editing a derived value moves End. Changing the instance count keeps both endpoints
 in place and updates the spacing. The button beside **Dim Stage** shows or hides the stage
-controls and the white instance pivot markers in both modes. **Dim Stage** brings the Array in front
+controls and the white instance markers in all modes. **Dim Stage** brings the Array in front
 of the faded surroundings. Turn it off to see the document's stacking.
+
+For a Grid, set **Rows** and **Columns** under **Distribution**. A 5 × 5 Grid has
+25 instances, including the original, and can have up to 500 instances. Drag **Start** or
+**End** to change the spacing, or drag the rectangle to move it. When the handles coincide,
+grab Start from the centre and End from the ring. You can also drag or type **Start X/Y**,
+**Row Spacing (Y)**, and **Column Spacing (X)**. Spacing measures between symbol registration
+points, so artwork can overlap. Changing a count keeps the endpoints when that axis has
+at least two instances before and after the edit. Each axis remembers its spacing while
+it has one instance.
+
+Lock the counts to make Rows and Columns match. The current Columns value sets both counts,
+up to 22. The spacing lock matches the two spacing magnitudes using the current column spacing.
+Each axis keeps its sign. With spacing locked, dragging a corner keeps the intervals equal
+and changing a count may also resize the other axis. Equal spacing makes a square only
+when the counts match.
+
+Drag a corner past the other along X or Y, or enter negative spacing, to reverse that
+axis. **Flip on Reverse** starts on and mirrors the artwork around each copy's registration
+point along every reversed axis. Turn it off to keep each copy's original orientation
+while reversing either axis. The toggle leaves each copy in its current grid position.
 
 Use the **Circle** and **Spiral** buttons under **Distribution** for Radial Arrays. Circle starts
 selected. Choose Spiral to spread the instances along a spiral, then tune **Sweep** and
@@ -562,7 +582,10 @@ Use **Easing** above the property track to change how values progress along the 
 applies across the whole track. **Per Segment** lets you select a stop and set how the next
 segment eases. The final stop's Ease picker is disabled. Choose which families to ease under **Apply to**.
 The curve thumbnails use the same named presets as Classic and Motion Tweens.
-Distribution changes the placement along the path. **Back Out** can place copies past End
+Grid spacing stays even. Grid samples the property stops and their easing across each row
+from Start, then continues onto the next row.
+
+Distribution changes the placement along Linear and Radial paths. **Back Out** can place copies past End
 or across a closed loop's seam.
 
 Both default stops start with the source instance's Transform, Colour Effect, and supported filter values.

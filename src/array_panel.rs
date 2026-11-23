@@ -2,11 +2,11 @@
 
 use crate::a11y::Named;
 use crate::app::{App, Drag};
-use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, RADIAL_FIELD_LIMIT};
+use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, GridGeometry, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution as Radial, Session};
+use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ColorEffect, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
@@ -16,7 +16,44 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Linear,
+    Grid,
     Radial,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GridSettings {
+    geometry: GridGeometry,
+    counts_locked: bool,
+    flip_on_reverse: bool,
+}
+
+impl GridSettings {
+    fn at(start: [f32; 2]) -> Self {
+        Self {
+            geometry: GridGeometry { start, counts: [3, 3], spacing: [60.0; 2], spacing_locked: false },
+            counts_locked: false,
+            flip_on_reverse: true,
+        }
+    }
+
+    fn count_limit(self, axis: usize) -> u32 {
+        if self.counts_locked {
+            MAX_ARRAY_INSTANCES.isqrt()
+        } else {
+            MAX_ARRAY_INSTANCES / self.geometry.counts[1 - axis]
+        }
+    }
+
+    fn set_count(&mut self, axis: usize, count: u32) {
+        let count = count.clamp(1, self.count_limit(axis));
+        let mut counts = self.geometry.counts;
+        if self.counts_locked {
+            counts = [count; 2];
+        } else {
+            counts[axis] = count;
+        }
+        self.geometry.set_counts(counts, axis);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +62,7 @@ struct Settings {
     count: u32,
     linear: Endpoints,
     radial: Radial,
+    grid: GridSettings,
     backwards: bool,
     stops: Vec<PropertyStop>,
     easing: ArrayEasing,
@@ -44,6 +82,7 @@ impl Settings {
                 centre: [x - radius, y], radius, start: 0.0, sweep: CLOSED_SWEEP_LIMIT,
                 closed_loop: true, spiral_offset: 0.0, centre_drift: [0.0; 2], rotate: false,
             },
+            grid: GridSettings::at([x, y]),
             backwards: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
             easing: ArrayEasing::default(),
@@ -89,6 +128,14 @@ impl Settings {
                     "mode": "linear", "count": self.count,
                     "start_x": self.linear.start[0], "start_y": self.linear.start[1],
                     "dx": dx, "dy": dy,
+                })
+            }
+            Mode::Grid => {
+                let GridGeometry { start: [x, y], counts: [columns, rows], spacing: [sx, sy], .. } = self.grid.geometry;
+                json!({
+                    "mode": "grid", "rows": rows, "columns": columns,
+                    "start_x": x, "start_y": y, "spacing_x": sx, "spacing_y": sy,
+                    "flip_on_reverse": self.grid.flip_on_reverse,
                 })
             }
             Mode::Radial => json!({
@@ -387,13 +434,14 @@ impl State {
         let settings = self.settings.as_ref()?;
         Some(match self.mode()? {
             Mode::Linear => Geometry::Linear(settings.linear),
+            Mode::Grid => Geometry::Grid(settings.grid.geometry),
             Mode::Radial => Geometry::Radial(settings.radial),
         })
     }
 
     #[cfg(test)]
     fn gizmo_endpoints(&self) -> Option<Endpoints> {
-        match self.gizmo_geometry()? { Geometry::Linear(ends) => Some(ends), Geometry::Radial(_) => None }
+        match self.gizmo_geometry()? { Geometry::Linear(ends) => Some(ends), _ => None }
     }
 
     pub(crate) fn shows_registrations(&self) -> bool {
@@ -410,6 +458,7 @@ impl State {
         if let Some(settings) = &mut self.settings {
             match geometry {
                 Geometry::Linear(ends) => settings.linear = ends,
+                Geometry::Grid(grid) => settings.grid.geometry = grid,
                 Geometry::Radial(radial) => settings.radial = radial,
             }
         }
@@ -553,6 +602,7 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 
 /// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
+    let grid_sample = matches!(view, "array-grid" | "array-grid-flipped");
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
     let blur_sample = matches!(view, "array-blur" | "array-blur-spiral" | "array-blur-circle");
@@ -576,7 +626,12 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
     app.run("draw.rect", json!({"x": 72, "y": 72, "w": 125, "h": 60, "fill": "#376b93", "stroke": null}));
     app.run("draw.ellipse", json!({"x": 494, "y": 275, "w": 82, "h": 68, "fill": "#376b93", "stroke": null}));
     let diameter = if open_radial.is_some() { 20 } else { 56 };
-    if transform_sample {
+    if grid_sample {
+        app.run("draw.path", json!({
+            "d": "M 150 136 L 166 136 L 166 149 L 187 149 L 187 160 L 150 160 Z",
+            "fill": "#ce523f", "stroke": null,
+        }));
+    } else if transform_sample {
         app.run("draw.rect", json!({"x": 92, "y": 172, "w": 34, "h": 15, "fill": "#ce523f", "stroke": null}));
     } else {
         app.run("draw.ellipse", json!({"x": 135, "y": 170, "w": diameter, "h": diameter, "fill": "#ce523f", "stroke": null}));
@@ -640,7 +695,14 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
         app.dock.right.size = Some(360.0);
         app.prefs.render_mode = crate::prefs::RenderMode::Immediate;
     }
-    let mode = if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced" | "array-blur-spiral" | "array-blur-circle") || open_radial.is_some() { Mode::Radial } else { Mode::Linear };
+    let mode = if grid_sample {
+        app.dock.right.size = Some(345.0);
+        Mode::Grid
+    } else if segment_sample || matches!(view, "array-radial" | "array-transform-radial" | "array-colour-advanced" | "array-blur-spiral" | "array-blur-circle") || open_radial.is_some() {
+        Mode::Radial
+    } else {
+        Mode::Linear
+    };
     app.array_panel.select_mode(&mut app.s, Some(mode));
     if view != "array-blur-circle" { app.array_panel.open_filter_cards.fill(true); }
     app.array_panel.show_gizmo = !matches!(view, "array-hidden" | "array-polish-off");
@@ -661,6 +723,16 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
             } else if drift != [0.0; 2] {
                 settings.count = 36;
                 settings.radial.radius = 65.0;
+            }
+        } else if grid_sample {
+            let grid = &mut settings.grid.geometry;
+            grid.counts = [4, 3];
+            if view == "array-grid-flipped" {
+                grid.start = [456.0, 290.0];
+                grid.spacing = [-84.0, -70.0];
+            } else {
+                grid.start = [160.0, 132.0];
+                grid.spacing = [84.0, 70.0];
             }
         } else {
             settings.stops =
@@ -881,15 +953,16 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
             .selected_text(match mode {
                 None => tr!("None"),
                 Some(Mode::Linear) => tr!("Linear"),
+                Some(Mode::Grid) => tr!("Grid"),
                 Some(Mode::Radial) => tr!("Radial"),
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut mode, None, tr!("None"));
                 ui.add_enabled_ui(eligible, |ui| {
                     ui.selectable_value(&mut mode, Some(Mode::Linear), tr!("Linear"));
+                    ui.selectable_value(&mut mode, Some(Mode::Grid), tr!("Grid"));
                     ui.selectable_value(&mut mode, Some(Mode::Radial), tr!("Radial"));
                 });
-                ui.add_enabled(false, egui::Button::selectable(false, tr!("Grid")));
                 ui.add_enabled(false, egui::Button::selectable(false, tr!("Along Path")));
             })
             .response
@@ -990,12 +1063,17 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
 
 fn settings_ui(ui: &mut Ui, state: &mut State, mode: Mode, scale_lock: &mut bool, gesture: &mut Option<EditGesture>) -> bool {
     let State { settings: Some(settings), stop_editor_epoch, selected_stop, open_filter_cards, .. } = state else { return false };
+    let grid = mode == Mode::Grid;
+    let mut changed = grid && distribution_fields(ui, settings, mode);
+    if grid {
+        ui.add_space(4.0);
+    }
     let easing_open = settings.easing != ArrayEasing::default();
-    let mut changed = crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
+    changed |= crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
         let index = settings.stops.iter().position(|stop| Some(stop.marker_id()) == *selected_stop).unwrap_or(0);
         let has_successor = index + 1 < settings.stops.len();
         let has_filters = settings.stops.first().is_some_and(|stop| !stop.value.filters.is_empty());
-        easing_fields(ui, &mut settings.easing, settings.stops.get_mut(index), has_successor, has_filters)
+        easing_fields(ui, &mut settings.easing, settings.stops.get_mut(index), has_successor, has_filters, mode != Mode::Grid)
     }).unwrap_or(false);
     ui.add_space(4.0);
     section(ui, "array_stops", Section::Rule, tr!("Property stops"), None, |ui| {
@@ -1006,20 +1084,31 @@ fn settings_ui(ui: &mut Ui, state: &mut State, mode: Mode, scale_lock: &mut bool
         });
         if *selected_stop != before { ui.ctx().request_repaint(); }
     });
-    ui.add_space(4.0);
+    if !grid {
+        ui.add_space(4.0);
+        changed |= distribution_fields(ui, settings, mode);
+    }
+    changed
+}
+
+fn distribution_fields(ui: &mut Ui, settings: &mut Settings, mode: Mode) -> bool {
+    let mut changed = false;
     section(ui, "array_distribution", Section::Rule, tr!("Distribution"), None, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(text(Type::Label, tr!("Instances")));
-            changed |= with_type(ui, Type::Data, |ui| ui.add(egui::DragValue::new(&mut settings.count).range(1..=500)))
-                .named(tr!("Instances"))
-                .changed();
-        });
+        if mode != Mode::Grid {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(text(Type::Label, tr!("Instances")));
+                changed |= with_type(ui, Type::Data, |ui| {
+                    ui.add(egui::DragValue::new(&mut settings.count).range(1..=MAX_ARRAY_INSTANCES))
+                }).named(tr!("Instances")).changed();
+            });
+        }
         match mode {
             Mode::Linear => {
                 changed |= coordinates(ui, tr!("Start"), [tr!("Start X"), tr!("Start Y")], &mut settings.linear.start, " px");
                 changed |= coordinates(ui, tr!("End"), [tr!("End X"), tr!("End Y")], &mut settings.linear.end, " px");
                 changed |= linear_dimensions(ui, &mut settings.linear, settings.count);
             }
+            Mode::Grid => changed |= grid_fields(ui, &mut settings.grid),
             Mode::Radial => changed |= radial_fields(ui, &mut settings.radial),
         }
         changed |= crate::theme::checkbox(ui, &mut settings.backwards, tr!("Stack first copy in front")).changed();
@@ -1027,7 +1116,74 @@ fn settings_ui(ui: &mut Ui, state: &mut State, mode: Mode, scale_lock: &mut bool
     changed
 }
 
-fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut PropertyStop>, has_successor: bool, has_filters: bool) -> bool {
+fn grid_fields(ui: &mut Ui, grid: &mut GridSettings) -> bool {
+    use crate::{icons::Icon, timeline::icon_button};
+
+    let before = *grid;
+    for (axis, label) in [(1, tr!("Rows")), (0, tr!("Columns"))] {
+        form_row(ui, FORM_LABEL_DOCK, label, |ui| {
+            ui.horizontal(|ui| {
+                let mut count = grid.geometry.counts[axis];
+                if with_type(ui, Type::Data, |ui| {
+                    ui.add(egui::DragValue::new(&mut count).range(1..=grid.count_limit(axis))
+                        .clamp_existing_to_range(false))
+                }).named(label).changed() {
+                    grid.set_count(axis, count);
+                }
+                if axis == 0 && grid_lock(ui, tr!("Lock row and column counts"), &mut grid.counts_locked)
+                    && grid.counts_locked
+                {
+                    grid.set_count(axis, grid.geometry.counts[axis]);
+                }
+            });
+        });
+    }
+    for (axis, label) in [(1, tr!("Row Spacing (Y)")), (0, tr!("Column Spacing (X)"))] {
+        form_row(ui, FORM_LABEL_DOCK, label, |ui| {
+            ui.horizontal(|ui| {
+                let mut spacing = grid.geometry.spacing[axis];
+                if dimension_value(ui, label, &mut spacing, -1_000_000.0..=1_000_000.0, " px", true)
+                    && spacing.is_finite()
+                {
+                    grid.geometry.set_spacing(axis, spacing);
+                }
+                if axis == 0 && grid_lock(ui, tr!("Lock spacing"), &mut grid.geometry.spacing_locked)
+                    && grid.geometry.spacing_locked
+                {
+                    let spacing = grid.geometry.spacing[axis];
+                    grid.geometry.set_spacing(axis, spacing);
+                }
+            });
+        });
+    }
+    let mut start = grid.geometry.start;
+    if coordinates(ui, tr!("Start"), [tr!("Start X"), tr!("Start Y")], &mut start, " px")
+        && start.into_iter().all(f32::is_finite)
+    {
+        grid.geometry.start = start;
+    }
+    let label = tr!("Flip on Reverse");
+    form_row(ui, FORM_LABEL_DOCK, label, |ui| {
+        if icon_button(ui, label, Some(grid.flip_on_reverse), Icon::Flip).clicked() {
+            grid.flip_on_reverse = !grid.flip_on_reverse;
+        }
+    });
+    *grid != before
+}
+
+fn grid_lock(ui: &mut Ui, label: &str, locked: &mut bool) -> bool {
+    use crate::{icons::Icon, timeline::icon_button};
+
+    let icon = if *locked { Icon::Lock } else { Icon::Unlock };
+    if icon_button(ui, label, Some(*locked), icon).clicked() {
+        *locked = !*locked;
+        true
+    } else {
+        false
+    }
+}
+
+fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut PropertyStop>, has_successor: bool, has_filters: bool, has_path: bool) -> bool {
     fn mode_label(mode: ArrayEaseMode) -> &'static str {
         match mode {
             ArrayEaseMode::Global => tr!("Global"),
@@ -1081,16 +1237,17 @@ fn easing_fields(ui: &mut Ui, easing: &mut ArrayEasing, selected: Option<&mut Pr
     egui::Grid::new("array_ease_targets").num_columns(columns).min_col_width(width).max_col_width(width)
         .show(ui, |ui| {
             let targets = [
-                (&mut easing.distribution, true), (&mut easing.transform, true),
-                (&mut easing.colour_effect, true), (&mut easing.filters, has_filters),
+                (&mut easing.distribution, (!has_path).then(|| tr!("Grid registration points stay evenly spaced."))),
+                (&mut easing.transform, None), (&mut easing.colour_effect, None),
+                (&mut easing.filters, (!has_filters).then(|| tr!("Available when the source has a filter."))),
             ];
-            for (index, (label, (target, enabled))) in labels.into_iter().zip(targets).enumerate() {
-                if enabled {
-                    crate::theme::checkbox(ui, target, label);
-                } else {
+            for (index, (label, (target, disabled_reason))) in labels.into_iter().zip(targets).enumerate() {
+                if let Some(reason) = disabled_reason {
                     let mut off = false;
                     ui.add_enabled_ui(false, |ui| crate::theme::checkbox(ui, &mut off, label))
-                        .inner.on_disabled_hover_text(tr!("Available when the source has a filter."));
+                        .inner.on_disabled_hover_text(reason);
+                } else {
+                    crate::theme::checkbox(ui, target, label);
                 }
                 if (index + 1).is_multiple_of(columns) {
                     ui.end_row();
@@ -1304,11 +1461,15 @@ fn linear_dimensions(ui: &mut Ui, endpoints: &mut Endpoints, count: u32) -> bool
 }
 
 fn dimension(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str, enabled: bool) -> bool {
-    form_row(ui, FORM_LABEL_DOCK, label, |ui| with_type(ui, Type::Data, |ui| {
+    form_row(ui, FORM_LABEL_DOCK, label, |ui| dimension_value(ui, label, value, range, suffix, enabled))
+}
+
+fn dimension_value(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str, enabled: bool) -> bool {
+    with_type(ui, Type::Data, |ui| {
         let field = egui::DragValue::new(value).range(range).clamp_existing_to_range(false).suffix(suffix).max_decimals(1);
         let field = if enabled { field } else { field.custom_formatter(|_, _| "—".to_owned()).suffix("") };
         ui.add_enabled(enabled, field).named(label).changed()
-    }))
+    })
 }
 
 fn coordinates(ui: &mut Ui, label: &str, [x_name, y_name]: [&str; 2], [x, y]: &mut [f32; 2], suffix: &str) -> bool {
@@ -2211,6 +2372,128 @@ mod tests {
         let modifiers = Modifiers::COMMAND | extra;
         frame(ctx, app, vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]);
         frame(ctx, app, vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }]);
+    }
+
+    #[test]
+    fn grid_numeric_fields_and_independent_locks_update_the_live_gizmo() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        let current = |app: &App| app.array_panel.settings.as_ref().unwrap().grid;
+        let find = |app: &mut App, label| nodes(&ctx, app).into_iter()
+            .find(|(_, node)| node.label() == Some(label)).unwrap_or_else(|| panic!("Grid control: {label}"));
+        let set = |app: &mut App, label, value| {
+            let id = find(app, label).0;
+            set_number(&ctx, app, id, value);
+        };
+        let initial = current(&app);
+        assert_eq!(initial.geometry.counts, [3, 3]);
+        assert!(!initial.counts_locked && !initial.geometry.spacing_locked);
+        assert!(initial.flip_on_reverse);
+
+        set(&mut app, "Columns", 5.0);
+        let grid = current(&app);
+        assert_eq!(grid.geometry.counts, [5, 3]);
+        assert_eq!(grid.geometry.endpoints(), initial.geometry.endpoints());
+        near(grid.geometry.spacing, [30.0, 60.0]);
+        set(&mut app, "Row Spacing (Y)", -35.0);
+        let grid = current(&app);
+        near(grid.geometry.endpoints().extent(), [120.0, -70.0]);
+        assert_eq!(app.s.selected_elements().len(), 15);
+        let last = app.s.selected_elements().pop().unwrap().1;
+        near([last.transform.m[4], last.transform.m[5]], grid.geometry.endpoints().end);
+
+        let (_, count_lock) = find(&mut app, "Lock row and column counts");
+        click(&ctx, &mut app, &count_lock);
+        assert_eq!(current(&app).geometry.counts, [5, 5]);
+        assert_eq!(current(&app).geometry.endpoints(), grid.geometry.endpoints());
+        set(&mut app, "Rows", 25.0);
+        assert_eq!(current(&app).geometry.counts, [22, 22]);
+        assert_eq!(app.s.selected_elements().len(), 484);
+        set(&mut app, "Rows", 4.0);
+        let (_, count_lock) = find(&mut app, "Lock row and column counts");
+        click(&ctx, &mut app, &count_lock);
+        let (_, spacing_lock) = find(&mut app, "Lock spacing");
+        click(&ctx, &mut app, &spacing_lock);
+        let grid = current(&app);
+        assert!(!grid.counts_locked && grid.geometry.spacing_locked);
+        assert!((grid.geometry.spacing[0] + grid.geometry.spacing[1]).abs() < 1e-4);
+        set(&mut app, "Columns", 3.0);
+        set(&mut app, "Column Spacing (X)", 42.0);
+        let grid = current(&app);
+        assert_eq!(grid.geometry.counts, [3, 4]);
+        near(grid.geometry.spacing, [42.0, -42.0]);
+        near(grid.geometry.endpoints().extent(), [84.0, -126.0]);
+
+        let (_, flip) = nodes(&ctx, &mut app).into_iter()
+            .find(|(_, node)| node.label() == Some("Flip on Reverse") && node.role() == Role::Button).unwrap();
+        click(&ctx, &mut app, &flip);
+        let last = app.s.selected_elements().pop().unwrap().1;
+        assert!(last.transform.m[3] > 0.0);
+        assert_eq!(current(&app).geometry.endpoints(), grid.geometry.endpoints());
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(current(&app), grid);
+    }
+
+    #[test]
+    fn grid_real_start_end_and_box_drags_keep_history_and_switching_modes() {
+        let (mut app, ctx) = linear_app();
+        screenshot(&mut app, "array-grid");
+        let selection = app.s.committed_document().0.clone();
+        let current = |app: &App| app.array_panel.settings.as_ref().unwrap().grid;
+        let drag = |app: &mut App, from, delta: [f32; 2], finish| {
+            let pos = screen(app, from);
+            let zoom = app.view.zoom;
+            drag_gizmo(&ctx, app, pos, vec2(delta[0], delta[1]) * zoom, finish);
+        };
+        nodes(&ctx, &mut app);
+        let original = current(&app);
+        let ends = original.geometry.endpoints();
+        drag(&mut app, ends.start, [24.0, 14.0], true);
+        let resized = current(&app);
+        near(resized.geometry.start, [184.0, 146.0]);
+        near(resized.geometry.endpoints().end, ends.end);
+        near(resized.geometry.spacing, [76.0, 63.0]);
+
+        drag(&mut app, ends.end, [-354.0, -60.0], false);
+        let crossed = current(&app);
+        assert!(crossed.geometry.spacing[0] < 0.0 && crossed.geometry.spacing[1] > 0.0);
+        near(crossed.geometry.start, resized.geometry.start);
+        let first = app.s.selected_elements()[0].1.clone();
+        assert!(first.transform.m[0] < 0.0 && first.transform.m[3] > 0.0);
+        let release = screen(&app, crossed.geometry.endpoints().end);
+        frame(&ctx, &mut app, vec![pointer_button(release, false)]);
+        let crossed = current(&app);
+        let [sx, sy] = crossed.geometry.start;
+        let [ex, ey] = crossed.geometry.endpoints().end;
+        drag(&mut app, [(sx + ex) * 0.5, (sy + ey) * 0.5], [24.0, 18.0], true);
+        let moved = current(&app);
+        near(moved.geometry.start, [sx + 24.0, sy + 18.0]);
+        near(moved.geometry.endpoints().end, [ex + 24.0, ey + 18.0]);
+        assert_eq!(moved.geometry.spacing, crossed.geometry.spacing);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(current(&app), crossed);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(current(&app), resized);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::SHIFT);
+        assert_eq!(current(&app), crossed);
+
+        let stop = app.array_panel.selected_stop;
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert_eq!(app.s.selected_elements().len(), 10);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert_eq!(current(&app), crossed);
+        assert_eq!(app.array_panel.selected_stop, stop);
+        assert_eq!(app.s.selected_elements().len(), 12);
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        assert!(!app.s.array_preview_active());
+        assert_eq!(app.s.doc, selection);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert_eq!(current(&app), crossed);
+        let preview = app.s.doc.clone();
+        let steps = app.s.history_len();
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.doc, preview);
+        assert_eq!(app.s.history_len(), steps + 1);
     }
 
     #[test]
@@ -3778,9 +4061,14 @@ mod tests {
         click(&ctx, &mut app, &combo(&idle, "None"));
         assert!(egui::Popup::is_any_open(&ctx), "the Array type dropdown opened");
         let choices = nodes(&ctx, &mut app);
-        for label in ["Grid", "Along Path"] {
-            assert!(named(&choices, label).is_disabled(), "{label} is unavailable");
-        }
+        assert!(named(&choices, "Along Path").is_disabled());
+        let grid = named(&choices, "Grid");
+        assert!(!grid.is_disabled());
+        click(&ctx, &mut app, &grid);
+        assert_eq!(app.s.selection.len(), 9);
+        let grid_controls = nodes(&ctx, &mut app);
+        click(&ctx, &mut app, &combo(&grid_controls, "Grid"));
+        let choices = nodes(&ctx, &mut app);
         click(&ctx, &mut app, &named(&choices, "Linear"));
         assert_eq!(app.s.selection.len(), 10, "changing the dropdown previews immediately");
         let shown = nodes(&ctx, &mut app);

@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
-const MAX_COPIES: u32 = 500;
+pub const MAX_ARRAY_INSTANCES: u32 = 500;
 pub const CLOSED_SWEEP_LIMIT: f32 = 360.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -510,17 +510,23 @@ pub(super) struct PositionPreview {
     instances: Range<usize>,
     reversed: bool,
     eased_progress: Option<Vec<f64>>,
+    grid_mirrors: [bool; 2],
     params: Value,
 }
 
 const LINEAR_COORDS: [&str; 4] = ["start_x", "start_y", "dx", "dy"];
 const RADIAL_COORDS: [&str; 8] = ["center_x", "center_y", "radius", "start_angle", "sweep_angle", "spiral_offset", "drift_x", "drift_y"];
 
+const GRID_COORDS: [&str; 4] = ["start_x", "start_y", "spacing_x", "spacing_y"];
+
 fn explicit_positions(p: &Value) -> Option<(Layout, &'static [&'static str])> {
     match p.get("mode")?.as_str()? {
         "linear" => {
             let [start_x, start_y, dx, dy] = LINEAR_COORDS.map(|key| opt_f32(p, key).ok().flatten());
             Some((Layout::Linear { start_x: start_x?, start_y: start_y?, dx: dx?, dy: dy? }, &LINEAR_COORDS))
+        }
+        "grid" if GRID_COORDS.iter().all(|key| p.get(*key).is_some_and(Value::is_number)) => {
+            Some((Layout::Grid(GridDistribution::parse(p, Vec2::ZERO).ok()?), &GRID_COORDS))
         }
         "radial" if ["radius", "start_angle"].iter().all(|key| p.get(*key).is_some_and(Value::is_number)) => {
             let radial = parse_radial(p, Vec2::ZERO).ok()?;
@@ -540,12 +546,17 @@ impl PositionPreview {
         let key = layer.keyframe_index_at(s.frame)?;
         let kf = layer.keyframes.get(key)?;
         if kf.motion.is_some() { return None; }
-        let count = opt_u32(p, "count").ok()?.unwrap_or(10) as usize;
+        let count = match layout {
+            Layout::Grid(grid) => grid.rows * grid.columns,
+            _ => opt_u32(p, "count").ok()?.unwrap_or(10),
+        } as usize;
         let first = kf.elements.iter().position(|e| s.selection.contains(s.layer, e.id))?;
         let instances = first..first + count;
         let reversed = p.get("stacking").and_then(Value::as_str) == Some("front_to_back");
         let copies = kf.elements.get(instances.clone())?;
-        let custom_pivot = copies.first()?.pivot().is_some() && p.get("property_stops").is_some();
+        // Grid positions always refer to registration, and its stops ease properties alone.
+        let grid = matches!(layout, Layout::Grid(_));
+        let custom_pivot = !grid && copies.first()?.pivot().is_some() && p.get("property_stops").is_some();
         let source = if custom_pivot && opt_bool(p, "source_values").ok()?.unwrap_or(false) {
             let base = s.gesture.as_ref()?;
             let (layer, id) = base.selection.first()?;
@@ -555,20 +566,20 @@ impl PositionPreview {
         } else {
             None
         };
-        let stops = parse_stops(p, source.as_ref(), None).ok()?.unwrap_or_default();
+        let stops = if grid { Vec::new() } else { parse_stops(p, source.as_ref(), None).ok()?.unwrap_or_default() };
         // A transformed custom pivot can offset the copy from its layout position.
         // Replay from the source so those offsets stay exact after a move.
         let (scale, rotation) = source.as_ref().map_or(([1.0; 2], 0.0), |source| (source.scale, source.rotation));
         if custom_pivot && stops.iter().any(|stop| stop.scale != scale || stop.rotation != rotation) {
             return None;
         }
-        let eased_progress = easing.eases_distribution(&stops).then(|| {
+        let eased_progress = (!grid && easing.eases_distribution(&stops)).then(|| {
             let count = count as u32;
             (0..count).map(|i| easing.eased_position(&stops, layout.progress(i, count))).collect()
         });
         let ids = copies.iter().map(|e| e.id);
         let in_order = if reversed { ids.rev().eq(s.selection.ids()) } else { ids.eq(s.selection.ids()) };
-        in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, eased_progress, params: p.clone() })
+        in_order.then(|| Self { generation: crate::history::fresh_state(), key, instances, reversed, eased_progress, grid_mirrors: layout.grid_mirrors(), params: p.clone() })
     }
 
     fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
@@ -576,6 +587,9 @@ impl PositionPreview {
         if old.len() != new.len() || old.iter().any(|(key, v)| !coords.contains(&key.as_str()) && new.get(key) != Some(v)) {
             return false;
         }
+        // A reflection changes the cached footprint. Replay once at the crossing
+        // to recompute the basis and give the stage a fresh tile generation.
+        if layout.grid_mirrors() != self.grid_mirrors { return false; }
         if old == new { return true; }
         let count = self.instances.len() as u32;
         let place = |i, fraction| layout.place(Affine::IDENTITY, i, count, fraction).translation();
@@ -622,7 +636,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial, count: 1..500 (includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse? (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid positions remain evenly spaced. Properties and their easing follow row-major order. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -742,12 +756,81 @@ fn parse_stop_filters(stop: &Value, defaults: &[Filter]) -> Result<Vec<Filter>> 
 }
 
 #[derive(Clone, Copy, Debug)]
+struct GridDistribution {
+    rows: u32,
+    columns: u32,
+    start: Vec2,
+    spacing: Vec2,
+    flip_on_reverse: bool,
+}
+
+impl GridDistribution {
+    fn parse(params: &Value, origin: Vec2) -> Result<Self> {
+        let rows = opt_u32(params, "rows")?.unwrap_or(3);
+        let columns = opt_u32(params, "columns")?.unwrap_or(3);
+        if rows == 0 || columns == 0 || rows.saturating_mul(columns) > MAX_ARRAY_INSTANCES {
+            return Err(EngineError::Param(format!(
+                "grid rows and columns must be positive and total at most {MAX_ARRAY_INSTANCES} instances"
+            )));
+        }
+        Ok(Self {
+            rows,
+            columns,
+            start: Vec2::new(
+                opt_f32(params, "start_x")?.unwrap_or(origin.x),
+                opt_f32(params, "start_y")?.unwrap_or(origin.y),
+            ),
+            spacing: Vec2::new(
+                opt_f32(params, "spacing_x")?.unwrap_or(60.0),
+                opt_f32(params, "spacing_y")?.unwrap_or(60.0),
+            ),
+            flip_on_reverse: opt_bool(params, "flip_on_reverse")?.unwrap_or(true),
+        })
+    }
+
+    fn point(self, index: u32) -> Vec2 {
+        let column = index % self.columns;
+        let row = index / self.columns;
+        self.start + Vec2::new(column as f32 * self.spacing.x, row as f32 * self.spacing.y)
+    }
+
+    fn mirrors(self) -> [bool; 2] {
+        [
+            self.flip_on_reverse && self.columns > 1 && self.spacing.x < 0.0,
+            self.flip_on_reverse && self.rows > 1 && self.spacing.y < 0.0,
+        ]
+    }
+
+    fn orient(self, mut transform: Affine) -> Affine {
+        // Reflect the authored artwork in stage axes, after its stop transform.
+        let [flip_x, flip_y] = self.mirrors();
+        if flip_x {
+            transform.m[0] = -transform.m[0];
+            transform.m[2] = -transform.m[2];
+        }
+        if flip_y {
+            transform.m[1] = -transform.m[1];
+            transform.m[3] = -transform.m[3];
+        }
+        transform
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Layout {
     Linear { start_x: f32, start_y: f32, dx: f32, dy: f32 },
     Radial(RadialDistribution),
+    Grid(GridDistribution),
 }
 
 impl Layout {
+    fn grid_mirrors(self) -> [bool; 2] {
+        match self {
+            Self::Grid(grid) => grid.mirrors(),
+            _ => [false; 2],
+        }
+    }
+
     fn progress(self, index: u32, count: u32) -> f64 {
         let closed_loop = matches!(self, Layout::Radial(radial) if radial.closed_loop);
         let divisor = count.saturating_sub(u32::from(!closed_loop)).max(1);
@@ -768,6 +851,13 @@ impl Layout {
                 // Rotate the basis by the signed travel, then set the registration point.
                 let mut m = if radial.rotate { Affine::rotate(radial.travel(t).to_radians() as f32).mul(&source) } else { source };
                 let at = radial.point(t);
+                m.m[4] = at.x;
+                m.m[5] = at.y;
+                m
+            }
+            Layout::Grid(grid) => {
+                let at = grid.point(index);
+                let mut m = source;
                 m.m[4] = at.x;
                 m.m[5] = at.y;
                 m
@@ -796,11 +886,16 @@ fn parse_radial(p: &Value, original: Vec2) -> Result<RadialDistribution> {
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
-    let count = opt_u32(p, "count")?.unwrap_or(10);
-    if !(1..=MAX_COPIES).contains(&count) {
-        return Err(EngineError::Param(format!("count must be in 1..={MAX_COPIES} (including original)")));
-    }
     let mode = opt_str(p, "mode")?.unwrap_or("linear");
+    let count = if mode == "grid" {
+        None
+    } else {
+        let count = opt_u32(p, "count")?.unwrap_or(10);
+        if !(1..=MAX_ARRAY_INSTANCES).contains(&count) {
+            return Err(EngineError::Param(format!("count must be in 1..={MAX_ARRAY_INSTANCES} (including original)")));
+        }
+        Some(count)
+    };
     let front_to_back = match opt_str(p, "stacking")? {
         None | Some("back_to_front") => false,
         Some("front_to_back") => true,
@@ -824,7 +919,6 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let seed = source_values.then(|| ArrayPropertyStop::from_source(&original));
     let basis = source_values.then(|| original.transform.decompose());
     let stops = parse_stops(p, seed.as_ref(), Some(original.kind.filters().unwrap_or_default()))?;
-    let eased_distribution = easing.eases_distribution(stops.as_deref().unwrap_or_default());
     let [original_x, original_y] = [original.transform.m[4], original.transform.m[5]];
     let layout = match mode {
         "linear" => Layout::Linear {
@@ -834,8 +928,18 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             dy: opt_f32(p, "dy")?.unwrap_or(0.0),
         },
         "radial" => Layout::Radial(parse_radial(p, original.transform.translation())?),
-        other => return Err(EngineError::Param(format!("unknown array mode '{other}' (linear, radial)"))),
+        "grid" => Layout::Grid(GridDistribution::parse(p, original.transform.translation())?),
+        other => return Err(EngineError::Param(format!("unknown array mode '{other}' (linear, radial, grid)"))),
     };
+    let count = match layout {
+        Layout::Grid(grid) => grid.rows * grid.columns,
+        _ => count.unwrap_or(10),
+    };
+    // Grid holds the symbol registration point on the lattice, even when a
+    // custom transformation point was authored for other editing operations.
+    let grid = matches!(layout, Layout::Grid(_));
+    let pivot = if grid { None } else { original.pivot() };
+    let eased_distribution = !grid && easing.eases_distribution(stops.as_deref().unwrap_or_default());
 
     let mut copies: Vec<Arc<Element>> = Vec::with_capacity(count as usize);
     let mut ids: Vec<ElementId> = Vec::with_capacity(count as usize);
@@ -847,10 +951,14 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         let transform = match (&stop, basis) {
             (Some(stop), Some(basis)) => {
                 let adjusted = layout.place(stop.source_transform(original.transform, basis), i, count, eased);
-                keep_pivot(base, adjusted, original.pivot())
+                keep_pivot(base, adjusted, pivot)
             }
-            (Some(stop), None) => stop.apply_transform(base, original.pivot()),
+            (Some(stop), None) => stop.apply_transform(base, pivot),
             (None, _) => base,
+        };
+        let transform = match layout {
+            Layout::Grid(grid) => grid.orient(transform),
+            _ => transform,
         };
         if !transform.is_finite() {
             return Err(EngineError::Param("array positions exceeded finite coordinate range".into()));
@@ -2203,6 +2311,170 @@ mod tests {
         assert!(s.doc == expected.doc && s.selection == expected.selection);
         let (_, command) = s.history.steps().last().unwrap();
         assert_eq!(command.unwrap(), &[crate::history::Recorded::new("array.create", &p)]);
+    }
+
+    #[test]
+    fn grid_counts_and_signed_row_major_positions_include_the_original() {
+        let mut s = radial_source();
+        let original = s.selection.ids().next().unwrap();
+        for (rows, columns, x, y) in [
+            (1, 1, -12.0, -5.0), (1, 4, -12.0, 21.0), (5, 1, 9.0, -5.0),
+            (5, 5, -12.0, -5.0), (20, 25, 0.0, 0.0),
+        ] {
+            let params = json!({"mode": "grid", "rows": rows, "columns": columns, "start_x": 40, "start_y": 30,
+                "spacing_x": x, "spacing_y": y, "stacking": "front_to_back"});
+            s.preview_array(&params).unwrap();
+            let copies = s.selected_elements();
+            assert_eq!(copies.len(), rows * columns);
+            // The selected elements are returned in draw order. The generated
+            // selection IDs retain logical order even with first-in-front stacking.
+            assert_eq!(s.selection.ids().next(), Some(original));
+            assert!(s.selection.ids().eq(copies.iter().rev().map(|(_, copy)| copy.id)));
+            for (index, (_, copy)) in copies.iter().rev().enumerate() {
+                assert_eq!(copy.transform.translation(),
+                    Vec2::new(40.0 + (index % columns) as f32 * x, 30.0 + (index / columns) as f32 * y));
+                assert_eq!(copy.transform.m[0], if columns > 1 && x < 0.0 { -1.0 } else { 1.0 });
+                assert_eq!(copy.transform.m[3], if rows > 1 && y < 0.0 { -1.0 } else { 1.0 });
+            }
+        }
+        s.finish_array_preview(false);
+        let base = s.doc.clone();
+        for params in [
+            json!({"mode": "grid", "rows": 0}),
+            json!({"mode": "grid", "columns": -1}),
+            json!({"mode": "grid", "rows": 22, "columns": 23}),
+            json!({"mode": "grid", "rows": u32::MAX, "columns": u32::MAX}),
+            json!({"mode": "grid", "columns": 4, "spacing_x": 2e38}),
+            json!({"mode": "grid", "flip_on_reverse": "yes"}),
+        ] {
+            assert!(s.execute("array.create", &params).is_err(), "{params}");
+            assert_eq!(s.doc, base);
+        }
+    }
+
+    #[test]
+    fn grid_mirrors_asymmetric_artwork_around_its_registration_after_stop_transforms() {
+        let mut s = Session::default();
+        s.execute("draw.path", &json!({"d": "M 10 10 L 14 10 L 14 16 L 25 16 L 25 20 L 10 20 Z",
+            "fill": "#eb5632", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Asymmetric"})).unwrap();
+        s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters": [{"type": "blur", "blur_x": 2, "blur_y": 3}]})).unwrap();
+        let original = s.selection.ids().next().unwrap();
+        let source = s.editable_keyframe().unwrap().elements.iter_mut().find(|e| e.id == original).unwrap();
+        let source = Arc::make_mut(source);
+        let custom_pivot = Vec2::new(3.0, 5.0);
+        assert!(source.set_pivot(Some(custom_pivot)));
+        source.transform = Decomposed { sx: 1.5, sy: 0.75, rotation: 0.3, skew: 0.2, ..Default::default() }.compose();
+        let base = s.doc.clone();
+        let selection = s.selection.clone();
+        let steps = s.history_len();
+        let mut p = json!({"mode": "grid", "rows": 2, "columns": 2, "start_x": 160, "start_y": 150,
+            "spacing_x": -55, "spacing_y": -50, "source_values": true,
+            "easing": {"mode": "per_segment"},
+            "property_stops": [
+                {"offset": 0, "alpha": 1, "scale_x": 1.25, "scale_y": 0.5, "rotation": 30, "outbound_ease": "QuadIn",
+                    "filters": [{"type": "blur", "blur_x": 2}]},
+                {"offset": 1, "alpha": 0.4, "scale_x": 0.75, "scale_y": 1.5, "rotation": 80,
+                    "filters": [{"type": "blur", "blur_x": 8}]}
+            ], "flip_on_reverse": false
+        });
+        s.preview_array(&p).unwrap();
+        let unflipped = s.selected_elements();
+        for (reverse_x, reverse_y) in [(false, false), (true, false), (false, true), (true, true)] {
+            let x = if reverse_x { -55.0 } else { 55.0 };
+            let y = if reverse_y { -50.0 } else { 50.0 };
+            p["spacing_x"] = json!(x);
+            p["spacing_y"] = json!(y);
+            for flip in [false, true] {
+                p["flip_on_reverse"] = json!(flip);
+                s.preview_array(&p).unwrap();
+                let (fx, fy) = (flip && reverse_x, flip && reverse_y);
+                assert_eq!(s.committed_document().0, &base);
+                let copies = s.selected_elements();
+                assert_eq!(copies[0].1.id, original);
+                for ((i, (_, copy)), (_, plain)) in copies.iter().enumerate().zip(&unflipped) {
+                    let at = Vec2::new(160.0 + (i % 2) as f32 * x, 150.0 + (i / 2) as f32 * y);
+                    assert_eq!(copy.transform.translation(), at);
+                    assert_eq!(copy.pivot(), Some(custom_pivot));
+                    for point in [Vec2::new(2.0, 0.0), Vec2::new(11.0, 7.0), custom_pivot] {
+                        let local = plain.transform.apply_vector(point);
+                        let expected = at + Vec2::new(if fx { -local.x } else { local.x }, if fy { -local.y } else { local.y });
+                        assert!(copy.transform.apply(point).distance(expected) < 0.0001);
+                    }
+                    let t = (i as f32 / 3.0).powi(2);
+                    assert!((copy.color.alpha() - (1.0 - 0.6 * t)).abs() < 1e-5);
+                    let stack = copy.kind.filters().unwrap();
+                    assert_eq!(Some(stack), plain.kind.filters());
+                    assert!(matches!(stack[0].filter, Filter::Blur { blur_x, .. } if (blur_x - (2.0 + 6.0 * t)).abs() < 1e-5));
+                }
+            }
+        }
+
+        let per_segment = p["easing"].clone();
+        p["easing"] = json!({"mode": "global", "preset": "QuadOut"});
+        s.preview_array(&p).unwrap();
+        for (i, (_, copy)) in s.selected_elements().into_iter().enumerate() {
+            let linear = i as f32 / 3.0;
+            let t = 1.0 - (1.0 - linear).powi(2);
+            assert!((copy.color.alpha() - (1.0 - 0.6 * t)).abs() < 1e-5);
+            assert_eq!(copy.transform.translation(), Vec2::new(160.0 - (i % 2) as f32 * 55.0, 150.0 - (i / 2) as f32 * 50.0));
+        }
+        p["easing"] = per_segment;
+        s.preview_array(&p).unwrap();
+        let generation = s.array_translation_generation().unwrap();
+        let anchor = s.selected_elements()[0].1.clone();
+        p["spacing_x"] = json!(-68);
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.array_translation_generation(), Some(generation));
+        assert!(Arc::ptr_eq(&anchor, &s.selected_elements()[0].1));
+        p["spacing_x"] = json!(68);
+        s.preview_array(&p).unwrap();
+        let reflected = s.array_translation_generation().unwrap();
+        assert_ne!(reflected, generation);
+        p["spacing_y"] = json!(-62);
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.array_translation_generation(), Some(reflected));
+        let preview = s.doc.clone();
+        let pixels = anicraft_render::render_frame(&s.doc, 0, 0.5).unwrap().data;
+        s.finish_array_preview(true);
+        assert_eq!(s.history_len(), steps + 1);
+        assert_eq!(s.doc, preview);
+        assert_eq!(anicraft_render::render_frame(&s.doc, 0, 0.5).unwrap().data, pixels);
+        s.undo().unwrap();
+        assert_eq!(s.doc, base);
+        assert_eq!(s.selection, selection);
+        s.execute("array.create", &p).unwrap();
+        assert_eq!(s.doc, preview);
+    }
+
+    #[test]
+    #[ignore = "local Grid preview timing against full command replay"]
+    fn measure_grid_preview_resize() {
+        for count in [3, 10] {
+            for reuse in [false, true] {
+                let mut s = Session::default();
+                s.execute("draw.rect", &json!({"x": 5, "y": 10, "w": 20, "h": 18,
+                    "fill": null, "stroke": "#000000", "stroke_width": 2})).unwrap();
+                s.execute("modify.convert_to_symbol", &json!({"name": "Stroked rectangle"})).unwrap();
+                let mut params = json!({"mode": "grid", "rows": count, "columns": count,
+                    "start_x": 20, "start_y": 30, "spacing_x": 40, "spacing_y": 40,
+                    "source_values": true, "property_stops": [{"offset": 0}, {"offset": 1}]});
+                s.preview_array(&params).unwrap();
+                let mut samples = Vec::new();
+                for i in 0..320 {
+                    params["spacing_x"] = json!(40.0 + f64::from(i % 60) * 0.1);
+                    params["spacing_y"] = json!(40.0 + f64::from(i % 60) * 0.2);
+                    if !reuse { s.array_positions = None; }
+                    let start = std::time::Instant::now();
+                    s.preview_array(&params).unwrap();
+                    if i >= 20 { samples.push(start.elapsed().as_secs_f64() * 1_000.0); }
+                }
+                samples.sort_by(f64::total_cmp);
+                eprintln!("Grid {count} x {count}, preview reuse {reuse}: median {:.4} ms",
+                    samples[samples.len() / 2]);
+            }
+        }
     }
 
     #[test]

@@ -39,10 +39,91 @@ impl Endpoints {
     }
 }
 
+/// Axis arrays are ordered X/Y (columns/rows). A one-instance axis retains its
+/// spacing for subsequent count edits, even though its two endpoints coincide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GridGeometry {
+    pub start: [f32; 2],
+    pub counts: [u32; 2],
+    pub spacing: [f32; 2],
+    pub spacing_locked: bool,
+}
+
+impl GridGeometry {
+    fn intervals(self) -> [f32; 2] {
+        self.counts.map(|count| count.saturating_sub(1) as f32)
+    }
+
+    pub fn endpoints(self) -> Endpoints {
+        let [nx, ny] = self.intervals();
+        let [x, y] = self.start;
+        Endpoints { start: self.start, end: [x + nx * self.spacing[0], y + ny * self.spacing[1]] }
+    }
+
+    pub fn set_counts(&mut self, counts: [u32; 2], preferred: usize) {
+        let old = self.intervals();
+        self.counts = counts;
+        let new = self.intervals();
+        for (axis, spacing) in self.spacing.iter_mut().enumerate() {
+            if old[axis] != 0.0 && new[axis] != 0.0 && old[axis] != new[axis] {
+                *spacing = (*spacing * old[axis]) / new[axis];
+            }
+        }
+        if self.spacing_locked {
+            let other = 1 - preferred;
+            let axis = if new[preferred] == 0.0 && new[other] != 0.0 { other } else { preferred };
+            self.match_spacing(self.spacing[axis].abs());
+        }
+    }
+
+    pub fn set_spacing(&mut self, axis: usize, spacing: f32) {
+        self.spacing[axis] = spacing;
+        if self.spacing_locked {
+            self.match_spacing(spacing.abs());
+        }
+    }
+
+    fn match_spacing(&mut self, magnitude: f32) {
+        self.spacing = self.spacing.map(|spacing| magnitude.copysign(spacing));
+    }
+
+    fn drag_corner(mut self, target: [f32; 2], start: bool) -> Self {
+        let ends = self.endpoints();
+        let anchor = if start { ends.end } else { ends.start };
+        let intervals = self.intervals();
+        for (axis, spacing) in self.spacing.iter_mut().enumerate() {
+            let steps = intervals[axis];
+            if steps > 0.0 {
+                let span = if start { anchor[axis] - target[axis] } else { target[axis] - anchor[axis] };
+                *spacing = span / steps;
+            }
+        }
+        if self.spacing_locked
+            && let Some(magnitude) = self.spacing.into_iter().zip(intervals)
+                .filter(|(_, steps)| *steps > 0.0)
+                .map(|(spacing, _)| spacing.abs()).reduce(f32::min)
+        {
+            // Use the nearer axis in spacing units. Both extents reach zero
+            // continuously when either axis crosses its anchor.
+            self.match_spacing(magnitude);
+        }
+        for (axis, steps) in intervals.into_iter().enumerate() {
+            if steps == 0.0 && (start || intervals == [0.0; 2]) {
+                // Both corners share this coordinate on a collapsed count axis.
+                self.start[axis] = target[axis];
+            } else if start {
+                self.start[axis] = anchor[axis] - steps * self.spacing[axis];
+            }
+        }
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Geometry {
     Linear(Endpoints),
     Radial(RadialDistribution),
+    Grid(GridGeometry),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +160,7 @@ pub(crate) struct GizmoDrag {
 impl GizmoDrag {
     fn new(grip: Grip, press: Vec2, original: Geometry) -> Self {
         let (last_angle, winding) = match original {
-            Geometry::Linear(_) => (0.0, 0.0),
+            Geometry::Linear(_) | Geometry::Grid(_) => (0.0, 0.0),
             Geometry::Radial(g) => (g.start + g.sweep, g.sweep),
         };
         Self { grip, press, original, last_angle, winding }
@@ -95,6 +176,16 @@ impl GizmoDrag {
                 if self.grip != Grip::End { endpoints.start = shift(endpoints.start); }
                 if self.grip != Grip::Start { endpoints.end = shift(endpoints.end); }
                 endpoints.start.into_iter().chain(endpoints.end).all(f32::is_finite).then_some(Geometry::Linear(endpoints))
+            }
+            Geometry::Grid(mut grid) => {
+                match self.grip {
+                    Grip::Start => grid = grid.drag_corner(shift(grid.start), true),
+                    Grip::End => grid = grid.drag_corner(shift(grid.endpoints().end), false),
+                    Grip::Bar => grid.start = shift(grid.start),
+                    _ => return None,
+                }
+                grid.start.into_iter().chain(grid.endpoints().end).chain(grid.spacing)
+                    .all(f32::is_finite).then_some(Geometry::Grid(grid))
             }
             Geometry::Radial(mut radial) => {
                 match self.grip {
@@ -200,7 +291,8 @@ pub(crate) struct Overlay {
     drift_bar: Option<[Pos2; 2]>,
     radial_seam: Option<Pos2>,
     radial: bool,
-    coincident_linear: bool,
+    coincident_ends: bool,
+    grid: bool,
     hot: Option<Grip>,
 }
 
@@ -208,15 +300,16 @@ fn as_vec(p: Pos2) -> Vec2 {
     Vec2::new(p.x, p.y)
 }
 
-fn registration(element: &Element, projection: Affine) -> Option<Pos2> {
-    let p = projection.apply(element.transform.apply(element.pivot().unwrap_or(Vec2::ZERO)));
+fn registration(element: &Element, projection: Affine, show_custom_pivot: bool) -> Option<Pos2> {
+    let local = if show_custom_pivot { element.pivot().unwrap_or(Vec2::ZERO) } else { Vec2::ZERO };
+    let p = projection.apply(element.transform.apply(local));
     p.is_finite().then_some(pos2(p.x, p.y))
 }
 
-pub(crate) fn paint_registrations(painter: &Painter, projection: Affine, instances: &[(LayerId, Arc<Element>)]) {
+pub(crate) fn paint_registrations(painter: &Painter, projection: Affine, instances: &[(LayerId, Arc<Element>)], show_custom_pivot: bool) {
     let clip = painter.clip_rect().expand(6.0);
     for (_, instance) in instances {
-        if let Some(p) = registration(instance, projection).filter(|p| clip.contains(*p)) {
+        if let Some(p) = registration(instance, projection, show_custom_pivot).filter(|p| clip.contains(*p)) {
             theme::registration_mark(painter, p);
         }
     }
@@ -275,17 +368,24 @@ impl Overlay {
             p.is_finite().then_some(pos2(p.x, p.y))
         };
         let mut overlay = Self { handles: Vec::with_capacity(4), guide: Vec::new(), drift_bar: None,
-            radial_seam: None, radial: false, coincident_linear: false, hot: None };
+            radial_seam: None, radial: false, coincident_ends: false, grid: false, hot: None };
         match geometry {
             Geometry::Linear(ends) => {
                 let [sx, sy] = ends.start;
                 let [ex, ey] = ends.end;
                 let (start, end) = (project(Vec2::new(sx, sy))?, project(Vec2::new(ex, ey))?);
                 overlay.guide.extend([start, end]);
-                overlay.coincident_linear = start.distance_sq(end) < 1.0;
-                let end_radius = if overlay.coincident_linear { HANDLE_RADIUS + 4.0 } else { HANDLE_RADIUS };
-                overlay.handles.push(Handle { grip: Grip::End, at: end, radius: end_radius });
-                overlay.handles.push(Handle { grip: Grip::Start, at: start, radius: HANDLE_RADIUS });
+                overlay.endpoint_handles(start, end);
+            }
+            Geometry::Grid(grid) => {
+                let Endpoints { start: [sx, sy], end: [ex, ey] } = grid.endpoints();
+                let start = project(Vec2::new(sx, sy))?;
+                let end = project(Vec2::new(ex, ey))?;
+                let horizontal = project(Vec2::new(ex, sy))?;
+                let vertical = project(Vec2::new(sx, ey))?;
+                overlay.guide.extend([start, horizontal, end, vertical, start]);
+                overlay.grid = sx != ex && sy != ey;
+                overlay.endpoint_handles(start, end);
             }
             Geometry::Radial(radial) => {
                 overlay.radial = true;
@@ -321,8 +421,17 @@ impl Overlay {
         Some(overlay)
     }
 
+    fn endpoint_handles(&mut self, start: Pos2, end: Pos2) {
+        self.coincident_ends = start.distance_sq(end) < 1.0;
+        let end_radius = if self.coincident_ends { HANDLE_RADIUS + 4.0 } else { HANDLE_RADIUS };
+        self.handles.extend([
+            Handle { grip: Grip::End, at: end, radius: end_radius },
+            Handle { grip: Grip::Start, at: start, radius: HANDLE_RADIUS },
+        ]);
+    }
+
     fn hit(&self, p: Pos2) -> Option<Grip> {
-        if self.coincident_linear
+        if self.coincident_ends
             && let Some(start) = self.handles.iter().find(|h| h.grip == Grip::Start)
         {
             let distance = p.distance(start.at);
@@ -355,7 +464,16 @@ impl Overlay {
             let on_line = |a: Pos2, b: Pos2| segment_distance(as_vec(p), as_vec(a), as_vec(b)) <= BAR_HIT;
             let guide = self.guide.windows(2).any(|pair| matches!(pair, [a, b] if on_line(*a, *b)));
             let drift = self.drift_bar.is_some_and(|[a, b]| a != b && on_line(a, b));
-            (guide || drift).then_some(Grip::Bar)
+            let interior = self.grid && {
+                let mut sides = self.guide.windows(2).filter_map(|edge| {
+                    let &[a, b] = edge else { return None };
+                    let along = b - a;
+                    let to_pointer = p - a;
+                    Some(along.x * to_pointer.y - along.y * to_pointer.x)
+                });
+                sides.next().is_some_and(|first| sides.all(|side| first.is_sign_positive() == side.is_sign_positive()))
+            };
+            (guide || drift || interior).then_some(Grip::Bar)
         })
     }
 
@@ -461,6 +579,50 @@ mod tests {
         assert_eq!(overlay.hit(pos2(90.0, 60.0)), Some(Grip::Start));
         assert_eq!(overlay.hit(pos2(98.0, 60.0)), Some(Grip::End));
         assert_eq!(overlay.hit(pos2(110.0, 60.0)), None);
+    }
+
+    #[test]
+    fn grid_corner_drags_cross_independently_and_remain_uniform_through_zero() {
+        let grid = GridGeometry { start: [10.0, 10.0], counts: [4, 3], spacing: [20.0; 2], spacing_locked: true };
+        let mut drag = GizmoDrag::new(Grip::End, Vec2::new(70.0, 50.0), Geometry::Grid(grid));
+        for (point, spacing) in [
+            ([70.0, 42.0], [16.0, 16.0]),
+            ([13.0, 42.0], [1.0, 1.0]),
+            ([10.0, 42.0], [0.0, 0.0]),
+            ([7.0, 42.0], [-1.0, 1.0]),
+            ([-50.0, 42.0], [-16.0, 16.0]),
+            ([-50.0, 6.0], [-2.0, -2.0]),
+            ([25.0, 6.0], [2.0, -2.0]),
+        ] {
+            let Some(Geometry::Grid(moved)) = drag.at(Vec2::new(point[0], point[1])) else { panic!("grid drag") };
+            assert_eq!(moved.start, grid.start);
+            assert_eq!(moved.spacing, spacing);
+            assert_eq!(moved.endpoints().extent(), [spacing[0] * 3.0, spacing[1] * 2.0]);
+        }
+    }
+
+    #[test]
+    fn grid_collapsed_geometry_preserves_spacing_and_handles_remain_reachable() {
+        let mut grid = GridGeometry { start: [40.0, 60.0], counts: [3, 3], spacing: [-18.0, 24.0], spacing_locked: false };
+        let original = grid;
+        grid.set_counts([1, 1], 0);
+        assert_eq!(grid.spacing, original.spacing);
+        let overlay = Overlay::new(Geometry::Grid(grid), Affine::IDENTITY).unwrap();
+        assert_eq!(overlay.hit(pos2(40.0, 60.0)), Some(Grip::Start));
+        assert_eq!(overlay.hit(pos2(49.0, 60.0)), Some(Grip::End));
+        let moved = grid.drag_corner([55.0, 70.0], false);
+        assert_eq!(moved.endpoints(), Endpoints { start: [55.0, 70.0], end: [55.0, 70.0] });
+        assert_eq!(moved.spacing, grid.spacing);
+        grid.set_counts([3, 1], 0);
+        let row = Overlay::new(Geometry::Grid(grid), Affine::IDENTITY).unwrap();
+        assert_eq!(row.hit(pos2(22.0, 60.0)), Some(Grip::Bar));
+        assert_eq!(row.hit(pos2(40.0, 60.0)), Some(Grip::Start));
+        assert_eq!(row.hit(pos2(4.0, 60.0)), Some(Grip::End));
+        grid.set_counts([1, 3], 0);
+        let column = Overlay::new(Geometry::Grid(grid), Affine::IDENTITY).unwrap();
+        assert_eq!(column.hit(pos2(40.0, 84.0)), Some(Grip::Bar));
+        grid.set_counts([3, 3], 0);
+        assert_eq!(grid, original);
     }
 
     fn radial(sweep: f32) -> RadialDistribution {

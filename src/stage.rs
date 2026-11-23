@@ -1259,7 +1259,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             gizmo.paint(&painter);
         }
         if app.array_panel.shows_registrations() && let Some(projection) = array_projection {
-            crate::array_gizmo::paint_registrations(&painter, projection, &array_instances);
+            let show_custom_pivot = !matches!(app.array_panel.gizmo_geometry(), Some(crate::array_gizmo::Geometry::Grid(_)));
+            crate::array_gizmo::paint_registrations(&painter, projection, &array_instances, show_custom_pivot);
         }
         let badge = format!("{:.0}%", st_zoom * 100.0);
         painter.text(canvas.right_bottom() + vec2(-10.0, -8.0), egui::Align2::RIGHT_BOTTOM, badge, crate::theme::font(crate::theme::Type::Data), T.text_dim);

@@ -24,8 +24,7 @@ An Array panel appears in AniCraft's normal dock system. The topmost setting is:
 
 **Array type:** `None` (default), `Linear`, `Grid`, `Radial`, `Along Path`.
 
-Only Linear and Radial are implemented initially. Present Grid and Along Path as
-unavailable, rather than pretending they generate anything.
+Linear, Grid, and Radial are available. Along Path is a future distribution.
 
 - **None** means no active Array editing transaction. The panel may remain open.
   No stage preview or Array manipulation handles are active.
@@ -54,7 +53,7 @@ unavailable, rather than pretending they generate anything.
 
 Use **Undo** and **Redo** from the Edit menu or its shortcuts to move through edits in the
 current Array session. Ctrl+Shift+Z also invokes Redo while Array mode is active. Each history
-step restores the distribution type, both sets of geometry, count, stacking, easing, every
+step restores the distribution type, each mode's geometry, counts, stacking, easing, every
 property stop, and the corresponding stop selection. The preview is regenerated from the same source.
 
 Stage, stop, and numeric drags each make one step when the pointer is released. A drag of the
@@ -128,8 +127,8 @@ is required now.
 - The handles and line update the existing live preview. Commit, Cancel, Escape and undo
   follow the same rules as edits to numeric fields.
 - Draw a small white circle with a dark outline for each generated instance, including the
-  original, at its custom pivot or registration point. The circles are visual indicators in
-  both modes. The blue Linear handles remain the draggable controls.
+  original, at its custom pivot or registration point. Grid always marks the symbol
+  registration point. The circles are visual indicators in all modes. The blue Linear handles remain the draggable controls.
 - Dragging is available across the pasteboard. Keep feedback live while reusing stable preview
   artwork and unaffected stage tiles where possible. Measure inside- and outside-stage drags at
   different counts before and after performance changes.
@@ -194,13 +193,45 @@ preview uses the standard rendering path when instance rotation changes the artw
 The [filtered Array benchmark](performance.md#filtered-array-preview) records frame
 times, stage update cadence, and the pixel limits of reusing an isolated Blur image.
 
+### Grid distribution
+
+Grid starts with 3 rows and 3 columns, spaced 60 px apart. Rows × Columns includes the
+original and cannot exceed 500. Instances follow row-major order from Start. Each instance's
+symbol registration point sits on the lattice, including when the instance has an authored
+transformation point. Signed spacing permits axis reversals and overlap.
+
+- Drag **Start** or **End** to resize the rectangle about the opposite corner. Drag the
+  border or interior to translate it, or edit **Start X/Y**. A one-row or one-column Grid
+  collapses along one axis and remembers that axis's signed spacing. At 1 × 1, either handle
+  moves the instance. The centre of coincident grips grabs Start and the ring grabs End.
+- Changing a count preserves the span on that axis when it has at least two instances
+  before and after the edit. Editing **Row Spacing (Y)** or **Column Spacing (X)** changes
+  the corresponding span from Start. Both fields remain editable on a one-instance axis.
+- The count and spacing locks start off and work independently. The count lock uses
+  Columns for both counts, limited to 22 per axis. Editing either count updates both.
+  The spacing lock uses the column spacing's magnitude and keeps each axis's sign. Editing
+  either spacing updates both magnitudes. A count edit preserves the edited axis's span
+  where possible and adjusts the other axis to maintain equal spacing. A corner drag uses
+  the smaller of the two candidate spacing magnitudes, so both spans pass smoothly through
+  zero as either axis crosses. The two signs follow the corner independently.
+- **Flip on Reverse** starts on. Each axis with negative spacing and at least two
+  instances mirrors the artwork around each instance's own registration point. Reversing
+  both axes mirrors both directions. Turning it off keeps the artwork's orientation in
+  every quadrant. The toggle affects the artwork after stop transforms and leaves positions
+  and row-major ordering intact.
+- Transform, Colour Effect, and Filters sample the existing stop track in row-major order
+  from 0% to 100%, with Global or Per Segment easing. Grid positions stay evenly spaced.
+  Distribution easing is available for Linear and Radial. During position-only edits,
+  Grid reuses the preview instances and eligible stage tiles. Changes to the effective
+  mirror orientation rebuild the preview and its tile coverage.
+
 ### Gizmo visibility
 
 Place a compact circle–line–circle toggle beside **Dim Stage**. Use a rounded button with a
 visible surface in both states and the theme's active treatment when on. Its tooltip follows
-the action, **Hide Array Handles** or **Show Array Handles**. It starts on in both modes. Hiding
+the action, **Hide Array Handles** or **Show Array Handles**. It starts on in all modes. Hiding
 it removes the handles, guides and registration markers while live artwork and numeric controls
-remain available. Visibility is an editor setting shared by both controllers.
+remain available. Visibility is an editor setting shared by all controllers.
 
 ## Dim Stage
 
@@ -346,9 +377,6 @@ progression when unchecked. Filters is available when the source has a filter.
 
 ## Future distribution modes (not in this milestone)
 
-- **Grid:** count X and Y, spacing, optional staggering; property progression
-  direction can be Horizontal (left->right), Vertical (top->bottom), or Diagonal
-  (top-left->bottom-right), with reversal later.
 - **Along Path:** distribute evenly by arc length, by equal path parameter
   intervals, or at Bézier anchor **nodes**. Closed paths avoid duplicated
   initial nodes. Path selection and tangent alignment need later UI work.
@@ -372,22 +400,37 @@ edited independently after Commit.
 Naming collisions, the treatment of other references to the original Symbol, and Undo
 behaviour remain open.
 
-### Grid Array
+### Gizmo Keyboard Nudging
 
-- Use a rectangular gizmo with Start at the upper-left corner and End at the lower-right.
-  Drag either corner to resize the grid and change item spacing. Drag the box to translate
-  the entire grid. Items may overlap when the grid is too small.
-- Provide independent row and column counts with a lock, and independent row and column
-  spacing fields with a separate lock.
-- Give each property stop two graphical axis toggles, **Columns** (`|||`) and **Rows** (`≡`).
-  Both start enabled and control which axes that stop affects.
-- Provide offset controls with a draggable numeric amount, an **Every N** frequency, and
-  row and column axis toggles. For example, shift every third row horizontally by 50 px
-  for a staggered or polka-dot arrangement.
+Linear, Grid, and Radial Arrays should let artists move the entire gizmo with
+the arrow keys. Each press moves it by 1 px, or by 10 px with Shift. The
+movement should match dragging the Linear line, Radial circle or guide, or
+Grid rectangle. It should preserve the Array's shape, relative geometry,
+spacing, and orientation, and participate in Array session Undo/Redo.
 
-Open questions include whether the spacing lock keeps spacing equal or preserves the grid's
-aspect ratio, how property-stop effects combine when both axes are enabled, and precisely
-how the offset amount, frequency, and axis toggles interact.
+Numeric fields, text fields, and other keyboard-editable controls should keep
+their arrow-key behavior while focused.
+
+### Grid property axes and offsets
+
+The next milestone gives each property stop graphical **X (Columns)** and **Y (Rows)**
+toggles, both enabled by default.
+
+- **X only** interpolates horizontally from Start as Linear Array does. Every row
+  repeats the same progression.
+- **Y only** interpolates vertically from Start. Every column repeats the same
+  progression.
+- **X and Y** preserve the current Grid property-stop interpolation exactly.
+- At least one axis is active. Turning off the only active axis enables the other.
+  For example, clicking X when X is the only active axis switches to Y only.
+  Clicking Y when X is the only active axis enables both. Clicking X when both
+  are active leaves Y only.
+
+A new stop inherits its axis selection from the stop immediately to its left, with
+the same first-stop fallback as property and easing inheritance.
+
+Staggering is deferred. An offset amount, an **Every N** frequency, and row and column
+axis toggles could shift every third row horizontally by 50 px, for example.
 
 ### Array to Timeline
 
@@ -459,8 +502,12 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
     and ordered interpolation on each side of the pin.
 18. **Adjust Color stops** complete all seven filter families with independent signed Brightness,
     Contrast, Saturation, and Hue controls.
-19. Later: Grid, Path/node placement, more stop properties, custom easing,
-    Chaos, multi-selection, optional grouping/merging.
+19. Circle and Spiral controls and filter card polish.
+20. Grid placement, rectangular stage gizmo, counts and spacing, locks, and optional
+    mirroring when crossing either axis. Grid properties follow row-major order.
+
+Later: Grid property axes and offsets, Path/node placement, more stop properties,
+custom easing, Chaos, multi-selection, and optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot
 checks as prescribed by AGENTS.md. Add lifecycle regression tests for: an

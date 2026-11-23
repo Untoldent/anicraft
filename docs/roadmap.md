@@ -10,7 +10,7 @@ Streaming WAV headers and PCM sample blocks now delegate to `craft_audio::wav_st
 AniCraft retains mixing, frame-range limits, temporary-file cleanup and VFS writes.
 This integration depends on craft-libs #1962 and still requires hosted parity validation.
 
-The experimental [Array panel](array-panel-design.md) previews Linear and Radial arrays of
+The experimental [Array panel](array-panel-design.md) previews Linear, Grid, and Radial arrays of
 one symbol instance, with a neutral track for Transform and Colour Effect stops. Array mode stays active
 when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
 next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
@@ -18,7 +18,10 @@ configuration while the original instance stays selected. The selected-stop card
 scales and multi-turn rotation in Transform, and Alpha, Brightness, Tint and Advanced channels
 in Colour Effect. The default stops start with the source instance's values. An inserted stop
 copies the prior stop's entire snapshot, including its outbound ease.
-Radial Arrays offer Circle and Spiral buttons. Filter cards start collapsed in each Array session.
+Radial Arrays offer Circle and Spiral buttons. Grid Arrays have a rectangular gizmo, linked or
+independent row and column counts and spacing, and optional artwork mirroring when an axis
+reverses. Grid property stops sample in row-major order. Axis targeting and alternating offsets
+are pending. Filter cards start collapsed in each Array session.
 Filter stops support all seven families, including signed Adjust Color values. Both gradient filters
 interpolate corresponding ramp positions with a fixed source stop count, order, and transparent pin.
 Quality, Type, and switches hold at the authored stops. Copies preserve the source filter stack and
@@ -27,7 +30,7 @@ An active Array session has its own undo and redo for geometry and stop edits, c
 The Easing section offers global and independent outbound presets for distribution, transform,
 colour and continuous filter parameters. Quit resolves an active Array before asking about unsaved documents.
 Linear arrays have draggable Start and End circles and a movable connecting line. Coordinates,
-direction, length and spacing are editable in the panel. Both modes display white pivot markers with
+direction, length and spacing are editable in the panel. All modes display white instance markers with
 the handles toggle on. Dim Stage foregrounds the preview over dimmed artwork. Geometry-only
 Linear edits reuse the instances and eligible stage tiles. Auto can reposition warmed Blur images
 during eligible Linear stage drags, then draws exact tiles when the pointer pauses or is released.
