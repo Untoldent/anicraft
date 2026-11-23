@@ -734,6 +734,38 @@ mod tests {
     }
 
     #[test]
+    fn grid_stagger_tiles_invalidate_at_old_and_new_positions_outside_the_gizmo() {
+        use anicraft_engine::render::View;
+        use anicraft_engine::render_service::{make_job, render_job};
+        use serde_json::json;
+        let mut s = anicraft_engine::Session::default();
+        s.execute("draw.rect", &json!({"x": 0, "y": 0, "w": 20, "h": 20, "fill": "#ff0000", "stroke": null})).unwrap();
+        s.execute("modify.convert_to_symbol", &json!({"name": "Source"})).unwrap();
+        let mut p = json!({"mode": "grid", "rows": 2, "columns": 2, "start_x": 40, "start_y": 25,
+            "spacing_x": 20, "spacing_y": 20, "stagger": {"rows": {"enabled": true, "x": 300}}});
+        s.preview_array(&p).unwrap();
+        let generation = s.array_translation_generation().unwrap();
+        let footprint = TileBounds::new(generation, &s.display_list(), &s.selected_elements());
+        let tiles = |session: &anicraft_engine::Session| [-300.0, 0.0, 300.0].map(|left| {
+            let view = View { width: 100, height: 70, transform: Affine::translate(-left, 0.0), background: None };
+            let mut job = make_job(session.state, &session.doc, 0, view, None);
+            job.key = footprint.key(&job, [left, 0.0, left + 100.0, 70.0], 1.0, false, &session.selected_elements());
+            job
+        });
+        let old = tiles(&s);
+        p["stagger"]["rows"]["x"] = json!(-300);
+        s.preview_array(&p).unwrap();
+        let new = tiles(&s);
+        assert_eq!(s.array_translation_generation(), Some(generation));
+        assert_eq!(old[1].key, new[1].key);
+        assert_eq!(render_job(&old[1]).rgba_premul, render_job(&new[1]).rgba_premul);
+        for i in [0, 2] {
+            assert_ne!(old[i].key, new[i].key);
+            assert_ne!(render_job(&old[i]).rgba_premul, render_job(&new[i]).rgba_premul);
+        }
+    }
+
+    #[test]
     fn linear_tiles_follow_the_copies_and_clear_the_area_they_left() {
         use anicraft_engine::render::View;
         use anicraft_engine::render_service::{make_job, render_job};

@@ -567,6 +567,18 @@ axis. **Flip on Reverse** starts on and mirrors the artwork around each copy's r
 point along every reversed axis. Turn it off to keep each copy's original orientation
 while reversing either axis. The toggle leaves each copy in its current grid position.
 
+Open **Stagger** to enable **Offset Rows**, **Offset Columns**, or both. Each has an
+**Every N** field and signed **X Offset** and **Y Offset** fields in stage pixels.
+For example, every second row with X set to +50 px shifts rows 2, 4, and 6 by 50 px.
+Turn on **Accumulate** to add 50 px at each of those rows and keep the latest
+displacement in between. Rows 1–6 then move by 0, 50, 50, 100, 100, and 150 px.
+Every 1 starts at the second row or column so the original stays at Start.
+
+Row and column offsets add where they meet. The rectangle still shows the base
+Grid. Drag a corner to change the base spacing, or drag the rectangle to move the
+whole arrangement. Artwork can extend outside the rectangle. Flip on Reverse
+follows the base directions, and property stops keep their logical ordering.
+
 Use the **Circle** and **Spiral** buttons under **Distribution** for Radial Arrays. Circle starts
 selected. Choose Spiral to spread the instances along a spiral, then tune **Sweep** and
 **Spiral Offset**. Positive offset grows the spiral outward, and negative offset shrinks it
@@ -582,7 +594,7 @@ Use **Easing** above the property track to change how values progress along the 
 applies across the whole track. **Per Segment** lets you select a stop and set how the next
 segment eases. The final stop's Ease picker is disabled. Choose which families to ease under **Apply to**.
 The curve thumbnails use the same named presets as Classic and Motion Tweens.
-Grid spacing stays even. In **Property Distribution**, choose **X** to repeat the
+The base Grid stays evenly spaced. In **Property Distribution**, choose **X** to repeat the
 progression across each row, or **Y** to repeat it down each column. **X + Y**, the
 default, samples in order across each row from Start, then continues onto the next
 row. The choice applies to all stops and their easing, including transforms, colour

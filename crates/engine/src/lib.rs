@@ -95,7 +95,7 @@ pub use anicraft_svg as svg;
 /// Whether a path is an Animate document (`.fla`, `.xfl`, or an XFL folder) that `file.open`
 /// imports.
 pub use cmds_file::is_animate;
-pub use cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, MAX_ARRAY_INSTANCES, RadialDistribution};
+pub use cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution};
 pub use cmds_modify::{Item as SelectedItem, transform_origins};
 
 #[derive(Debug, thiserror::Error)]

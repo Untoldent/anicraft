@@ -11,6 +11,7 @@ use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementK
 use anicraft_geom::{Affine, Decomposed, Vec2};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
+use std::num::NonZeroU32;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
@@ -584,7 +585,8 @@ impl PositionPreview {
 
     fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
         let (Some(old), Some(new), Some((layout, coords))) = (self.params.as_object(), params.as_object(), explicit_positions(params)) else { return false };
-        if old.len() != new.len() || old.iter().any(|(key, v)| !coords.contains(&key.as_str()) && new.get(key) != Some(v)) {
+        let position_param = |key: &str| coords.contains(&key) || (key == "stagger" && matches!(layout, Layout::Grid(_)));
+        if old.len() != new.len() || old.iter().any(|(key, v)| !position_param(key) && new.get(key) != Some(v)) {
             return false;
         }
         // A reflection changes the cached footprint. Replay once at the crossing
@@ -595,6 +597,8 @@ impl PositionPreview {
         let place = |i, fraction| layout.place(Affine::IDENTITY, i, count, fraction).translation();
         // Check every eased sample before changing anything. Back Out can exceed both the
         // requested span and the nominal last sample, so checking endpoints isn't enough.
+        // Grid offsets can peak between endpoints. Its bounded input coordinates and
+        // 500-instance cap keep every sample finite, including accumulated offsets.
         let eased_positions = if let Some(progress) = &self.eased_progress {
             let positions: Vec<_> = progress.iter().enumerate().map(|(i, &t)| place(i as u32, Some(t))).collect();
             if !positions.iter().all(|at| at.x.is_finite() && at.y.is_finite()) { return false; }
@@ -636,7 +640,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid positions remain evenly spaced. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y, stagger?: {accumulate?: bool, rows?: {enabled?: bool, every?: positive integer, x?: number, y?: number}, columns?: {enabled?: bool, every?: positive integer, x?: number, y?: number}} (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid uses an evenly spaced base lattice. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Grid stagger rows and columns default to disabled with every=2 and stage offsets of (50, 0) and (0, 50) px respectively. Offsets add at intersections. With accumulate off, every Nth row or column gets one offset. With accumulate on, each qualifying row or column adds an offset that persists on subsequent rows or columns. The first row and first column never add an offset, including when every=1. Stagger leaves the base direction and property sampling intact. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
         mutates: true,
         run: create,
     }]
@@ -782,6 +786,75 @@ impl GridPropertyDistribution {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridStaggerAxis {
+    pub enabled: bool,
+    pub every: NonZeroU32,
+    pub offset: [f32; 2],
+}
+
+impl GridStaggerAxis {
+    fn parse(value: Option<&Value>, defaults: Self) -> Result<Self> {
+        let Some(value) = value else { return Ok(defaults) };
+        if !value.is_object() {
+            return Err(EngineError::Param("stagger rows and columns must be objects".into()));
+        }
+        let every = opt_u32(value, "every")?.unwrap_or(defaults.every.get());
+        let every = NonZeroU32::new(every)
+            .ok_or_else(|| EngineError::Param("stagger every must be a positive integer".into()))?;
+        Ok(Self {
+            enabled: opt_bool(value, "enabled")?.unwrap_or(defaults.enabled),
+            every,
+            offset: [
+                opt_f32(value, "x")?.unwrap_or(defaults.offset[0]),
+                opt_f32(value, "y")?.unwrap_or(defaults.offset[1]),
+            ],
+        })
+    }
+
+    fn displacement(self, index: u32, accumulate: bool) -> Vec2 {
+        if !self.enabled || index == 0 { return Vec2::ZERO; }
+        let every = self.every.get();
+        let number = index + 1;
+        let increments = if accumulate {
+            number / every - u32::from(every == 1)
+        } else {
+            u32::from(number.is_multiple_of(every))
+        };
+        let [x, y] = self.offset;
+        Vec2::new(x, y) * increments as f32
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridStagger {
+    pub rows: GridStaggerAxis,
+    pub columns: GridStaggerAxis,
+    pub accumulate: bool,
+}
+
+impl Default for GridStagger {
+    fn default() -> Self {
+        let rows = GridStaggerAxis { enabled: false, every: NonZeroU32::MIN.saturating_add(1), offset: [50.0, 0.0] };
+        Self { rows, columns: GridStaggerAxis { offset: [0.0, 50.0], ..rows }, accumulate: false }
+    }
+}
+
+impl GridStagger {
+    fn parse(params: &Value) -> Result<Self> {
+        let defaults = Self::default();
+        let Some(stagger) = params.get("stagger") else { return Ok(defaults) };
+        if !stagger.is_object() {
+            return Err(EngineError::Param("grid stagger must be an object".into()));
+        }
+        Ok(Self {
+            rows: GridStaggerAxis::parse(stagger.get("rows"), defaults.rows)?,
+            columns: GridStaggerAxis::parse(stagger.get("columns"), defaults.columns)?,
+            accumulate: opt_bool(stagger, "accumulate")?.unwrap_or(defaults.accumulate),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct GridDistribution {
     rows: u32,
@@ -790,6 +863,7 @@ struct GridDistribution {
     spacing: Vec2,
     flip_on_reverse: bool,
     property_distribution: GridPropertyDistribution,
+    stagger: GridStagger,
 }
 
 impl GridDistribution {
@@ -814,13 +888,19 @@ impl GridDistribution {
             ),
             flip_on_reverse: opt_bool(params, "flip_on_reverse")?.unwrap_or(true),
             property_distribution: GridPropertyDistribution::parse(params)?,
+            stagger: GridStagger::parse(params)?,
         })
     }
 
     fn point(self, index: u32) -> Vec2 {
         let column = index % self.columns;
         let row = index / self.columns;
-        self.start + Vec2::new(column as f32 * self.spacing.x, row as f32 * self.spacing.y)
+        let base = self.start + Vec2::new(column as f32 * self.spacing.x, row as f32 * self.spacing.y);
+        if !self.stagger.rows.enabled && !self.stagger.columns.enabled {
+            return base;
+        }
+        base + self.stagger.rows.displacement(row, self.stagger.accumulate)
+            + self.stagger.columns.displacement(column, self.stagger.accumulate)
     }
 
     fn mirrors(self) -> [bool; 2] {
@@ -2426,6 +2506,105 @@ mod tests {
         assert_eq!(s.selection, selection);
         s.execute("array.create", &p).unwrap();
         assert_eq!(s.doc, preview);
+    }
+
+    #[test]
+    fn grid_stagger_repeats_or_accumulates_from_the_nth_position() {
+        for (every, repeat, accumulate) in [
+            (1, [0, 1, 1, 1, 1, 1], [0, 1, 2, 3, 4, 5]),
+            (2, [0, 1, 0, 1, 0, 1], [0, 1, 1, 2, 2, 3]),
+            (3, [0, 0, 1, 0, 0, 1], [0, 0, 1, 1, 1, 2]),
+            (7, [0; 6], [0; 6]),
+        ] {
+            let axis = GridStaggerAxis { enabled: true, every: NonZeroU32::new(every).unwrap(), offset: [50.0, -20.0] };
+            for (accumulate, expected) in [(false, repeat), (true, accumulate)] {
+                for (index, increments) in expected.into_iter().enumerate() {
+                    assert_eq!(
+                        axis.displacement(index as u32, accumulate),
+                        Vec2::new(50.0, -20.0) * increments as f32
+                    );
+                }
+            }
+        }
+        let zero = GridStaggerAxis { enabled: true, offset: [0.0; 2], ..GridStagger::default().rows };
+        assert_eq!(zero.displacement(5, true), Vec2::ZERO);
+    }
+
+    #[test]
+    fn grid_stagger_moves_instances_without_changing_stop_sampling_or_mirroring() {
+        let mut s = radial_source();
+        s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters": [{"type": "blur", "blur_x": 2}]})).unwrap();
+        let original = s.selection.ids().next().unwrap();
+        let mut p = json!({"mode": "grid", "rows": 3, "columns": 4, "start_x": 120, "start_y": 100,
+            "spacing_x": -25, "spacing_y": -30, "easing": {"mode": "per_segment"},
+            "property_stops": [
+                {"offset": 0, "alpha": 1, "scale_x": 1, "outbound_ease": "QuadIn", "filters": [{"type": "blur", "blur_x": 2}]},
+                {"offset": 1, "alpha": 0.5, "scale_x": 2, "rotation": 45, "filters": [{"type": "blur", "blur_x": 8}]}
+            ]
+        });
+        for mode in ["x", "xy", "y"] {
+            p["property_distribution"] = json!(mode);
+            for flip in [false, true] {
+                p["flip_on_reverse"] = json!(flip);
+                p.as_object_mut().unwrap().remove("stagger");
+                s.preview_array(&p).unwrap();
+                let legacy = s.doc.clone();
+                p["stagger"] = json!({});
+                s.preview_array(&p).unwrap();
+                assert_eq!(s.doc, legacy);
+                let plain = s.selected_elements();
+                let generation = s.array_translation_generation().unwrap();
+                p["stagger"] = json!({
+                    "rows": {"enabled": true},
+                    "columns": {"enabled": true, "every": 3, "x": 0, "y": -20},
+                    "accumulate": true
+                });
+                s.preview_array(&p).unwrap();
+                assert_eq!(s.array_translation_generation(), Some(generation));
+                assert_eq!(s.selection.ids().next(), Some(original));
+                for (i, ((_, before), (_, after))) in plain.iter().zip(s.selected_elements()).enumerate() {
+                    let (row, column) = (i / 4, i % 4);
+                    let row_x = if row > 0 { 50.0 } else { 0.0 };
+                    let column_y = if column > 1 { -20.0 } else { 0.0 };
+                    assert_eq!(after.id, before.id);
+                    assert_eq!(after.transform.translation(), before.transform.translation() + Vec2::new(row_x, column_y));
+                    assert_eq!(&after.transform.m[..4], &before.transform.m[..4]);
+                    assert_eq!(after.color, before.color);
+                    assert_eq!(after.kind, before.kind);
+                }
+                p["spacing_x"] = json!(-40);
+                p["start_y"] = json!(130);
+                s.preview_array(&p).unwrap();
+                assert_eq!(s.array_translation_generation(), Some(generation));
+                assert_eq!(s.selected_elements()[0].1.transform.translation(), Vec2::new(120.0, 130.0));
+                assert_eq!(s.selected_elements()[10].1.transform.translation(), Vec2::new(90.0, 50.0));
+            }
+        }
+
+        p["rows"] = json!(20);
+        p["columns"] = json!(25);
+        s.preview_array(&p).unwrap();
+        assert_eq!(s.selection.len(), MAX_ARRAY_INSTANCES as usize);
+        let preview = s.doc.clone();
+        s.finish_array_preview(true);
+        assert_eq!(s.doc, preview);
+        s.undo().unwrap();
+        s.execute("array.create", &p).unwrap();
+        assert_eq!(s.doc, preview);
+        s.undo().unwrap();
+        let base = s.doc.clone();
+        for invalid in [
+            json!({"mode": "grid", "rows": 21, "columns": 25, "stagger": p["stagger"]}),
+            json!({"mode": "grid", "stagger": []}),
+            json!({"mode": "grid", "stagger": {"rows": true}}),
+            json!({"mode": "grid", "stagger": {"rows": {"every": 0}}}),
+            json!({"mode": "grid", "stagger": {"columns": {"every": 1.5}}}),
+            json!({"mode": "grid", "stagger": {"rows": {"x": 1e30}}}),
+        ] {
+            assert!(s.execute("array.create", &invalid).is_err(), "{invalid}");
+            assert_eq!(s.doc, base);
+        }
     }
 
     #[test]

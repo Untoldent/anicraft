@@ -226,12 +226,38 @@ transformation point. Signed spacing permits axis reversals and overlap.
   across columns. A single-instance sampling axis uses 0% progression. Indices follow
   logical order from Start in every quadrant.
 - The chosen progression feeds the existing Transform, Colour Effect, and Filters stop
-  sampler with Global or Per Segment easing. Grid positions stay evenly spaced. The
+  sampler with Global or Per Segment easing. The base lattice stays evenly spaced. The
   distribution mode is part of session Undo/Redo and the retained Grid draft. Existing
   command parameters that omit the setting use **X + Y**.
 - Distribution easing for placement is available for Linear and Radial. During position-only edits,
   Grid reuses the preview instances and eligible stage tiles. Changes to the effective
   mirror orientation rebuild the preview and its tile coverage.
+
+### Staggered Grid offsets
+
+The collapsible **Stagger** section enables **Offset Rows** and **Offset Columns**
+independently. Each uses a positive integer **Every N** and signed **X Offset** and
+**Y Offset** values in stage pixels. Both systems start off with **Every N** set to 2.
+The default row vector is (+50, 0) and the default column vector is (0, +50).
+
+With **Accumulate** off, every Nth row or column gets one offset, starting with the
+Nth. With **Accumulate** on, each qualifying row or column adds an increment and
+the rows or columns in between retain that displacement. The shared checkbox
+starts off and applies to both systems. Each system leaves its first row or column
+unshifted. At **Every N** = 1, every subsequent row or column qualifies.
+
+At an intersection the row and column vectors add. For example, a second-row
+offset of +50 X and a third-column offset of −20 Y move that instance by (+50, −20).
+Indices follow the logical ordering from Start in every quadrant. The original
+instance at Start stays anchored. Flip on Reverse still follows the base directions.
+Property sampling and stacking use the same logical indices as the base Grid.
+
+The gizmo rectangle represents the base lattice. Artwork may extend past it or
+overlap. Resizing changes the base spacing. Translating the rectangle moves the
+whole staggered arrangement. Changing counts recomputes which rows and columns
+qualify. Stagger settings follow the normal draft and session Undo/Redo behavior.
+Position-only edits reuse preview instances, and eligible stage tiles follow the
+displaced positions, including outside the rectangle.
 
 ### Gizmo visibility
 
@@ -419,11 +445,6 @@ spacing, and orientation, and participate in Array session Undo/Redo.
 Numeric fields, text fields, and other keyboard-editable controls should keep
 their arrow-key behavior while focused.
 
-### Grid offsets
-
-An offset amount, an **Every N** frequency, and row and column controls could shift every
-third row horizontally by 50 px, for example.
-
 ### Array to Timeline
 
 Array-to-timeline conversion could take three forms.
@@ -499,8 +520,9 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
     mirroring when crossing either axis. Grid properties follow row-major order.
 
 21. Global Grid Property Distribution with X, X + Y, and Y modes.
+22. Staggered Grid offsets with independent row and column vectors and shared accumulation.
 
-Later: Grid offsets, keyboard nudging, Path/node placement, more stop properties,
+Later: Keyboard nudging, Path/node placement, more stop properties,
 custom easing, Chaos, multi-selection, and optional grouping/merging.
 
 For each milestone run relevant engine and shell tests, Clippy and UI screenshot

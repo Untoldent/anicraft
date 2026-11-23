@@ -6,11 +6,12 @@ use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, GridGeometry, RADIAL_FI
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
 use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
-use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
+use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ColorEffect, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,7 @@ struct GridSettings {
     counts_locked: bool,
     flip_on_reverse: bool,
     property_distribution: GridPropertyDistribution,
+    stagger: GridStagger,
 }
 
 impl GridSettings {
@@ -35,6 +37,7 @@ impl GridSettings {
             counts_locked: false,
             flip_on_reverse: true,
             property_distribution: GridPropertyDistribution::default(),
+            stagger: GridStagger::default(),
         }
     }
 
@@ -134,11 +137,19 @@ impl Settings {
             }
             Mode::Grid => {
                 let GridGeometry { start: [x, y], counts: [columns, rows], spacing: [sx, sy], .. } = self.grid.geometry;
+                let axis_params = |axis: GridStaggerAxis| json!({
+                    "enabled": axis.enabled, "every": axis.every.get(), "x": axis.offset[0], "y": axis.offset[1],
+                });
                 json!({
                     "mode": "grid", "rows": rows, "columns": columns,
                     "start_x": x, "start_y": y, "spacing_x": sx, "spacing_y": sy,
                     "flip_on_reverse": self.grid.flip_on_reverse,
                     "property_distribution": self.grid.property_distribution.key(),
+                    "stagger": {
+                        "rows": axis_params(self.grid.stagger.rows),
+                        "columns": axis_params(self.grid.stagger.columns),
+                        "accumulate": self.grid.stagger.accumulate,
+                    },
                 })
             }
             Mode::Radial => json!({
@@ -605,7 +616,8 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 
 /// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
-    let grid_sample = matches!(view, "array-grid" | "array-grid-flipped");
+    let stagger_sample = view == "array-grid-stagger";
+    let grid_sample = stagger_sample || matches!(view, "array-grid" | "array-grid-flipped");
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
     let blur_sample = matches!(view, "array-blur" | "array-blur-spiral" | "array-blur-circle");
@@ -728,6 +740,11 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                 settings.radial.radius = 65.0;
             }
         } else if grid_sample {
+            if stagger_sample {
+                settings.grid.stagger.rows.enabled = true;
+                settings.grid.stagger.columns.enabled = true;
+                settings.grid.stagger.columns.offset = [0.0, -30.0];
+            }
             let grid = &mut settings.grid.geometry;
             grid.counts = [4, 3];
             if view == "array-grid-flipped" {
@@ -1070,6 +1087,8 @@ fn settings_ui(ui: &mut Ui, state: &mut State, mode: Mode, scale_lock: &mut bool
     let mut changed = grid && distribution_fields(ui, settings, mode);
     if grid {
         ui.add_space(4.0);
+        changed |= stagger_fields(ui, &mut settings.grid.stagger);
+        ui.add_space(4.0);
     }
     let easing_open = settings.easing != ArrayEasing::default();
     changed |= crate::theme::section_with_default(ui, "array_easing", Section::Rule, tr!("Easing"), easing_open, |ui| {
@@ -1188,6 +1207,41 @@ fn grid_fields(ui: &mut Ui, grid: &mut GridSettings) -> bool {
         });
     });
     *grid != before
+}
+
+fn stagger_fields(ui: &mut Ui, stagger: &mut GridStagger) -> bool {
+    let before = *stagger;
+    crate::theme::section_with_default(ui, "array_stagger", Section::Rule, tr!("Stagger"),
+        stagger.rows.enabled || stagger.columns.enabled, |ui| {
+            ui.push_id("rows", |ui| stagger_axis_fields(ui, &mut stagger.rows, tr!("Offset Rows"),
+                [tr!("Row offset Every N"), tr!("Row X Offset"), tr!("Row Y Offset")]));
+            ui.push_id("columns", |ui| stagger_axis_fields(ui, &mut stagger.columns, tr!("Offset Columns"),
+                [tr!("Column offset Every N"), tr!("Column X Offset"), tr!("Column Y Offset")]));
+            crate::theme::checkbox(ui, &mut stagger.accumulate, tr!("Accumulate"));
+        });
+    *stagger != before
+}
+
+fn stagger_axis_fields(ui: &mut Ui, axis: &mut GridStaggerAxis, label: &str, [every, x_name, y_name]: [&str; 3]) {
+    crate::theme::checkbox(ui, &mut axis.enabled, label);
+    form_row(ui, FORM_LABEL_DOCK, tr!("Every N"), |ui| {
+        let mut value = axis.every.get();
+        with_type(ui, Type::Data, |ui| {
+            ui.add(egui::DragValue::new(&mut value).range(1..=u32::MAX))
+        }).named(every);
+        if let Some(value) = NonZeroU32::new(value) {
+            axis.every = value;
+        }
+    });
+    for ((label, name), offset) in [(tr!("X Offset"), x_name), (tr!("Y Offset"), y_name)].into_iter().zip(&mut axis.offset)
+    {
+        form_row(ui, FORM_LABEL_DOCK, label, |ui| {
+            let mut value = *offset;
+            if dimension_value(ui, name, &mut value, -1_000_000.0..=1_000_000.0, " px", true) && value.is_finite() {
+                *offset = value;
+            }
+        });
+    }
 }
 
 fn grid_lock(ui: &mut Ui, label: &str, locked: &mut bool) -> bool {
@@ -2495,9 +2549,81 @@ mod tests {
     }
 
     #[test]
-    fn grid_real_start_end_and_box_drags_keep_history_and_switching_modes() {
+    fn grid_stagger_controls_keep_the_base_gizmo_and_recover_the_draft() {
         let (mut app, ctx) = linear_app();
         screenshot(&mut app, "array-grid");
+        let get = |app: &App| app.array_panel.settings.as_ref().unwrap().grid;
+        let find = |app: &mut App, label| {
+            nodes(&ctx, app).into_iter().find(|(_, node)| node.label() == Some(label))
+                .unwrap_or_else(|| panic!("Grid control: {label}"))
+        };
+        let initial = get(&app);
+        assert_eq!(initial.stagger, GridStagger::default());
+        let start = initial.geometry.start;
+        let initial_preview = app.s.doc.clone();
+        // Collapse the other section so all stagger controls fit in the test viewport.
+        let (_, distribution) = find(&mut app, "Distribution");
+        click(&ctx, &mut app, &distribution);
+        let (_, stagger) = find(&mut app, "Stagger");
+        click(&ctx, &mut app, &stagger);
+        let (_, rows) = find(&mut app, "Offset Rows");
+        click(&ctx, &mut app, &rows);
+        let (_, columns) = find(&mut app, "Offset Columns");
+        click(&ctx, &mut app, &columns);
+        let (frequency, _) = find(&mut app, "Column offset Every N");
+        set_number(&ctx, &mut app, frequency, 3.0);
+        let (column_y, _) = find(&mut app, "Column Y Offset");
+        set_number(&ctx, &mut app, column_y, -20.0);
+        let repeated = get(&app);
+        assert_eq!(repeated.stagger.columns.every.get(), 3);
+        assert_eq!(repeated.stagger.columns.offset, [0.0, -20.0]);
+        assert!(repeated.stagger.rows.enabled && repeated.stagger.columns.enabled);
+        assert_eq!(repeated.geometry, initial.geometry);
+        let check_position = |app: &App, index: usize, expected| {
+            let copies = app.s.selected_elements();
+            let at = &copies[index].1;
+            near([at.transform.m[4], at.transform.m[5]], expected);
+        };
+        check_position(&app, 0, start);
+        check_position(&app, 6, [start[0] + 2.0 * 84.0 + 50.0, start[1] + 70.0 - 20.0]);
+        check_position(&app, 11, [start[0] + 3.0 * 84.0, start[1] + 2.0 * 70.0]);
+        assert_ne!(app.s.doc, initial_preview);
+
+        let (_, accumulate) = find(&mut app, "Accumulate");
+        click(&ctx, &mut app, &accumulate);
+        let accumulated = get(&app);
+        assert!(accumulated.stagger.accumulate);
+        check_position(&app, 11, [start[0] + 3.0 * 84.0 + 50.0, start[1] + 2.0 * 70.0 - 20.0]);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(get(&app), repeated);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::SHIFT);
+        assert_eq!(get(&app), accumulated);
+
+        let (_, distribution) = find(&mut app, "Distribution");
+        click(&ctx, &mut app, &distribution);
+        let (rows, _) = find(&mut app, "Rows");
+        set_number(&ctx, &mut app, rows, 2.0);
+        let shorter = get(&app);
+        assert_eq!(shorter.geometry.counts, [4, 2]);
+        assert_eq!(shorter.geometry.endpoints(), initial.geometry.endpoints());
+        assert_eq!(shorter.stagger, accumulated.stagger);
+        check_position(&app, 7, [start[0] + 3.0 * 84.0 + 50.0, start[1] + 140.0 - 20.0]);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert_eq!(get(&app), shorter);
+        let preview = app.s.doc.clone();
+        app.array_panel.finish(&mut app.s, false);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert_eq!(get(&app), shorter);
+        assert_eq!(app.s.doc, preview);
+        app.array_panel.finish(&mut app.s, true);
+        assert_eq!(app.s.doc, preview);
+    }
+
+    #[test]
+    fn grid_real_start_end_and_box_drags_keep_history_and_switching_modes() {
+        let (mut app, ctx) = linear_app();
+        screenshot(&mut app, "array-grid-stagger");
         let selection = app.s.committed_document().0.clone();
         let current = |app: &App| app.array_panel.settings.as_ref().unwrap().grid;
         let drag = |app: &mut App, from, delta: [f32; 2], finish| {
