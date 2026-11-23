@@ -69,6 +69,7 @@ struct Settings {
     radial: Radial,
     grid: GridSettings,
     backwards: bool,
+    create_unique_symbols: bool,
     stops: Vec<PropertyStop>,
     easing: ArrayEasing,
     source_filters: Arc<[FilterEntry]>,
@@ -89,6 +90,7 @@ impl Settings {
             },
             grid: GridSettings::at([x, y]),
             backwards: false,
+            create_unique_symbols: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
             easing: ArrayEasing::default(),
             source_filters: Arc::default(),
@@ -322,7 +324,16 @@ impl State {
         if commit && self.error.is_some() {
             return;
         }
-        s.finish_array_preview(commit);
+        let unique = self.mode().zip(self.settings.as_ref())
+            .filter(|(_, settings)| commit && settings.create_unique_symbols);
+        if let Some((mode, settings)) = unique {
+            if let Err(error) = s.commit_unique_array_preview(&settings.params(mode)) {
+                self.error = Some(error.to_string());
+                return;
+            }
+        } else {
+            s.finish_array_preview(commit);
+        }
         let was_active = self.active.take().is_some();
         if commit {
             self.discard_draft();
@@ -564,6 +575,9 @@ pub(crate) fn edit_bar(app: &mut App, ui: &mut Ui) {
                 }
             }
             finish_buttons(&mut app.array_panel, &mut app.s, ui);
+            if !app.panel_visible(Panel::Array) && let Some(error) = &app.array_panel.error {
+                ui.label(text(Type::Caption, crate::i18n::t_dyn(error)));
+            }
         }
     });
 }
@@ -577,6 +591,20 @@ fn finish_buttons(state: &mut State, s: &mut Session, ui: &mut Ui) {
         state.finish(s, false);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
     }
+
+    let Some(mut unique) = state.settings.as_ref().filter(|_| state.active.is_some())
+        .map(|settings| settings.create_unique_symbols) else { return };
+    if ui.add_enabled_ui(!state.reset_pending, |ui| {
+        crate::theme::checkbox(ui, &mut unique, tr!("Create Unique Symbols"))
+    }).inner.changed() {
+        let before = state.before_edit(None);
+        if let Some(settings) = &mut state.settings {
+            settings.create_unique_symbols = unique;
+        }
+        state.record_edit(before, None);
+        if state.error.is_some() { state.refresh(s); }
+        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+    }
 }
 
 pub(crate) fn can_apply_on_quit(app: &App) -> bool {
@@ -588,6 +616,10 @@ pub(crate) fn finish_for_quit(app: &mut App, apply: bool) {
     if !app.s.array_preview_active() {
         app.array_quit_pending = false;
         crate::tabs::quit(app);
+    } else if apply {
+        // Surface the commit error in the panel while keeping the draft available.
+        app.array_quit_pending = false;
+        app.show_panel(Panel::Array);
     }
 }
 
@@ -617,7 +649,8 @@ pub(crate) fn finish_frame(app: &mut App, ctx: &egui::Context) {
 /// A live preview with property stops and surrounding artwork for screenshot checks.
 pub(crate) fn screenshot(app: &mut App, view: &str) {
     let stagger_sample = view == "array-grid-stagger";
-    let grid_sample = stagger_sample || matches!(view, "array-grid" | "array-grid-flipped");
+    let unique_sample = view == "array-grid-unique";
+    let grid_sample = stagger_sample || unique_sample || matches!(view, "array-grid" | "array-grid-flipped");
     let segment_sample = matches!(view, "array-easing-segment" | "array-easing-segment-middle" | "array-easing-segment-end");
     let colour_sample = matches!(view, "array-colour-tint" | "array-colour-brightness" | "array-colour-advanced");
     let blur_sample = matches!(view, "array-blur" | "array-blur-spiral" | "array-blur-circle");
@@ -740,6 +773,7 @@ pub(crate) fn screenshot(app: &mut App, view: &str) {
                 settings.radial.radius = 65.0;
             }
         } else if grid_sample {
+            settings.create_unique_symbols = unique_sample;
             if stagger_sample {
                 settings.grid.stagger.rows.enabled = true;
                 settings.grid.stagger.columns.enabled = true;
@@ -2546,6 +2580,58 @@ mod tests {
         assert_eq!(app.s.doc, preview);
         app.array_panel.finish(&mut app.s, true);
         assert_eq!(app.s.doc, preview);
+    }
+
+    #[test]
+    fn array_create_unique_symbols_is_shared_undoable_and_only_touches_library_at_commit() {
+        let (mut app, ctx) = linear_app();
+        let base = app.s.doc.clone();
+        let base_ids = app.s.selection.clone();
+        let steps = app.s.history_len();
+        let checkbox = |app: &mut App| nodes(&ctx, app).into_iter()
+            .find(|(_, node)| node.label() == Some("Create Unique Symbols")).unwrap().1;
+        let unique = |app: &App| app.array_panel.settings.as_ref().unwrap().create_unique_symbols;
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let preview = app.s.doc.clone();
+        assert!(!unique(&app));
+        let toggle = checkbox(&mut app);
+        click(&ctx, &mut app, &toggle);
+        assert!(unique(&app));
+        assert_eq!(app.s.doc, preview);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert!(!unique(&app));
+        history_key(&ctx, &mut app, Key::Z, Modifiers::SHIFT);
+        assert!(unique(&app));
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        assert!(unique(&app));
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert!(unique(&app));
+        assert_eq!(app.s.doc.library, base.library);
+        let cancel = nodes(&ctx, &mut app).into_iter()
+            .find(|(_, node)| node.label() == Some("Cancel")).unwrap().1;
+        click(&ctx, &mut app, &cancel);
+        assert_eq!(app.s.doc, base);
+        assert_eq!(app.s.selection, base_ids);
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert!(unique(&app));
+        let generation = app.s.array_translation_generation();
+        let preview = app.s.doc.clone();
+        let toggle = checkbox(&mut app);
+        click(&ctx, &mut app, &toggle);
+        assert_eq!(app.s.array_translation_generation(), generation);
+        assert_eq!(app.s.doc, preview);
+        let toggle = checkbox(&mut app);
+        click(&ctx, &mut app, &toggle);
+        let commit = nodes(&ctx, &mut app).into_iter()
+            .find(|(_, node)| node.label() == Some("Commit")).unwrap().1;
+        click(&ctx, &mut app, &commit);
+        assert!(!app.s.array_preview_active());
+        assert_eq!(app.s.doc.library.len(), base.library.len() + 9);
+        assert_eq!(app.s.history_len(), steps + 1);
+        history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
+        assert_eq!(app.s.doc, base);
+        assert_eq!(app.s.selection, base_ids);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, Result, Session};
-use anicraft_doc::{ColorEffect, ColorStyle, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, FilterParam, GradientStop, MAX_BLUR, REST_SNAP, pinned_stop};
+use anicraft_doc::{ColorEffect, ColorStyle, Document, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, FilterParam, GradientStop, LibraryEntry, LibraryItem, MAX_BLUR, REST_SNAP, SymbolId, pinned_stop};
 use anicraft_geom::{Affine, Decomposed, Vec2};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
@@ -462,6 +462,14 @@ impl Session {
 
     /// Start a preview from the original artwork. Reuse the instances for position-only edits.
     pub fn preview_array(&mut self, params: &Value) -> Result<()> {
+        let shared = if let Some(mut object) = params.as_object().filter(|p| p.contains_key("create_unique_symbols")).cloned() {
+            opt_bool(params, "create_unique_symbols")?;
+            object.remove("create_unique_symbols");
+            Some(Value::Object(object))
+        } else {
+            None
+        };
+        let params = shared.as_ref().unwrap_or(params);
         if self.array_preview {
             if let Some(mut preview) = self.array_positions.take()
                 && preview.move_to(self, params)
@@ -484,6 +492,30 @@ impl Session {
             self.end_gesture();
         }
         result
+    }
+
+    /// Bake the current Array settings with unique definitions in the same undo step.
+    pub fn commit_unique_array_preview(&mut self, params: &Value) -> Result<()> {
+        if !self.array_preview {
+            return Err(EngineError::State("no active Array preview".into()));
+        }
+        let mut params = params.as_object().cloned()
+            .ok_or_else(|| EngineError::Param("Array settings must be an object".into()))?;
+        params.insert("create_unique_symbols".into(), Value::Bool(true));
+
+        // Replay once from the same source as the preview. Keep the transient
+        // pose and recording if commit fails so the artist can edit or cancel.
+        let preview = self.snapshot("Array");
+        let recording = self.rec.clone();
+        self.restore_gesture();
+        if let Err(error) = self.execute_command("array.create", &Value::Object(params)) {
+            self.restore(preview);
+            self.rec = recording;
+            return Err(error);
+        }
+        self.array_positions = None;
+        self.finish_array_preview(true);
+        Ok(())
     }
 
     pub fn finish_array_preview(&mut self, commit: bool) {
@@ -640,7 +672,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Create Array",
         menu: "",
         shortcut: None,
-        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y, stagger?: {accumulate?: bool, rows?: {enabled?: bool, every?: positive integer, x?: number, y?: number}, columns?: {enabled?: bool, every?: positive integer, x?: number, y?: number}} (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid uses an evenly spaced base lattice. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Grid stagger rows and columns default to disabled with every=2 and stage offsets of (50, 0) and (0, 50) px respectively. Offsets add at intersections. With accumulate off, every Nth row or column gets one offset. With accumulate on, each qualifying row or column adds an offset that persists on subsequent rows or columns. The first row and first column never add an offset, including when every=1. Stagger leaves the base direction and property sampling intact. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all.",
+        params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), create_unique_symbols?: bool, dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y, stagger?: {accumulate?: bool, rows?: {enabled?: bool, every?: positive integer, x?: number, y?: number}, columns?: {enabled?: bool, every?: positive integer, x?: number, y?: number}} (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid uses an evenly spaced base lattice. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Grid stagger rows and columns default to disabled with every=2 and stage offsets of (50, 0) and (0, 50) px respectively. Offsets add at intersections. With accumulate off, every Nth row or column gets one offset. With accumulate on, each qualifying row or column adds an offset that persists on subsequent rows or columns. The first row and first column never add an offset, including when every=1. Stagger leaves the base direction and property sampling intact. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all. With create_unique_symbols (default false), each instance references a separate copy of the original definition in its Library folder. Names continue the highest numbered suffix in the same naming family. Instance properties and shared nested Library references are preserved.",
         mutates: true,
         run: create,
     }]
@@ -1002,7 +1034,48 @@ fn parse_radial(p: &Value, original: Vec2) -> Result<RadialDistribution> {
     })
 }
 
+fn numbered_symbol_name(name: &str) -> Option<(&str, &str)> {
+    let (stem, number) = name.rsplit_once('_')?;
+    (!number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit()))
+        .then_some((stem, number.trim_start_matches('0')))
+}
+
+fn unique_symbol_names(doc: &Document, id: SymbolId, count: u32) -> Result<Vec<String>> {
+    let source = doc.symbol(id)
+        .ok_or_else(|| EngineError::State(format!("no symbol with id {}", id.0)))?;
+    let name = source.name.trim();
+    let stem = numbered_symbol_name(name).map_or(name, |(stem, _)| stem);
+    let family = stem.to_lowercase();
+    let parent = doc.parent_of(LibraryEntry::Item(LibraryItem::Symbol(id)));
+    let last = doc.library_children(parent).into_iter()
+        .filter_map(|entry| numbered_symbol_name(doc.entry_name(entry)?))
+        .filter(|(prefix, _)| prefix.to_lowercase() == family)
+        .map(|(_, number)| number)
+        .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .unwrap_or_default();
+
+    // Decimal digits avoid integer overflow even for imported, very large suffixes.
+    // Starting above every sibling's suffix reserves the entire sequence at once.
+    let mut suffix = last.as_bytes().to_vec();
+    (0..count).map(|_| {
+        let mut carry = true;
+        for digit in suffix.iter_mut().rev() {
+            if *digit < b'9' {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+            *digit = b'0';
+        }
+        if carry { suffix.insert(0, b'1'); }
+        let number: String = suffix.iter().copied().map(char::from).collect();
+        anicraft_doc::library::clean_name(&format!("{stem}_{number}"))
+            .map_err(|error| EngineError::Param(error.to_string()))
+    }).collect()
+}
+
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
+    let create_unique = opt_bool(p, "create_unique_symbols")?.unwrap_or(false);
     let mode = opt_str(p, "mode")?.unwrap_or("linear");
     let count = if mode == "grid" {
         None
@@ -1030,9 +1103,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let original = s.editable_keyframe()?.elements.iter().find(|e| e.id == id)
         .map(|e| (**e).clone())
         .ok_or_else(|| EngineError::State("selected instance is not in the editable keyframe".into()))?;
-    if !matches!(&original.kind, ElementKind::Symbol { .. }) {
+    let ElementKind::Symbol { symbol: source_symbol, .. } = &original.kind else {
         return Err(EngineError::State("the initial Array implementation requires a symbol instance".into()));
-    }
+    };
     let seed = source_values.then(|| ArrayPropertyStop::from_source(&original));
     let basis = source_values.then(|| original.transform.decompose());
     let stops = parse_stops(p, seed.as_ref(), Some(original.kind.filters().unwrap_or_default()))?;
@@ -1111,6 +1184,18 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         copies.push(Arc::new(el));
     }
 
+    if create_unique {
+        let names = unique_symbol_names(&s.doc, *source_symbol, count)?;
+        // Duplicate places each definition immediately after its source. Walk
+        // backwards so the Library and the logical Array display the same sequence.
+        for (copy, name) in copies.iter_mut().zip(names).rev() {
+            let ElementKind::Symbol { symbol, .. } = &mut Arc::make_mut(copy).kind else {
+                return Err(EngineError::State("array copy is not a symbol instance".into()));
+            };
+            *symbol = s.doc.duplicate_symbol(*source_symbol, name)
+                .ok_or_else(|| EngineError::State("array source symbol no longer exists".into()))?;
+        }
+    }
     // Preserve the source's position relative to unrelated artwork. Copies stack beside it.
     // Only the relative order among the array copies is controlled by "stacking".
     if front_to_back { copies.reverse(); }
@@ -2506,6 +2591,202 @@ mod tests {
         assert_eq!(s.selection, selection);
         s.execute("array.create", &p).unwrap();
         assert_eq!(s.doc, preview);
+    }
+
+    fn instance_symbol(element: &Element) -> SymbolId {
+        let ElementKind::Symbol { symbol, .. } = element.kind else { panic!("expected a symbol") };
+        symbol
+    }
+
+    #[test]
+    fn array_unique_commit_preserves_the_evaluated_preview_in_every_layout() {
+        let mut s = radial_source();
+        let source = instance_symbol(&s.selected_elements()[0].1);
+        s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters": [
+            {"type": "drop_shadow", "distance": 4, "angle": 20, "blur_x": 2, "blur_y": 2, "color": "#446688"},
+            {"type": "blur", "blur_x": 1, "blur_y": 1, "enabled": false}
+        ]})).unwrap();
+        let original = s.selection.ids().next().unwrap();
+        let base = s.doc.clone();
+        let selection = s.selection.clone();
+        let steps = s.history_len();
+        let stops = json!([
+            {"offset": 0, "alpha": 0.95, "scale_x": 1, "scale_y": 1, "rotation": 0,
+                "color_effect": ColorEffect::Brightness(0.1),
+                "filters": [{"type": "drop_shadow", "distance": 4, "angle": 20, "blur_x": 2, "blur_y": 2, "color": "#446688"},
+                    {"type": "blur", "blur_x": 1, "blur_y": 1}]},
+            {"offset": 1, "alpha": 0.45, "scale_x": 1.75, "scale_y": 0.5, "rotation": 50,
+                "color_effect": ColorEffect::Brightness(-0.25),
+                "filters": [{"type": "drop_shadow", "distance": 17, "angle": 70, "blur_x": 8, "blur_y": 6, "color": "#cc6633"},
+                    {"type": "blur", "blur_x": 9, "blur_y": 9}]}
+        ]);
+        let mut p = json!({"mode": "linear", "count": 4, "start_x": 100, "start_y": 100, "dx": -25, "dy": 10,
+            "center_x": 150, "center_y": 150, "radius": 50, "start_angle": 45,
+            "rows": 2, "columns": 2, "spacing_x": -50, "spacing_y": -45, "property_distribution": "y",
+            "stagger": {"rows": {"enabled": true, "x": 15}},
+            "property_stops": stops, "source_values": true, "stacking": "front_to_back"});
+        let render = |session: &Session| anicraft_render::render_frame(&session.doc, 0, 0.35).unwrap().data;
+        for (mode, closed) in [("linear", true), ("radial", true), ("radial", false), ("grid", true)] {
+            p["mode"] = json!(mode);
+            p["closed_loop"] = json!(closed);
+            p["spiral_offset"] = json!(if closed { 0 } else { 14 });
+            p["rotate"] = json!(!closed);
+            p["create_unique_symbols"] = json!(false);
+            s.preview_array(&p).unwrap();
+            let shared_preview = s.doc.clone();
+            let shared = s.selected_elements();
+            let pixels = render(&s);
+            s.finish_array_preview(true);
+            assert_eq!(s.doc, shared_preview);
+            assert_eq!(s.doc.library, base.library);
+            assert!(shared.iter().all(|(_, el)| instance_symbol(el) == source));
+            s.undo().unwrap();
+            assert_eq!(s.doc, base);
+
+            p["create_unique_symbols"] = json!(true);
+            s.preview_array(&p).unwrap();
+            assert_eq!(s.doc, shared_preview);
+            assert_eq!(s.doc.library, base.library);
+            s.finish_array_preview(false);
+            assert_eq!(s.doc, base);
+            assert_eq!(s.selection, selection);
+
+            s.preview_array(&p).unwrap();
+            s.commit_unique_array_preview(&p).unwrap();
+            assert_eq!(s.history_len(), steps + 1);
+            assert_eq!(s.selection.ids().next(), Some(original));
+            assert_eq!(s.doc.symbol(source), base.symbol(source));
+            assert_eq!(s.doc.library.len(), base.library.len() + 4);
+            assert_eq!(render(&s), pixels);
+            for (i, ((_, before), (_, after))) in shared.iter().rev().zip(s.selected_elements().into_iter().rev()).enumerate() {
+                let id = instance_symbol(&after);
+                let definition = s.doc.symbol(id).unwrap();
+                assert_eq!(definition.name, format!("Source_{}", i + 1));
+                assert_eq!(definition.kind, base.symbol(source).unwrap().kind);
+                let mut normalized = (*after).clone();
+                let ElementKind::Symbol { symbol, .. } = &mut normalized.kind else { panic!("expected a symbol") };
+                *symbol = source;
+                assert_eq!(&normalized, &**before);
+                let stack = after.kind.filters().unwrap();
+                let [shadow, blur] = stack else { panic!("expected one shadow and one blur") };
+                assert!(matches!(shadow.filter, Filter::DropShadow { distance, .. } if (4.0..=17.0).contains(&distance)));
+                assert!(shadow.enabled && !blur.enabled);
+            }
+            let baked = s.doc.clone();
+            let (_, recorded) = s.history.steps().last().unwrap();
+            let [recorded] = recorded.unwrap() else { panic!("expected one Array command") };
+            assert_eq!(recorded.cmd, "array.create");
+            assert_eq!(recorded.params["create_unique_symbols"], true);
+            let mut replay = Session::new(base.clone());
+            replay.selection = selection.clone();
+            replay.execute(&recorded.cmd, &recorded.params).unwrap();
+            assert_eq!(replay.doc, baked);
+            s.undo().unwrap();
+            assert_eq!(s.doc, base);
+            assert_eq!(s.selection, selection);
+            s.redo().unwrap();
+            assert_eq!(s.doc, baked);
+            s.undo().unwrap();
+        }
+    }
+
+    #[test]
+    fn array_unique_definitions_keep_independent_timelines_and_shared_nested_symbols() {
+        let mut s = radial_source();
+        let source = instance_symbol(&s.selected_elements()[0].1);
+        let original = s.selection.ids().next().unwrap();
+        let folder = s.doc.ensure_folder_path("Array Examples").unwrap();
+        s.doc.place_entry(LibraryEntry::Item(LibraryItem::Symbol(source)), Some(folder));
+        s.execute("library.rename", &json!({"symbol": source.0, "name": "Box_8"})).unwrap();
+        for name in ["Box", "Box_1", "box_3", "bOx_09"] {
+            s.execute("library.duplicate", &json!({"symbol": source.0, "name": name})).unwrap();
+        }
+        s.execute("draw.rect", &json!({"x": 8, "y": 8, "w": 5, "h": 8})).unwrap();
+        let nested = s.execute("modify.convert_to_symbol", &json!({"name": "Nested"})).unwrap()["symbol"].as_u64().unwrap();
+        s.execute("symbol.edit", &json!({"symbol": source.0})).unwrap();
+        s.execute("library.place", &json!({"symbol": nested, "x": 10, "y": 15})).unwrap();
+        s.execute("timeline.goto", &json!({"frame": 6})).unwrap();
+        s.execute("timeline.insert_keyframe", &json!({})).unwrap();
+        s.execute("edit.select_all", &json!({})).unwrap();
+        s.execute("element.set_transform", &json!({"x": 30})).unwrap();
+        s.execute("symbol.exit", &json!({})).unwrap();
+        let other = s.execute("library.place", &json!({"symbol": source.0, "x": 200, "y": 220})).unwrap()["element"].as_u64().unwrap();
+        let unrelated = s.elements_on(s.layer).into_iter().find(|el| el.id == ElementId(other)).unwrap();
+        s.select_only([original]);
+        let doc = s.doc.clone();
+        let params = json!({"mode": "linear", "count": 3, "start_x": 55, "start_y": 70, "dx": 42, "dy": 0});
+        s.preview_array(&params).unwrap();
+        s.commit_unique_array_preview(&params).unwrap();
+        let copies = s.selected_elements().into_iter().map(|(_, el)| instance_symbol(&el)).collect::<Vec<_>>();
+        assert!(s.elements_on(s.layer).contains(&unrelated));
+        assert_eq!(s.doc.library.len(), doc.library.len() + 3);
+        let definition = s.doc.symbol(source).unwrap();
+        assert_eq!(Some(definition), doc.symbol(source));
+        assert_eq!(definition.timeline.layers[0].keyframes.len(), 2);
+        let mut internal_ids = std::collections::HashSet::new();
+        for (i, id) in std::iter::once(source).chain(copies.iter().copied()).enumerate() {
+            let symbol = s.doc.symbol(id).unwrap();
+            assert_eq!(symbol.name, format!("Box_{}", if i == 0 { 8 } else { i + 9 }));
+            assert_eq!(s.doc.parent_of(LibraryEntry::Item(LibraryItem::Symbol(id))), Some(folder));
+            let layer = &symbol.timeline.layers[0];
+            assert!(internal_ids.insert(layer.id.0));
+            assert_eq!(layer.keyframes.len(), 2);
+            let members = &layer.keyframes[0].elements;
+            let nested_instance = members.iter().find(|el| matches!(el.kind, ElementKind::Symbol { .. })).unwrap();
+            assert_eq!(instance_symbol(nested_instance), SymbolId(nested));
+            for el in members {
+                assert!(internal_ids.insert(el.id.0));
+            }
+            assert_eq!(layer.keyframes[1].start, 6);
+            assert!(layer.keyframes[1].elements.iter().any(|el| el.id == nested_instance.id));
+        }
+        let before_edit = s.doc.clone();
+        s.execute("symbol.edit", &json!({"symbol": copies[1].0})).unwrap();
+        s.execute("timeline.goto", &json!({"frame": 3})).unwrap();
+        s.execute("timeline.insert_keyframe", &json!({})).unwrap();
+        s.execute("draw.rect", &json!({"x": -8, "y": 6, "w": 7, "h": 8})).unwrap();
+        assert_ne!(s.doc.symbol(copies[1]), before_edit.symbol(copies[1]));
+        assert_eq!(s.doc.symbol(copies[1]).unwrap().timeline.layers[0].keyframes.len(), 3);
+        for id in [source, copies[0], copies[2], SymbolId(nested)] {
+            assert_eq!(s.doc.symbol(id), before_edit.symbol(id));
+        }
+    }
+
+    #[test]
+    fn array_unique_names_support_large_suffixes_and_the_instance_cap() {
+        let mut s = radial_source();
+        let source = instance_symbol(&s.selected_elements()[0].1);
+        let original = s.selection.ids().next().unwrap();
+        let params = json!({"mode": "linear", "count": 500, "start_x": 4, "start_y": 5, "dx": 3, "dy": 0});
+        s.preview_array(&params).unwrap();
+        let generation = s.array_translation_generation();
+        let mut toggled = params.clone();
+        toggled["create_unique_symbols"] = json!(true);
+        s.preview_array(&toggled).unwrap();
+        assert_eq!(s.array_translation_generation(), generation);
+        assert_eq!(s.doc.library.len(), 1);
+        s.commit_unique_array_preview(&params).unwrap();
+        assert_eq!(s.selection.len(), 500);
+        assert_eq!(s.selection.ids().next(), Some(original));
+        assert_eq!(s.doc.library.len(), 501);
+        assert_eq!(s.doc.library.get(500).unwrap().name, "Source_500");
+        s.undo().unwrap();
+        assert_eq!(s.doc.library.len(), 1);
+
+        s.execute("library.duplicate", &json!({"symbol": source.0, "name": "sOuRcE_9999999999999999999999"})).unwrap();
+        assert_eq!(unique_symbol_names(&s.doc, source, 2).unwrap(), ["Source_10000000000000000000000", "Source_10000000000000000000001"]);
+        s.execute("library.rename", &json!({"symbol": source.0, "name": "b".repeat(256)})).unwrap();
+        let base = s.doc.clone();
+        let params = json!({"count": 2, "mode": "linear", "start_x": 55, "start_y": 42, "dx": 30, "dy": 0});
+        s.preview_array(&params).unwrap();
+        let preview = s.doc.clone();
+        assert!(s.commit_unique_array_preview(&params).is_err());
+        assert!(s.array_preview_active());
+        assert_eq!(s.doc, preview);
+        assert_eq!(s.committed_document().0, &base);
+        s.finish_array_preview(false);
+        assert_eq!(s.doc, base);
     }
 
     #[test]

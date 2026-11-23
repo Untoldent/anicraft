@@ -3001,7 +3001,7 @@ impl App {
                 }
                 self.tool = Tool::Width;
             }
-            Some(which @ ("array" | "array-hidden" | "array-polish" | "array-polish-off" | "array-radial" | "array-grid" | "array-grid-flipped" | "array-grid-stagger")) => {
+            Some(which @ ("array" | "array-hidden" | "array-polish" | "array-polish-off" | "array-radial" | "array-grid" | "array-grid-flipped" | "array-grid-stagger" | "array-grid-unique")) => {
                 crate::array_panel::screenshot(self, which);
             }
             Some("array-history") if self.shot.is_some() => {

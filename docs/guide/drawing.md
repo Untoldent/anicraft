@@ -647,6 +647,15 @@ Use **Filters** under **Easing** to ease the numbers, colours, and matching ramp
 Quality, Type, and switches hold their value until the next authored Array stop.
 Edits from one opening of a filter colour picker undo together.
 
+**Create Unique Symbols**, beside **Commit**, is off by default. Turn it on to give
+each Array instance its own editable Symbol definition and timeline. Names continue
+from the highest numbered sibling in the source folder, so Box_8 is followed by
+Box_9 even if earlier numbers are unused. The original Symbol and its other
+instances keep their existing references. Nested Symbols and shared assets remain
+shared. Transforms, colour, alpha, and filters remain editable on the instances.
+Undo removes the new definitions and restores the original placement. Redo
+restores the same definitions and instances.
+
 **Commit** creates independent instances in one undo step. The next Array starts with defaults
 at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
 original artwork and selection and retains the unfinished settings for the selected source.

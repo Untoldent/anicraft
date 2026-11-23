@@ -421,18 +421,34 @@ progression when unchecked. Filters is available when the source has a filter.
   object, or mergeable raw artwork. Initially limit to one symbol instance,
   with explicit feedback.
 
+## Create Unique Symbols
+
+The shared Commit controls offer **Create Unique Symbols** in Linear, Radial, and
+Grid. It starts off, so ordinary Commit keeps all instances on the source Symbol.
+Toggling it participates in Array session Undo/Redo and is retained with a
+cancelled draft. The Library stays unchanged during preview and on Cancel.
+
+With the option on, Commit copies the source definition and its timeline once per
+Array element, including the one at Start. The copies use AniCraft's existing
+Library duplication rules. Each has fresh layer and element identities in its
+timeline. Nested Symbol references and shared assets remain shared, and linkage
+classes stay with the original definition. The original Symbol remains in the
+Library and existing instances elsewhere keep referencing it.
+
+Copies are placed in the source folder. Names extend the highest numeric suffix
+among case-insensitive siblings in the naming family, including other Library
+entries that could collide. For example, with Box, Box_1, Box_3, and Box_8, the
+next Array starts at Box_9 even if Box_8 is the selected source. The sequence
+follows Array placement order. If the next name exceeds the Library name limit,
+the preview stays open so the artist can turn off the option or cancel.
+
+Commit uses the same property-stop evaluation as the preview. It changes only
+the Symbol reference on each evaluated instance, preserving editable transforms,
+colour, alpha, filter parameters, and the source filter stack's ordering and
+enabled states. The instances and their new definitions are recorded in one
+document undo step. Redo restores the same definitions and references.
+
 ## Deferred Features
-
-### Create Unique Symbols
-
-Add an off-by-default checkbox tentatively named **Create Unique Symbols**. With it enabled,
-Array Commit would create a separate, sequentially numbered Symbol definition for each
-instance. An Array sourced from `Box` would generate `Box_1`, `Box_2`, `Box_3`, and so on.
-Each clone would inherit the source Symbol's contents and animation timeline and could be
-edited independently after Commit.
-
-Naming collisions, the treatment of other references to the original Symbol, and Undo
-behaviour remain open.
 
 ### Gizmo Keyboard Nudging
 
@@ -521,6 +537,7 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
 
 21. Global Grid Property Distribution with X, X + Y, and Y modes.
 22. Staggered Grid offsets with independent row and column vectors and shared accumulation.
+23. Shared Create Unique Symbols Commit option with independent timelines and collision-safe names.
 
 Later: Keyboard nudging, Path/node placement, more stop properties,
 custom easing, Chaos, multi-selection, and optional grouping/merging.
