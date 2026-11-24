@@ -341,9 +341,17 @@ impl State {
         }
     }
 
+    fn timeline_mode(&self) -> Option<Mode> {
+        match self.mode()? {
+            Mode::Linear => Some(Mode::Linear),
+            Mode::Radial if self.settings.as_ref().is_some_and(|s| s.radial.closed_loop) => Some(Mode::Radial),
+            _ => None,
+        }
+    }
+
     fn can_commit(&self) -> bool {
         self.settings.as_ref().is_some_and(|settings| {
-            settings.commit_as == CommitAs::Spatial || self.mode() == Some(Mode::Linear)
+            settings.commit_as == CommitAs::Spatial || self.timeline_mode().is_some()
         }) && self.error.is_none() && !self.reset_pending
     }
 
@@ -371,11 +379,17 @@ impl State {
     fn create_timeline(&mut self, s: &mut Session, config: &TimelineConfig) -> anicraft_engine::Result<()> {
         let settings = self.settings.as_ref()
             .ok_or_else(|| anicraft_engine::EngineError::State("The Array draft is unavailable.".into()))?;
-        let mut params = settings.params(Mode::Linear);
-        params["end_x"] = json!(settings.linear.end[0]);
-        params["end_y"] = json!(settings.linear.end[1]);
+        let mode = self.timeline_mode()
+            .ok_or_else(|| anicraft_engine::EngineError::State("Timeline Animation is available for Linear and Circle Arrays only.".into()))?;
+        let mut params = settings.params(mode);
         params["duration"] = json!(config.frames);
-        params["animation"] = json!(if config.hold { "hold" } else { "classic" });
+        if mode == Mode::Radial {
+            params["animation"] = json!("motion");
+        } else {
+            params["end_x"] = json!(settings.linear.end[0]);
+            params["end_y"] = json!(settings.linear.end[1]);
+            params["animation"] = json!(if config.hold { "hold" } else { "classic" });
+        }
         // The remembered Spatial option belongs only to that output.
         if let Some(fields) = params.as_object_mut() {
             fields.remove("create_unique_symbols");
@@ -647,7 +661,7 @@ pub(crate) fn edit_bar(app: &mut App, ui: &mut Ui) {
 
 fn commit_as(state: &mut State, s: &mut Session, ui: &mut Ui) {
     let Some(settings) = state.settings.as_ref().filter(|_| state.active.is_some()) else { return };
-    let timeline_supported = state.mode() == Some(Mode::Linear);
+    let timeline_supported = state.timeline_mode().is_some();
     let mut output = settings.commit_as;
     ui.label(text(Type::Label, tr!("Commit As")));
     ui.horizontal_wrapped(|ui| {
@@ -661,7 +675,7 @@ fn commit_as(state: &mut State, s: &mut Session, ui: &mut Ui) {
                 egui::Button::selectable(output == choice, text(Type::Body, label)),
             );
             let response = if choice == CommitAs::Timeline {
-                response.on_disabled_hover_text(tr!("Timeline Animation is available for Linear Arrays only."))
+                response.on_disabled_hover_text(tr!("Timeline Animation is available for Linear and Circle Arrays only."))
             } else { response };
             if response.clicked() { output = choice; }
         }
@@ -679,10 +693,10 @@ fn commit_as(state: &mut State, s: &mut Session, ui: &mut Ui) {
 
 fn commit_button(state: &mut State, s: &mut Session, ui: &mut Ui) {
     let commit = ui.add_enabled(state.can_commit(), egui::Button::new(tr!("Commit")));
-    let commit = if state.mode() != Some(Mode::Linear)
+    let commit = if state.timeline_mode().is_none()
         && state.settings.as_ref().is_some_and(|settings| settings.commit_as == CommitAs::Timeline)
     {
-        commit.on_disabled_hover_text(tr!("Timeline Animation is available for Linear Arrays only."))
+        commit.on_disabled_hover_text(tr!("Timeline Animation is available for Linear and Circle Arrays only."))
     } else {
         commit
     };
@@ -772,6 +786,10 @@ pub(crate) fn show_timeline_modal(app: &mut App, ctx: &egui::Context) {
                 .named(&tr!("{seconds} seconds", seconds = formatted));
         });
         form_row(ui, FORM_LABEL_DIALOG, tr!("Animation Type"), |ui| {
+            if app.array_panel.timeline_mode() == Some(Mode::Radial) {
+                ui.label(text(Type::Body, tr!("Motion Tween"))).named(tr!("Motion Tween"));
+                return;
+            }
             let before = config.hold;
             egui::ComboBox::from_id_salt("array_animation_type")
                 .selected_text(if config.hold { tr!("Hold Keyframes") } else { tr!("Classic Tween") })
@@ -2094,6 +2112,55 @@ mod tests {
             app.array_panel.request_commit(&mut app.s, false);
             assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, 61);
         }
+    }
+
+    #[test]
+    fn circle_timeline_offers_native_motion_and_keeps_the_draft_on_cancel() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        let choice = commit_control(&ctx, &mut app, "Timeline Animation");
+        click(&ctx, &mut app, &choice);
+        assert!(app.array_panel.can_commit());
+        app.array_panel.settings.as_mut().unwrap().stops.insert(1, PropertyStop::new(2, 0.5, 0.4));
+        app.array_panel.refresh(&mut app.s);
+        let draft = app.array_panel.settings.clone();
+        let preview = app.s.doc.clone();
+        let commit = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &commit);
+        let modal = nodes(&ctx, &mut app);
+        let frames = app.array_panel.timeline_config.as_ref().unwrap().frames;
+        assert!(modal.iter().any(|(_, n)| n.label() == Some("Motion Tween")));
+        assert!(!modal.iter().any(|(_, n)| n.label() == Some("Classic Tween") || n.label() == Some("Hold Keyframes")));
+        let close = modal.into_iter().find(|(_, n)| n.label() == Some("Close")).unwrap().1;
+        click(&ctx, &mut app, &close);
+        assert!(!app.modal_open());
+        assert!(app.s.array_preview_active() && app.array_panel.can_step(false));
+        assert!(app.s.doc == preview && app.array_panel.settings == draft);
+        app.array_panel.request_commit(&mut app.s, false);
+        assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, frames);
+        app.array_panel.timeline_config.as_mut().unwrap().frames = 2;
+        let pick = |app: &mut App, label| {
+            let action = nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(label)).unwrap().1;
+            click(&ctx, app, &action);
+        };
+        pick(&mut app, "Create Animation");
+        assert!(app.s.doc == preview && app.s.array_preview_active());
+        pick(&mut app, "Use 3 frames");
+        assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, 3);
+        assert!(app.s.array_preview_active());
+        pick(&mut app, "Create Animation");
+        assert!(!app.modal_open() && !app.s.array_preview_active());
+        let layer = app.s.timeline().layer(app.s.layer).unwrap();
+        let key = layer.keyframe_at(app.s.frame).unwrap();
+        assert!(key.motion.as_ref().is_some_and(|motion| motion.path.is_some()));
+        assert_eq!(key.elements.len(), 1);
+        assert_eq!(key.duration, 3);
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
+        app.array_panel.settings.as_mut().unwrap().commit_as = CommitAs::Timeline;
+        app.array_panel.settings.as_mut().unwrap().radial.closed_loop = false;
+        app.array_panel.refresh(&mut app.s);
+        assert!(!app.array_panel.can_commit());
     }
 
     fn screen(app: &App, [x, y]: [f32; 2]) -> Pos2 {

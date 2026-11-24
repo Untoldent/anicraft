@@ -1284,7 +1284,24 @@ impl MotionTween {
                 props.set(Property::Rotation, props.get(Property::Rotation) + op.turn(frame));
             }
         }
-        if on_path.is_some() || self.tracks.iter().any(|t| t.property.is_transform()) {
+        // A position-only path can translate the exact source matrix. A path with
+        // rotation keys and a registration pivot can turn that matrix directly too.
+        // This avoids decomposing a constant shear, reflection or collapsed axis.
+        if on_path.is_some() && !self.orient && !self.keep_area
+            && !self.tracks.iter().any(|t| matches!(t.property, Property::ScaleX | Property::ScaleY | Property::Skew)
+                || (t.property == Property::Rotation && base.pivot().is_some_and(|p| p != Vec2::ZERO)))
+        {
+            let rotation = Property::Rotation.clamp(props.get(Property::Rotation)) - base_props.get(Property::Rotation);
+            let mut transform = base.transform;
+            if rotation != 0.0 {
+                transform = Affine::rotate(rotation.to_radians()).mul(&transform);
+            }
+            transform.m[4] = Property::X.clamp(props.get(Property::X));
+            transform.m[5] = Property::Y.clamp(props.get(Property::Y));
+            if transform.is_finite() {
+                el.transform = transform;
+            }
+        } else if on_path.is_some() || self.tracks.iter().any(|t| t.property.is_transform()) {
             let mut m = props.transform();
             // With a transformation point (ADR 0111) the position tracks carry the point, and
             // the target turns, scales and skews about it.

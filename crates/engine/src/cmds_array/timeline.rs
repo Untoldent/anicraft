@@ -1,6 +1,8 @@
-//! Convert a Linear Array to native Classic or Hold spans on the source layer.
+//! Convert an Array to native timeline spans on the source layer.
 
-use super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, MAX_ARRAY_INSTANCES, keep_pivot, parse_stops, posed_element};
+mod circle;
+
+use super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, MAX_ARRAY_INSTANCES, keep_pivot, parse_radial, parse_stops, posed_element};
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
 use crate::{CommandSpec, EngineError, MAX_FRAME, Result, Session};
 use anicraft_doc::{ColorEffect, EaseGroup, Easing, Element, ElementKind, FilterParam, Keyframe, LayerKind, Tween, TweenKind};
@@ -14,26 +16,29 @@ pub(super) fn spec() -> CommandSpec {
         label: "Create Timeline Animation",
         menu: "",
         shortcut: None,
-        params: "{duration: frames (at least 2), animation?: classic|hold (default classic), mode?: linear, start_x?, start_y?, end_x?, end_y?, count?: 1..500 (Hold samples only), property_stops?, easing?}. Stops use the authored instance values from array.create with source_values enabled. Converts one Symbol exposure on the active layer at the playhead.",
+        params: "{duration: frames (at least 2), animation?: classic|hold (Linear, default classic) or motion (Circle, default motion), mode?: linear|radial (Circle uses closed_loop: true, center_x, center_y, radius?, start_angle?, sweep_angle?, rotate?), start_x?, start_y?, end_x?, end_y?, count?: 1..500 (Hold samples only), property_stops?, easing?}. Stops use the authored instance values from array.create with source_values enabled. Converts one Symbol exposure on the active layer at the playhead.",
         mutates: true,
         run: create,
     }
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
-    if opt_str(p, "mode")?.unwrap_or("linear") != "linear" {
-        return Err(EngineError::Param("Timeline Animation is available for Linear Arrays only.".into()));
-    }
+    let circle = match opt_str(p, "mode")?.unwrap_or("linear") {
+        "linear" => false,
+        "radial" if opt_bool(p, "closed_loop")?.unwrap_or(true) => true,
+        _ => return Err(EngineError::Param("Timeline Animation is available for Linear and Circle Arrays only.".into())),
+    };
     if opt_bool(p, "create_unique_symbols")?.unwrap_or(false) {
         return Err(EngineError::Param("Create Unique Symbols is available for Spatial Array only.".into()));
     }
     if p.get("alpha_stops").is_some() {
         return Err(EngineError::Param("Timeline Animation uses authored property_stops.".into()));
     }
-    let classic = match opt_str(p, "animation")?.unwrap_or("classic") {
-        "classic" => true,
-        "hold" => false,
-        _ => return Err(EngineError::Param("Choose Classic Tween or Hold Keyframes.".into())),
+    let classic = match (circle, opt_str(p, "animation")?) {
+        (false, None | Some("classic")) => true,
+        (false, Some("hold")) | (true, None | Some("motion")) => false,
+        (true, _) => return Err(EngineError::Param("Circle Timeline Animation uses Motion Tween.".into())),
+        (false, _) => return Err(EngineError::Param("Choose Classic Tween or Hold Keyframes.".into())),
     };
     let start = s.frame;
     let duration = opt_u32(p, "duration")?.unwrap_or_else(|| crate::array_timeline_default_duration(s.doc.stage.fps, start));
@@ -112,58 +117,64 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     });
     let easing = ArrayEasing::parse(p)?;
     let origin = original.transform.translation();
-    let from = Vec2::new(opt_f32(p, "start_x")?.unwrap_or(origin.x), opt_f32(p, "start_y")?.unwrap_or(origin.y));
-    let to = Vec2::new(opt_f32(p, "end_x")?.unwrap_or(from.x), opt_f32(p, "end_y")?.unwrap_or(from.y));
-    let count = opt_u32(p, "count")?.unwrap_or(10);
-    let times = if classic {
-        classic_times(&stops, &easing, from != to)?
+    let keys = if circle {
+        let radial = parse_radial(p, origin)?;
+        vec![circle::keyframe(source, original, radial, &seed, &stops, &easing, duration)?]
     } else {
-        if !(1..=MAX_ARRAY_INSTANCES).contains(&count) {
-            return Err(EngineError::Param(format!("Hold Keyframes needs 1 to {MAX_ARRAY_INSTANCES} Array samples.")));
-        }
-        (0..count).map(|i| f64::from(i) / f64::from((count - 1).max(1))).collect()
-    };
-    let offsets = frame_offsets(&times, &stops, classic, start, duration)?;
-
-    let basis = original.transform.decompose();
-    let distribution = easing.eases_distribution(&stops);
-    let mut keys = Vec::with_capacity(times.len());
-    for (i, (&t, &offset)) in times.iter().zip(&offsets).enumerate() {
-        let progress = if distribution { easing.eased_position(&stops, t) } else { t };
-        let position = if progress == 0.0 {
-            from
-        } else if progress == 1.0 {
-            to
+        let from = Vec2::new(opt_f32(p, "start_x")?.unwrap_or(origin.x), opt_f32(p, "start_y")?.unwrap_or(origin.y));
+        let to = Vec2::new(opt_f32(p, "end_x")?.unwrap_or(from.x), opt_f32(p, "end_y")?.unwrap_or(from.y));
+        let count = opt_u32(p, "count")?.unwrap_or(10);
+        let times = if classic {
+            classic_times(&stops, &easing, from != to)?
         } else {
-            from.lerp(to, progress as f32)
+            if !(1..=MAX_ARRAY_INSTANCES).contains(&count) {
+                return Err(EngineError::Param(format!("Hold Keyframes needs 1 to {MAX_ARRAY_INSTANCES} Array samples.")));
+            }
+            (0..count).map(|i| f64::from(i) / f64::from((count - 1).max(1))).collect()
         };
-        let mut base = original.transform;
-        base.m[4] = position.x;
-        base.m[5] = position.y;
-        let stop = easing.properties(&stops, t as f32);
-        let adjusted = stop.source_transform(original.transform, basis);
-        let transform = keep_pivot(base, adjusted, original.pivot());
-        if !transform.is_finite() {
-            return Err(EngineError::Param("Array positions or transforms exceeded the finite coordinate range.".into()));
+        let offsets = frame_offsets(&times, &stops, classic, start, duration)?;
+
+        let basis = original.transform.decompose();
+        let distribution = easing.eases_distribution(&stops);
+        let mut keys = Vec::with_capacity(times.len());
+        for (i, (&t, &offset)) in times.iter().zip(&offsets).enumerate() {
+            let progress = if distribution { easing.eased_position(&stops, t) } else { t };
+            let position = if progress == 0.0 {
+                from
+            } else if progress == 1.0 {
+                to
+            } else {
+                from.lerp(to, progress as f32)
+            };
+            let mut base = original.transform;
+            base.m[4] = position.x;
+            base.m[5] = position.y;
+            let stop = easing.properties(&stops, t as f32);
+            let adjusted = stop.source_transform(original.transform, basis);
+            let transform = keep_pivot(base, adjusted, original.pivot());
+            if !transform.is_finite() {
+                return Err(EngineError::Param("Array positions or transforms exceeded the finite coordinate range.".into()));
+            }
+            let mut pose = posed_element(original, transform, Some(stop), Some(&seed), false);
+            if let Some(len) = graphic_length
+                && let ElementKind::Symbol { first_frame: first, .. } = &mut pose.kind
+            {
+                *first = loop_mode.local_frame(offset, first_frame, len);
+            }
+            let span = offsets.get(i + 1).copied().unwrap_or(duration) - offset;
+            let mut key = if i == 0 { (**source).clone() } else { Keyframe::new(start + offset, span) };
+            key.duration = span;
+            key.elements = vec![Arc::new(pose)];
+            if classic && let Some(&next) = times.get(i + 1) {
+                key.tween = Some(classic_tween(&stops, &easing, t as f32, next as f32));
+            }
+            keys.push(key);
         }
-        let mut pose = posed_element(original, transform, Some(stop), Some(&seed), false);
-        if let Some(len) = graphic_length
-            && let ElementKind::Symbol { first_frame: first, .. } = &mut pose.kind
-        {
-            *first = loop_mode.local_frame(offset, first_frame, len);
+        if classic {
+            validate_classic(&keys, &times, &stops)?;
         }
-        let span = offsets.get(i + 1).copied().unwrap_or(duration) - offset;
-        let mut key = if i == 0 { (**source).clone() } else { Keyframe::new(start + offset, span) };
-        key.duration = span;
-        key.elements = vec![Arc::new(pose)];
-        if classic && let Some(&next) = times.get(i + 1) {
-            key.tween = Some(classic_tween(&stops, &easing, t as f32, next as f32));
-        }
-        keys.push(key);
-    }
-    if classic {
-        validate_classic(&keys, &times, &stops)?;
-    }
+        keys
+    };
     let key_count = keys.len();
     let replacement = keys.into_iter().map(Arc::new).chain(tail);
     s.layer_mut(Some(layer_id))?.keyframes.splice(index..after, replacement);
@@ -236,10 +247,15 @@ fn frame_offsets(times: &[f64], stops: &[ArrayPropertyStop], classic: bool, star
     Err(EngineError::ArrayDuration { message: messages.join("\n"), suggested })
 }
 
-fn classic_times(stops: &[ArrayPropertyStop], easing: &ArrayEasing, moving: bool) -> Result<Vec<f64>> {
+fn property_times(stops: &[ArrayPropertyStop]) -> Vec<f64> {
     let mut times: Vec<_> = stops.iter().map(|stop| f64::from(stop.offset)).collect();
     if times.first() != Some(&0.0) { times.insert(0, 0.0); }
     if times.last() != Some(&1.0) { times.push(1.0); }
+    times
+}
+
+fn classic_times(stops: &[ArrayPropertyStop], easing: &ArrayEasing, moving: bool) -> Result<Vec<f64>> {
+    let times = property_times(stops);
     if times.len() > 2 && easing.mode == ArrayEaseMode::Global && easing.preset != Easing::Linear {
         let varies = stops.iter().zip(stops.iter().skip(1)).any(|(a, b)| {
             (easing.transform && (a.scale != b.scale || a.rotation != b.rotation))

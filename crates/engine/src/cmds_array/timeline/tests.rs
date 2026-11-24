@@ -1,6 +1,6 @@
 use super::*;
 use crate::format;
-use anicraft_doc::{ColorTransform, ElementId, Layer, MotionTween, evaluate_layer_elements};
+use anicraft_doc::{ColorTransform, ElementId, Layer, MotionTween, Rgba, evaluate_layer_elements};
 
 fn source() -> Session {
     let mut s = Session::default();
@@ -153,7 +153,7 @@ fn validation_keeps_the_live_preview_and_rejects_lossy_classic_conversions() {
         ("easing", json!({"preset": "QuadIn"}), "Global easing"),
         ("property_stops", json!([{"offset": 0}, {"offset": 1, "rotation": 360}]), "shortest rotation"),
         ("property_stops", json!([{"offset": 0}, {"offset": 0}]), "identical positions"),
-        ("mode", json!("radial"), "Linear Arrays only"),
+        ("mode", json!("grid"), "Linear and Circle Arrays only"),
     ] {
         let mut invalid = p.clone();
         invalid[key] = value;
@@ -237,4 +237,313 @@ fn duration_reports_synthetic_endpoints_coincident_stops_and_hold_samples() {
     assert!(matches!(hold, EngineError::ArrayDuration { suggested: Some(4), .. }));
     assert_eq!(array_timeline_default_duration(23.976, 0), 24);
     assert_eq!(array_timeline_default_duration(60.0, MAX_FRAME - 6), 7);
+}
+
+fn circle(sweep: f32) -> Value {
+    json!({"mode": "radial", "center_x": 421, "center_y": -289, "radius": 150,
+           "start_angle": 19, "sweep_angle": sweep, "duration": 49})
+}
+
+#[test]
+fn circle_motion_follows_signed_arcs_and_full_loops_at_fractional_frames() {
+    for sweep in [360.0, -360.0, 107.0, -173.0] {
+        let mut s = source();
+        let p = circle(sweep);
+        let expected = parse_radial(&p, Vec2::ZERO).unwrap();
+        let id = s.selection.first().unwrap().1;
+        s.execute("array.create_timeline", &p).unwrap();
+        let [key] = layer(&s).keyframes.as_slice() else { panic!("expected one Motion Tween span") };
+        assert_eq!(key.duration, 49);
+        assert!(key.tween.is_none());
+        let motion = key.motion.as_ref().unwrap();
+        assert_eq!(motion.target, id);
+        assert_eq!(motion.position_range(), Some((0, 48)));
+        assert_eq!(motion.tracks.len(), 2);
+        assert!(motion.pins.is_empty());
+        let path = motion.path.as_ref().unwrap();
+        assert!(path.cmds.iter().skip(1).all(|cmd| matches!(cmd, anicraft_geom::PathCmd::CubicTo(..))));
+        let walk = motion.on_path(&anicraft_doc::Props::of(key.elements.first().unwrap())).unwrap();
+        assert_eq!(walk.point(0.0), expected.point(0.0));
+        assert_eq!(walk.point(48.0), expected.point(1.0));
+        for i in 0..=512 {
+            let t = i as f32 / 512.0;
+            let at = walk.point(t * 48.0);
+            let error = at.distance(expected.point(f64::from(t)));
+            assert!(error < 0.01, "sweep {sweep}, t {t}, error {error}");
+            let radial_error = (at.distance(Vec2::new(421.0, -289.0)) - 150.0).abs();
+            assert!(radial_error < 0.0003, "sweep {sweep}, radial error {radial_error}");
+        }
+        assert!(walk.point(24.0).distance(walk.point(0.0)) > 100.0);
+        assert!(evaluate_layer_elements(layer(&s), 49).is_none());
+    }
+}
+
+#[test]
+fn circle_motion_preserves_the_matrix_and_custom_pivot_and_supports_signed_rotate() {
+    use anicraft_geom::{Affine, Vec2};
+    for (sweep, rotate, pivot) in [
+        (360.0, false, Some(Vec2::new(18.0, -9.0))),
+        (360.0, true, None),
+        (-360.0, true, Some(Vec2::ZERO)),
+    ] {
+        let mut s = source();
+        let key = s.layer_mut(None).unwrap().keyframe_mut(0).unwrap();
+        let base = Arc::make_mut(key.elements.first_mut().unwrap());
+        // Rotation-only paths keep the exact authored basis, including shear and reflection.
+        base.transform = Affine { m: [0.8, 0.3, -0.55, -1.7, 33.0, 12.0] };
+        assert!(base.set_pivot(pivot));
+        let original = base.clone();
+        let mut p = circle(sweep);
+        p["rotate"] = json!(rotate);
+        s.execute("array.create_timeline", &p).unwrap();
+        let path = parse_radial(&p, Vec2::ZERO).unwrap();
+        let end = at(&s, 48);
+        assert_eq!(at(&s, 0).transform.translation(), path.point(0.0));
+        assert_eq!(end.transform.translation(), path.point(1.0));
+        for f in 0..=48 {
+            let pose = at(&s, f);
+            assert_eq!(pose.pivot(), pivot);
+            let t = f as f32 / 48.0;
+            let want = if rotate { Affine::rotate((sweep * t).to_radians()).mul(&original.transform) } else { original.transform };
+            if !rotate {
+                assert_eq!(&pose.transform.m[..4], &original.transform.m[..4]);
+            }
+            for (a, b) in pose.transform.m[..4].iter().zip(want.m) {
+                near(*a, b);
+            }
+            assert!(pose.transform.translation().distance(path.point(f64::from(t))) < 0.01);
+        }
+        let motion = layer(&s).keyframes.first().unwrap().motion.as_ref().unwrap();
+        if rotate {
+            let keys = &motion.track(anicraft_doc::Property::Rotation).unwrap().keys;
+            near(keys.last().unwrap().value - keys.first().unwrap().value, sweep);
+        }
+        assert!(!motion.orient);
+    }
+}
+
+#[test]
+fn circle_commit_is_atomic_with_existing_classic_spans_and_a_native_editable_path() {
+    let mut s = source();
+    s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+    s.execute("element.set_filters", &json!({"filters": [
+        {"type": "blur", "blur_x": 7, "quality": 2},
+        {"type": "adjust_color", "hue": 42, "enabled": false}
+    ]})).unwrap();
+    let key = s.layer_mut(None).unwrap().keyframe_mut(0).unwrap();
+    Arc::make_mut(key.elements.first_mut().unwrap()).color = ColorEffect::Advanced(ColorTransform {
+        mul: [0.7, 0.8, 0.9, 0.4],
+        add: [0.1, 0.0, 0.05, 0.0],
+    });
+    let source = at(&s, 0);
+    let mut art = (*source).clone();
+    art.id = ElementId(s.doc.alloc_id());
+    let mut classic = Keyframe::new(53, 3);
+    classic.tween = Some(Tween::new(Easing::Linear, TweenKind::Classic));
+    let art = Arc::new(art);
+    classic.elements = vec![art.clone()];
+    let mut finish = Keyframe::new(56, 1);
+    finish.elements = vec![art];
+    let classic = Arc::new(classic);
+    let keys = &mut s.layer_mut(None).unwrap().keyframes;
+    keys.extend([classic.clone(), Arc::new(finish)]);
+    let initial = s.doc.clone();
+    let steps = s.history_len();
+
+    let mut params = circle(360.0);
+    params["count"] = json!(10);
+    s.preview_array(&params).unwrap();
+    let preview = s.doc.clone();
+    for (field, value, message) in [
+        ("duration", json!(54), "frame 54"),
+        ("closed_loop", json!(false), "Linear and Circle"),
+        ("sweep_angle", json!(361), "one revolution"),
+        ("sweep_angle", json!(0), "nonzero sweep"),
+        ("animation", json!("classic"), "uses Motion Tween"),
+        ("easing", json!({"preset": "QuadIn"}), "Linear Distribution"),
+        ("easing", json!({"mode": "per_segment", "preset": "QuadIn"}), "Linear Distribution"),
+    ] {
+        let mut invalid = params.clone();
+        invalid[field] = value;
+        let error = s.commit_array_timeline_preview(&invalid).unwrap_err().to_string();
+        assert!(error.contains(message), "{error}");
+        assert!(s.doc == preview && s.history_len() == steps && s.array_preview_active());
+    }
+    // A nonlinear preset for inactive Distribution does not change position.
+    params["easing"] = json!({"preset": "QuadIn", "distribution": false});
+    s.commit_array_timeline_preview(&params).unwrap();
+    assert_eq!(s.history_len(), steps + 1);
+    assert_eq!(s.selection.first().unwrap().1, source.id);
+    assert_eq!(s.doc.library.len(), initial.library.len());
+    for f in [0, 17, 48] {
+        let pose = at(&s, f);
+        assert_eq!(pose.id, source.id);
+        assert_eq!(pose.kind, source.kind);
+        assert_eq!(pose.color, source.color);
+    }
+    assert!(Arc::ptr_eq(&layer(&s).keyframes[1], &classic));
+    assert!(evaluate_layer_elements(layer(&s), 49).is_none());
+
+    let committed = s.doc.clone();
+    s.undo().unwrap();
+    assert!(s.doc == initial);
+    s.redo().unwrap();
+    assert!(s.doc == committed);
+    let mut reopened = Session::new(format::from_json(&format::to_json(&s.doc).unwrap()).unwrap());
+    assert_eq!(layer(&reopened).keyframes, layer(&s).keyframes);
+    reopened.execute("motion.set_path", &json!({"d": "M 0 0 C 20 0 20 20 40 20"})).unwrap();
+    assert_eq!(at(&reopened, 48).transform.translation(), Vec2::new(40.0, 20.0));
+}
+
+#[test]
+fn circle_rotating_an_offset_pivot_requires_an_explicit_change() {
+    let mut s = source();
+    let key = s.layer_mut(None).unwrap().keyframe_mut(0).unwrap();
+    assert!(Arc::make_mut(key.elements.first_mut().unwrap()).set_pivot(Some(Vec2::new(5.0, 8.0))));
+    let original = s.doc.clone();
+    let mut params = circle(-270.0);
+    params["rotate"] = json!(true);
+    let error = s.execute("array.create_timeline", &params).unwrap_err().to_string();
+    assert!(error.contains("offset transformation point"), "{error}");
+    assert!(s.doc == original);
+}
+
+#[test]
+fn circle_motion_tracks_match_the_spatial_sampler_with_independent_eases_and_rotate() {
+    use anicraft_doc::Property;
+    use anicraft_geom::Affine;
+
+    for sweep in [360.0, -360.0] {
+        let mut s = source();
+        s.execute("symbol.set_kind", &json!({"kind":"movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters":[{"type":"blur","blur_x":3,"quality":2}]})).unwrap();
+        let mut p = circle(sweep);
+        p["count"] = json!(48);
+        p["source_values"] = json!(true);
+        p["rotate"] = json!(true);
+        p["easing"] = json!({"mode":"per_segment","distribution":false,"colour_effect":false});
+        p["property_stops"] = json!([
+            {"offset":0, "scale_x":1, "scale_y":1, "rotation":0, "alpha":1, "outbound_ease":"QuadIn",
+             "color_effect":ColorEffect::Tint {amount:0.2,color:Rgba::hex(0x2299ff)}, "filters":[{"type":"blur","blur_x":3}]},
+            {"offset":0.5, "scale_x":2, "scale_y":0.8, "rotation":45, "alpha":0.5, "outbound_ease":"QuadOut",
+             "color_effect":ColorEffect::Tint {amount:0.6,color:Rgba::hex(0xcc1133)}, "filters":[{"type":"blur","blur_x":19}]},
+            {"offset":1, "scale_x":0.5, "scale_y":1.6, "rotation":90, "alpha":1,
+             "color_effect":ColorEffect::Tint {amount:0.3,color:Rgba::hex(0x777733)}, "filters":[{"type":"blur","blur_x":5}]}
+        ]);
+        s.preview_array(&p).unwrap();
+        let reference: Vec<_> = s.selected_elements().into_iter().map(|(_, element)| element).collect();
+        s.commit_array_timeline_preview(&p).unwrap();
+        for (frame, want) in (0..48).zip(reference) {
+            let got = at(&s, frame);
+            assert!(got.transform.translation().distance(want.transform.translation()) < 0.01);
+            let mut comparable = (*got).clone();
+            comparable.transform.m[4] = want.transform.m[4];
+            comparable.transform.m[5] = want.transform.m[5];
+            compare_pose(&comparable, &want);
+        }
+        let mid = at(&s, 12);
+        near(mid.transform.decompose().sx, 1.25);
+        near(mid.color.alpha(), 0.75);
+        let finish = at(&s, 48);
+        near(finish.color.alpha(), 1.0);
+        let expected = Affine::rotate((sweep + 90.0).to_radians()).mul(&Affine::scale(0.5, 1.6));
+        for (a, b) in finish.transform.m[..4].iter().zip(expected.m) { near(*a, b); }
+        let motion = layer(&s).keyframes.first().unwrap().motion.as_ref().unwrap();
+        for property in [Property::ScaleX, Property::ScaleY, Property::Rotation, Property::Alpha, Property::TintRed] {
+            let track = motion.track(property).unwrap();
+            assert_eq!(track.keys.iter().map(|k| k.frame).collect::<Vec<_>>(), [0, 24, 48]);
+        }
+        assert_eq!(motion.track(Property::X).unwrap().keys.len(), 2);
+        assert_eq!(motion.track(Property::Y).unwrap().keys.len(), 2);
+        let saved = format::to_json(&s.doc).unwrap();
+        let mut reopened = Session::new(format::from_json(&saved).unwrap());
+        compare_pose(&at(&s, 12), &at(&reopened, 12));
+        let point = at(&reopened, 24).transform.translation();
+        reopened.execute("motion.set_key", &json!({"property":"scale_x","frame":24,"value":150})).unwrap();
+        near(at(&reopened, 24).transform.decompose().sx, 1.5);
+        assert_eq!(at(&reopened, 24).transform.translation(), point);
+    }
+}
+
+#[test]
+fn circle_property_duration_suggestions_and_incompatible_eases_keep_the_preview() {
+    let mut s = source();
+    let mut p = circle(360.0);
+    p["property_stops"] = json!([{"offset":0},{"offset":0.5,"alpha":0.4},{"offset":1}]);
+    let original = s.doc.clone();
+    let steps = s.history_len();
+    s.preview_array(&p).unwrap();
+    let preview = s.doc.clone();
+    for (field, value, error) in [
+        ("easing", json!({"distribution":false,"preset":"QuadIn"}), "Per Segment"),
+        ("easing", json!({"distribution":false,"mode":"per_segment","preset":"BackOut"}), "overshoot"),
+    ] {
+        let mut invalid = p.clone();
+        invalid[field] = value;
+        assert!(s.commit_array_timeline_preview(&invalid).unwrap_err().to_string().contains(error));
+        assert!(s.doc == preview && s.array_preview_active());
+    }
+    p["duration"] = json!(2);
+    let error = s.commit_array_timeline_preview(&p).unwrap_err();
+    let EngineError::ArrayDuration { suggested: Some(frames), .. } = error else { panic!("expected a duration suggestion") };
+    assert_eq!(frames, 3);
+    assert!(s.doc == preview && s.history_len() == steps && s.array_preview_active());
+    p["duration"] = json!(frames);
+    s.commit_array_timeline_preview(&p).unwrap();
+    near(at(&s, 1).color.alpha(), 0.4);
+    let animation = s.doc.clone();
+    assert_eq!(s.history_len(), steps + 1);
+    s.undo().unwrap();
+    assert!(s.doc == original);
+    s.redo().unwrap();
+    assert!(s.doc == animation);
+}
+
+#[test]
+fn circle_gradient_channels_animate_with_constant_ramp_structure_and_short_filter_angles() {
+    use anicraft_doc::{Filter, FilterProp, Property};
+
+    let mut s = source();
+    s.execute("symbol.set_kind", &json!({"kind":"movie_clip"})).unwrap();
+    let gradient = |offset: f32, color: Rgba, angle| json!({"type":"gradient_glow","angle":angle,
+        "stops":[{"offset":0,"color":Rgba::WHITE.with_alpha(0.0)}, {"offset":offset,"color":color}]});
+    let from = gradient(1.0, Rgba::hex(0xff0000), 350);
+    let to = gradient(1.0, Rgba::hex(0x0000ff), 10);
+    s.execute("element.set_filters", &json!({"filters":[from]})).unwrap();
+    let mut p = circle(-90.0);
+    p["property_stops"] = json!([{"offset":0}, {"offset":1,"filters":[to]}]);
+    let mut invalid = p.clone();
+    invalid["property_stops"] = json!([{"offset":0}, {"offset":1,"filters":[gradient(0.75, Rgba::hex(0x0000ff), 10)]}]);
+    let error = s.execute("array.create_timeline", &invalid).unwrap_err();
+    assert!(error.to_string().contains("untracked settings"), "{error}");
+    s.execute("array.create_timeline", &p).unwrap();
+    let middle = at(&s, 24);
+    let [entry] = middle.kind.filters().unwrap() else { panic!("expected the original filter slot") };
+    let Filter::GradientGlow { angle, stops, .. } = entry.filter.sanitized() else { panic!("expected Gradient Glow") };
+    near(angle, 0.0);
+    let end = stops.last().unwrap();
+    near(end.offset, 1.0);
+    near(end.color.r, 0.5);
+    near(end.color.b, 0.5);
+    let motion = layer(&s).keyframes.first().unwrap().motion.as_ref().unwrap();
+    let unwrapped = motion.track(Property::Filter(FilterProp { slot: 0, param: FilterParam::Angle })).unwrap();
+    near(unwrapped.keys.last().unwrap().value, 370.0);
+}
+
+#[test]
+fn circle_motion_can_scale_the_axis_perpendicular_to_an_offset_pivot() {
+    let mut s = source();
+    let pivot = Vec2::new(0.0, 15.0);
+    let key = s.layer_mut(None).unwrap().keyframe_mut(0).unwrap();
+    assert!(Arc::make_mut(key.elements.first_mut().unwrap()).set_pivot(Some(pivot)));
+    let mut p = circle(107.0);
+    p["property_stops"] = json!([{"offset":0}, {"offset":1,"scale_x":2,"scale_y":2}]);
+    assert!(s.execute("array.create_timeline", &p).unwrap_err().to_string().contains("offset transformation point"));
+    p["property_stops"] = json!([{"offset":0}, {"offset":1,"scale_x":2}]);
+    s.execute("array.create_timeline", &p).unwrap();
+    let pose = at(&s, 24);
+    let expected = parse_radial(&p, Vec2::ZERO).unwrap().point(0.5);
+    near(pose.transform.decompose().sx, 1.5);
+    assert_eq!(pose.pivot(), Some(pivot));
+    assert!(pose.transform.translation().distance(expected) < 0.01);
 }

@@ -430,10 +430,10 @@ commits the existing preview. **Create Unique Symbols**
 is only shown for Spatial Array. The output choice is part of the Array draft
 and participates in Array Undo/Redo.
 
-**Timeline Animation** is available for Linear Arrays in Milestone 1. The
+**Timeline Animation** is available for Linear and Circle Arrays. The
 **Create Timeline Animation** dialog edits duration in frames, shows seconds
-from the document FPS, starts at one second rounded to whole frames, and offers **Classic Tween** (default) or **Hold
-Keyframes**. The preview stays spatial until commit. Cancelling the dialog
+from the document FPS, and starts at one second rounded to whole frames. Linear
+uses **Classic Tween** (default) or **Hold Keyframes**. Circle uses **Motion Tween**. The preview stays spatial until commit. Cancelling the dialog
 keeps the preview, property stops, and Array history. The dialog remembers the
 entered duration if reopened within the same Array session.
 
@@ -462,6 +462,44 @@ overshoot, long rotations and wrapped filter angles, certain combined Colour
 Effect and Alpha transitions, and collapsed or sign-changing animated scales.
 Linear position can overshoot within one native span. Hold samples support the
 full Linear Array property and easing evaluation.
+
+### Circle motion paths
+
+Circle produces one native Motion Tween span on the original layer, independent
+of the spatial instance count. It follows the authored Start, radius and signed
+sweep through up to one complete turn. Equal angular arcs of at most 30° are
+converted to tangent-matched cubic Béziers with radial error below 0.00004% of
+the radius before single-precision coordinate rounding. The native path walker
+uses arc length to give linear pacing from the first to the last frame.
+For a full revolution, the first and last positions coincide and the native
+walker uses elapsed time to travel the entire path. The stage's Motion Path
+tools can edit the resulting anchors and handles.
+
+Circle requires Linear Distribution. Authored property stops map to native
+Motion Editor keys at their rounded frame positions, with held values out to
+any missing endpoint. Duration collisions use **Use N frames**. The path's
+position keys stay independent of these property keys. Scale, rotation,
+alpha, supported Colour Effects, and existing filter-slot parameters can vary.
+Per Segment easing maps to the respective Transform, Colour Effect, and
+Filters tracks. Nonlinear Global easing across interior stops and overshoot
+on bounded properties are unavailable.
+
+Native colour tracks support Alpha, Brightness, Tint, and Advanced channels.
+Mixed styles use Advanced where the interpolation can be represented exactly.
+Filter tracks support numeric values, colours including gradient ramp colours,
+and native stepped quality and switches. Constant settings stay on the
+original filter stack. Varying gradient ramp offsets and bevel type are
+unavailable. Filter angles retain shortest-arc travel using unwrapped keys.
+
+**Rotate** adds signed sweep rotation to the authored stop rotation. Compatible
+nonlinear rotation segments combine the two contributions into an editable
+native ease curve. Incompatible combinations are rejected. Scale tracks
+cannot reach or cross zero. With an offset transformation point, Circle
+supports translation and scaling that leaves that point's registration
+relationship unchanged. Rotation with an offset transformation point and
+transform stops that shift registration away from the path are unavailable.
+Circle requires a nonzero sweep and a positive radius within the native path
+range.
 
 ## Create Unique Symbols
 
@@ -505,9 +543,8 @@ their arrow-key behavior while focused.
 
 ### Further Array to Timeline outputs
 
-Linear conversion is available in [Commit output](#commit-output). Future work
-can use native Motion Tweens for editable curved trajectories in Circle, Spiral,
-and Path Arrays. Grid traversal order is undecided. Sequential reveal and
+Linear and Circle conversion are available in [Commit output](#commit-output).
+Future work can use native Motion Tweens for Spiral and Path Arrays. Grid traversal order is undecided. Sequential reveal and
 staggered animation starts across multiple instances or unique Symbols remain
 deferred.
 
@@ -578,6 +615,7 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
 22. Staggered Grid offsets with independent row and column vectors and shared accumulation.
 23. Shared Create Unique Symbols Commit option with independent timelines and collision-safe names.
 24. Linear Array to Timeline, using native Classic Tween and Hold Keyframes with a shared Commit As selection.
+25. Circle Array to Timeline with editable native Motion Tween paths, including full signed revolutions.
 
 Later: Keyboard nudging, Path/node placement, more stop properties,
 custom easing, Chaos, multi-selection, and optional grouping/merging.
