@@ -12,7 +12,8 @@
 //! that the registration point travels along by arc length. The X/Y curves then decide only
 //! *when* it gets where: the share of the way along the path at a frame is the share of the
 //! distance the X/Y curves have covered by then. With *orient to path* the object also turns
-//! as the path turns. Without a path the X/Y curves place the object, as before.
+//! as the path turns. Explicit path timing can supply normalized progress in place of the
+//! X/Y chord measurements. Without a path the X/Y curves place the object, as before.
 //!
 //! Anchors of the path may be *pinned* to frames (ADR 0049): the object passes a pinned anchor
 //! exactly on its frame, and the X/Y keys there hold the anchor's place. The ends are always
@@ -30,6 +31,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 mod retime;
+mod timing;
+use timing::PathTiming;
 pub use retime::KeyRef;
 
 /// Most keys one track keeps (files and commands alike).
@@ -550,6 +553,7 @@ pub struct MotionTween {
     /// [`motion_path`]). Its ends are the start and end positions; the X/Y curves give the
     /// timing along it.
     pub path: Option<Path>,
+    path_timing: Option<PathTiming>,
     /// Orient to path: the object turns as the path turns (relative to its turn at the start).
     pub orient: bool,
     /// Anchors between the ends pinned to frames (ADR 0049), by frame; both frames and anchors
@@ -572,6 +576,8 @@ struct TweenFile {
     filter_tracks: Vec<Track>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<Path>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path_timing: Option<PathTiming>,
     #[serde(default, skip_serializing_if = "is_false")]
     orient: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -584,14 +590,14 @@ impl From<TweenFile> for MotionTween {
     fn from(f: TweenFile) -> MotionTween {
         let mut tracks = f.tracks;
         tracks.extend(f.filter_tracks);
-        MotionTween { target: f.target, tracks, path: f.path, orient: f.orient, pins: f.pins, keep_area: f.keep_area }
+        MotionTween { target: f.target, tracks, path: f.path, path_timing: f.path_timing, orient: f.orient, pins: f.pins, keep_area: f.keep_area }
     }
 }
 
 impl From<MotionTween> for TweenFile {
     fn from(m: MotionTween) -> TweenFile {
         let (filter_tracks, tracks) = m.tracks.into_iter().partition(|t| t.property.is_filter());
-        TweenFile { target: m.target, tracks, filter_tracks, path: m.path, orient: m.orient, pins: m.pins, keep_area: m.keep_area }
+        TweenFile { target: m.target, tracks, filter_tracks, path: m.path, path_timing: m.path_timing, orient: m.orient, pins: m.pins, keep_area: m.keep_area }
     }
 }
 
@@ -708,6 +714,13 @@ impl OnPath<'_> {
         let leg = self.stations.partition_point(|st| st.0 <= i).saturating_sub(1);
         let (Some(&(ka, sa)), Some(&(kb, sb))) = (self.stations.get(leg), self.stations.get(leg + 1)) else { return l };
         let (Some(a), Some(b), Some(fa), Some(fb)) = (self.keys.get(i), self.keys.get(i + 1), self.keys.get(ka), self.keys.get(kb)) else { return l };
+        if let Some(timing) = &self.tween.path_timing {
+            let progress = |at: f32| timing.progress((at - first.0) / (last.0 - first.0));
+            let (p0, p1) = (progress(fa.0), progress(fb.0));
+            // Pins still fix the path distance on their own frames.
+            let p = if p1 > p0 { (progress(frame) - p0) / (p1 - p0) } else { (frame - fa.0) / (fb.0 - fa.0) };
+            return sa + p * (sb - sa);
+        }
         let c0 = self.cum.get(ka).copied().unwrap_or(0.0);
         let total = self.cum.get(kb).copied().unwrap_or(0.0) - c0;
         let p = if total <= 1e-4 {
@@ -735,6 +748,11 @@ impl OnPath<'_> {
         }
     }
 
+    /// Signed rotation driven by arc-length progress, separate from the Rotation track.
+    fn path_rotation(&self, frame: f32) -> f32 {
+        self.tween.path_timing.as_ref().map_or(0.0, |timing| timing.rotation(self.progress(frame)))
+    }
+
     /// How far the path has turned at `frame` since its start, degrees clockwise on screen
     /// (within ±180).
     pub fn turn(&self, frame: f32) -> f32 {
@@ -747,7 +765,24 @@ impl OnPath<'_> {
 
 impl MotionTween {
     pub fn new(target: ElementId) -> MotionTween {
-        MotionTween { target, tracks: Vec::new(), path: None, orient: false, pins: Vec::new(), keep_area: false }
+        MotionTween { target, tracks: Vec::new(), path: None, path_timing: None, orient: false, pins: Vec::new(), keep_area: false }
+    }
+
+    /// Use an explicit monotonic path timing curve. Each segment starts at the same
+    /// normalized time and distance. The last segment ends at 1. A signed turn, in
+    /// degrees, follows path progress independently of the target's Rotation track.
+    pub fn set_path_timing(&mut self, segments: Vec<(f32, Easing)>, turn: f32) -> bool {
+        if self.path.is_none() {
+            return false;
+        }
+        let Some(timing) = PathTiming::new(segments, turn) else { return false };
+        self.path_timing = Some(timing);
+        true
+    }
+
+    /// Remove explicit timing when removing the path.
+    pub fn clear_path_timing(&mut self) {
+        self.path_timing = None;
     }
 
     /// The first and last frames holding an X or Y key.
@@ -1316,6 +1351,18 @@ impl MotionTween {
                 el.transform = m;
             }
         }
+        if let Some(op) = &on_path {
+            let angle = op.path_rotation(frame);
+            if angle != 0.0 {
+                let at = el.transform.translation();
+                let mut turned = Affine::rotate(angle.to_radians()).mul(&el.transform);
+                turned.m[4] = at.x;
+                turned.m[5] = at.y;
+                if turned.is_finite() {
+                    el.transform = turned;
+                }
+            }
+        }
         // Colour: the styles keyed here and the target's own, composed (ADR 0056).
         if self.tracks.iter().any(|t| t.property.style().is_some()) {
             el.color = props.color_effect(&self.colour_styles(&base.color));
@@ -1408,7 +1455,7 @@ impl MotionTween {
                 Some(Track { property: t.property, keys })
             })
             .collect();
-        let mut tail = MotionTween { target: self.target, tracks, path: None, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area };
+        let mut tail = MotionTween { target: self.target, tracks, path: None, path_timing: None, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area };
         let Some(op) = self.on_path(base) else { return tail };
         let f = frame as f32;
         match op.walk().tail(op.distance(f)) {
@@ -1418,6 +1465,10 @@ impl MotionTween {
                 let (cmd, _) = op.walk().locate(op.distance(f));
                 tail.pins = self.live_pins().into_iter().filter(|q| q.frame > frame && q.anchor as usize >= cmd).map(|q| Pin { frame: q.frame - frame, anchor: q.anchor + 1 - cmd as u32 }).collect();
                 tail.path = Some(p);
+                if let Some((a, b)) = self.position_range().filter(|(a, b)| a < b) {
+                    let time = (f - a as f32) / (b - a) as f32;
+                    tail.path_timing = self.path_timing.as_ref().and_then(|timing| timing.tail(time, op.progress(f)));
+                }
             }
             // Past the path's end: the object holds where the path ended.
             None => {
@@ -1428,10 +1479,8 @@ impl MotionTween {
             }
         }
         // What the path has turned the object so far, the second half starts from.
-        if self.orient
-            && let Some(t) = tail.track_mut(Property::Rotation)
-        {
-            let turn = op.turn(f);
+        let turn = op.path_rotation(f) + if self.orient { op.turn(f) } else { 0.0 };
+        if turn != 0.0 && let Some(t) = tail.track_mut(Property::Rotation) {
             for k in &mut t.keys {
                 k.value = Property::Rotation.clamp(k.value + turn);
             }
@@ -1461,6 +1510,7 @@ impl MotionTween {
     /// duplicate or empty tracks).
     pub fn is_sane(&self) -> bool {
         self.path.as_ref().is_none_or(|p| motion_path(p).as_ref() == Some(p))
+            && self.path_timing.as_ref().is_none_or(|t| self.path.is_some() && t.is_sane())
             && self.pins == self.live_pins()
             && self.tracks.iter().all(|t| !t.keys.is_empty() && t.is_sane()) && self.tracks.windows(2).all(|w| matches!(w, [a, b] if a.property.index() < b.property.index()))
     }
@@ -1468,6 +1518,9 @@ impl MotionTween {
     /// Repairs a loaded tween.
     pub fn sanitize(&mut self) {
         self.path = self.path.as_ref().and_then(motion_path);
+        if self.path.is_none() || self.path_timing.as_ref().is_some_and(|t| !t.is_sane()) {
+            self.path_timing = None;
+        }
         for t in &mut self.tracks {
             t.sanitize();
         }
@@ -1726,6 +1779,26 @@ mod tests {
         let mut m = MotionTween::new(ElementId(1));
         m.tracks = vec![track(Property::X, &[(0, 0.0, ease.clone()), (20, 100.0, Easing::Linear)]), track(Property::Y, &[(0, 0.0, ease), (20, 100.0, Easing::Linear)])];
         m
+    }
+
+    #[test]
+    fn a_split_path_retains_the_remaining_explicit_timing_and_turn() {
+        let base = el(1, 0.0, 0.0);
+        let props = Props::of(&base);
+        let mut motion = MotionTween::new(base.id);
+        assert!(motion.set_path(&s_path(), &props, 48));
+        assert!(motion.set_path_timing(vec![(0.0, Easing::QuadIn), (0.5, Easing::CubicOut)], -360.0));
+        let cut = 17;
+        let tail = motion.split_at(&props, cut);
+        let pose = motion.apply(&base, cut as f32);
+        for frame in [cut, 20, 24, 35, 48] {
+            let original = motion.apply(&base, frame as f32);
+            let split = tail.apply(&pose, (frame - cut) as f32);
+            assert!(original.transform.translation().distance(split.transform.translation()) < 0.05);
+            for (a, b) in original.transform.m[..4].iter().zip(&split.transform.m[..4]) {
+                assert!((a - b).abs() < 0.001, "frame {frame}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]

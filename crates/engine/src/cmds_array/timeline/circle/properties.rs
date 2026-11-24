@@ -28,7 +28,9 @@ pub(super) fn write(
     let filters = authored.iter().map(&pose).any(|p| p.kind.filters() != base.kind.filters());
     let duration = span.end - span.start;
     let last = duration - 1;
-    let sweep = if radial.rotate { radial.sweep } else { 0.0 };
+    // Explicit path timing drives the Circle turn separately from authored Rotation keys.
+    let keyed_turn = radial.rotate && !easing.eases_distribution(authored);
+    let sweep = if keyed_turn { radial.sweep } else { 0.0 };
     let props = Props::of(base);
 
     let pivot = base.pivot().unwrap_or(Vec2::ZERO);
@@ -44,7 +46,7 @@ pub(super) fn write(
     }
 
     if !(scales || rotation || colours || filters) {
-        if radial.rotate {
+        if keyed_turn {
             let angle = props.get(Property::Rotation);
             motion.set_key(Property::Rotation, 0, angle, angle);
             motion.set_key(Property::Rotation, last, angle + sweep, angle);
@@ -90,7 +92,7 @@ pub(super) fn write(
         let angle = props.get(Property::Rotation);
         let own: Vec<_> = stops.iter().map(|s| s.rotation - first.rotation).collect();
         tracks.rotation(angle, &own, sweep, last, easing.transform)?;
-    } else if radial.rotate {
+    } else if keyed_turn {
         let angle = props.get(Property::Rotation);
         motion_keys(tracks.motion, Property::Rotation, angle, &[0, last], &[angle, angle + sweep], &[])?;
     }

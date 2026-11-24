@@ -2,7 +2,7 @@
 
 mod properties;
 
-use super::super::{ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution, keep_pivot, posed_element};
+use super::super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution, keep_pivot, posed_element};
 use crate::{EngineError, Result};
 use anicraft_doc::{Element, Keyframe, MotionTween, Props};
 use anicraft_geom::{Path, PathCmd, Vec2};
@@ -46,10 +46,6 @@ pub(super) fn keyframe(
     if radial.radius == 0.0 || radial.sweep == 0.0 {
         return Err(EngineError::Param("Circle Timeline Animation needs a positive radius and a nonzero sweep.".into()));
     }
-    if easing.eases_distribution(stops) {
-        return Err(EngineError::Param("Circle Motion Tween needs Linear Distribution. Set the Distribution ease to Linear or turn off Distribution easing.".into()));
-    }
-
     let basis = original.transform.decompose();
     let pose = |stop: &ArrayPropertyStop| {
         let mut base = original.transform;
@@ -68,11 +64,28 @@ pub(super) fn keyframe(
     let base = Props::of(&element);
     let mut motion = MotionTween::new(element.id);
     let last = duration - 1;
-    // Native Motion Tween seeds the two position keys. Its arc-length evaluator
-    // advances by elapsed time when the endpoint chord is zero, including a full
-    // loop. Adding timing keys at rounded frames would change that even pacing.
+    // X/Y keys anchor the original path. Distribution timing uses normalized
+    // authored stop positions, independent of rounding the property keys.
     if !motion.set_path(&path(radial), &base, last) {
         return Err(EngineError::Param("The Circle is too small or its control points exceed the native motion path range.".into()));
+    }
+    if easing.eases_distribution(stops) {
+        let segments = match easing.mode {
+            ArrayEaseMode::Global => vec![(0.0, easing.preset.clone())],
+            ArrayEaseMode::PerSegment => super::property_times(stops)
+                .into_iter()
+                .map(|time| time as f32)
+                .take_while(|&time| time < 1.0)
+                .map(|time| {
+                    let next = stops.partition_point(|stop| stop.offset <= time);
+                    (time, easing.distribution_segment(stops, next).clone())
+                })
+                .collect(),
+        };
+        let turn = if radial.rotate { radial.sweep } else { 0.0 };
+        if !motion.set_path_timing(segments, turn) {
+            return Err(EngineError::Param("Circle Distribution needs monotonic easing. Back, Bounce and Elastic overshoot or reverse along the path.".into()));
+        }
     }
     properties::write(&mut motion, &element, radial, stops, easing, source.start..source.start + duration, pose)?;
     let mut key = source.clone();

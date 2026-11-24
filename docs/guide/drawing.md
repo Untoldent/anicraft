@@ -680,16 +680,22 @@ For a **Radial › Circle** Array, choose **Timeline Animation** to create one
 native **Motion Tween**. You can use either sweep direction and a partial arc
 or a full 360° loop. The Symbol reaches End on the final exposure frame, even
 when it coincides with Start. Edit the generated curve with AniCraft's ordinary
-Motion Path tools. Keep Distribution Linear. Property stops can animate
-scale, rotation, alpha, supported colour effects, and parameters of the
-existing filters. Open **Motion Editor** to edit the generated property keys
+Motion Path tools. To ease movement along the path, enable **Distribution**
+in **Easing** and use a monotonic preset such as Quad, Cubic, Quart, Quint,
+Sine, or Circ. **Global** eases the whole path. **Per Segment** eases between
+successive stop positions. Back, Bounce, and Elastic cannot ease Distribution
+because they overshoot or reverse direction. Property stops keep their timing
+and can animate scale, rotation, alpha, supported colour effects, and parameters
+of the existing filters. Open **Motion Editor** to edit the generated property keys
 and their Per Segment easing independently of the path. **Use N frames**
 resolves stops that land on the same frame.
 
 Constant filter settings carry over. Filter ramp positions and bevel type
 must stay constant. Nonlinear Global easing across intermediate stops and
-some mixed colour effects or overshoots are unavailable. **Rotate** combines
-the signed sweep with the Rotation keys where the ease is compatible. Turn
+some mixed colour effects or overshoots are unavailable. With nonlinear
+Distribution, **Rotate** follows path progress and the Rotation keys add their
+own rotation. With Linear Distribution, **Rotate** combines both where the
+ease is compatible. Turn
 Rotate off for an offset transformation point, and use transforms that keep
 registration on the path. Spiral and Grid Timeline Animation remain planned.
 

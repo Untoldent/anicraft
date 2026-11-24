@@ -15,7 +15,7 @@ one symbol instance, with a neutral track for Transform and Colour Effect stops.
 when its dock tab is hidden or closed. Spatial Array commits the preview in one undo step and
 resets the next Array to defaults at its source symbol. Linear Arrays can also commit one
 Symbol instance to native Classic Tween or Hold Keyframes, beginning at the playhead.
-Circle Arrays can commit one native Motion Tween with an editable Bézier path.
+Circle Arrays can commit one native Motion Tween with an editable Bézier path, eased path timing, and animated property stops.
 Spiral and arbitrary Path conversion remain planned. Cancel, Escape and None retain the unfinished
 configuration while the original instance stays selected. Spatial Array can give each
 instance its own Symbol definition and timeline in the same undo step. The selected-stop card has draggable

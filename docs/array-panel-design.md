@@ -470,12 +470,20 @@ of the spatial instance count. It follows the authored Start, radius and signed
 sweep through up to one complete turn. Equal angular arcs of at most 30° are
 converted to tangent-matched cubic Béziers with radial error below 0.00004% of
 the radius before single-precision coordinate rounding. The native path walker
-uses arc length to give linear pacing from the first to the last frame.
-For a full revolution, the first and last positions coincide and the native
-walker uses elapsed time to travel the entire path. The stage's Motion Path
-tools can edit the resulting anchors and handles.
+uses arc length to traverse the path including full revolutions, where the
+first and last positions coincide. The stage's Motion Path tools can edit
+the anchors and handles without changing the authored timing.
 
-Circle requires Linear Distribution. Authored property stops map to native
+Distribution can remain Linear or use a monotonic preset (Quad, Cubic,
+Quart, Quint, Sine, or Circ). Global easing maps elapsed time to distance
+over the whole path. Per Segment easing uses each stop's outbound ease
+and its exact normalized time as a distance boundary, including the same
+end margins as the spatial Array. The native Motion Tween saves this
+timing separately from the curve, property keys, and their easing.
+Back, Bounce, and Elastic are rejected for Distribution because they
+overshoot or reverse direction. There is no separate path timing editor.
+
+Authored property stops map to native
 Motion Editor keys at their rounded frame positions, with held values out to
 any missing endpoint. Duration collisions use **Use N frames**. The path's
 position keys stay independent of these property keys. Scale, rotation,
@@ -491,9 +499,11 @@ and native stepped quality and switches. Constant settings stay on the
 original filter stack. Varying gradient ramp offsets and bevel type are
 unavailable. Filter angles retain shortest-arc travel using unwrapped keys.
 
-**Rotate** adds signed sweep rotation to the authored stop rotation. Compatible
-nonlinear rotation segments combine the two contributions into an editable
-native ease curve. Incompatible combinations are rejected. Scale tracks
+**Rotate** adds signed sweep rotation to the authored stop rotation. With
+nonlinear Distribution, the signed sweep follows eased path distance while
+stop rotation keeps its own native keys and easing. With Linear Distribution,
+compatible nonlinear rotation segments combine the two contributions into an
+editable native ease curve. Scale tracks
 cannot reach or cross zero. With an offset transformation point, Circle
 supports translation and scaling that leaves that point's registration
 relationship unchanged. Rotation with an offset transformation point and

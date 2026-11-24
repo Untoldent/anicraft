@@ -107,10 +107,17 @@ impl ArrayEasing {
         if span <= f32::EPSILON || progress == a {
             return t;
         }
-        let outbound = left.filter(|_| right.is_some()).and_then(|stop| stop.outbound.as_ref())
-            .unwrap_or_else(|| self.segment_default(stops));
+        let outbound = self.distribution_segment(stops, next);
         if *outbound == Easing::Linear { return t; }
         f64::from(a + span * outbound.apply((progress - a) / span))
+    }
+
+    fn distribution_segment<'a>(&'a self, stops: &'a [ArrayPropertyStop], next: usize) -> &'a Easing {
+        next.checked_sub(1)
+            .filter(|_| next < stops.len())
+            .and_then(|i| stops.get(i))
+            .and_then(|stop| stop.outbound.as_ref())
+            .unwrap_or_else(|| self.segment_default(stops))
     }
 
     fn properties(&self, stops: &[ArrayPropertyStop], t: f32) -> ArrayPropertyStop {

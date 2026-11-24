@@ -226,7 +226,7 @@ impl MotionTween {
             keys.truncate(super::MAX_KEYS);
             tracks.push(Track { property: p, keys });
         }
-        Some(MotionTween { target: self.target, tracks, path: None, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area })
+        Some(MotionTween { target: self.target, tracks, path: None, path_timing: None, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area })
     }
 }
 
