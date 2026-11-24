@@ -217,7 +217,16 @@ impl RadialDistribution {
         [x + dx * turns, y + dy * turns]
     }
 
+    fn has_spiral_geometry(self) -> bool {
+        !self.closed_loop && (self.spiral_offset != 0.0 || self.centre_drift != [0.0; 2])
+    }
+
     pub fn point(self, fraction: f64) -> Vec2 {
+        let [x, y] = self.point_f64(fraction);
+        Vec2::new(x as f32, y as f32)
+    }
+
+    fn point_f64(self, fraction: f64) -> [f64; 2] {
         let travel = self.travel(fraction);
         let turns = travel.abs() / f64::from(CLOSED_SWEEP_LIMIT);
         // Reduce whole turns before adding the start angle so the seam is exact.
@@ -225,7 +234,7 @@ impl RadialDistribution {
         let (sin, cos) = angle.to_radians().sin_cos();
         let r = self.radius_after_turns(turns);
         let [x, y] = self.centre_after_turns(turns);
-        Vec2::new((x + r * cos) as f32, (y + r * sin) as f32)
+        [x + r * cos, y + r * sin]
     }
 }
 

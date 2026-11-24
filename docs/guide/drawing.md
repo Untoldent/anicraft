@@ -697,7 +697,17 @@ Distribution, **Rotate** follows path progress and the Rotation keys add their
 own rotation. With Linear Distribution, **Rotate** combines both where the
 ease is compatible. Turn
 Rotate off for an offset transformation point, and use transforms that keep
-registration on the path. Spiral and Grid Timeline Animation remain planned.
+registration on the path.
+
+For **Radial › Spiral**, choose **Timeline Animation** to follow one signed sweep
+of up to 360°. **Spiral Offset** changes the radius and **Centre Drift X/Y** moves
+the centre per turn. Both can be used together. Keep Distribution Linear or
+turn off Distribution easing. The Symbol follows the same angular pacing as
+the spatial preview and reaches End on the last frame. Property stops and their
+easing stay editable in the Motion Editor, and Motion Path tools can reshape
+the curve. **Rotate** adds the signed sweep to the authored Rotation keys.
+An inward Spiral may reach zero radius at End. If it reaches zero earlier,
+reduce the inward offset or increase the starting radius.
 
 Either output commits in one document undo step. The next Array starts with
 defaults at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the

@@ -748,9 +748,15 @@ impl OnPath<'_> {
         }
     }
 
-    /// Signed rotation driven by arc-length progress, separate from the Rotation track.
+    /// Signed path rotation, separate from the Rotation track.
     fn path_rotation(&self, frame: f32) -> f32 {
-        self.tween.path_timing.as_ref().map_or(0.0, |timing| timing.rotation(self.progress(frame)))
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else { return 0.0 };
+        if last.0 <= first.0 || !frame.is_finite() {
+            return 0.0;
+        }
+        self.tween.path_timing.as_ref().map_or(0.0, |timing| {
+            timing.rotation((frame - first.0) / (last.0 - first.0), || self.progress(frame))
+        })
     }
 
     /// How far the path has turned at `frame` since its start, degrees clockwise on screen
@@ -776,6 +782,17 @@ impl MotionTween {
             return false;
         }
         let Some(timing) = PathTiming::new(segments, turn) else { return false };
+        self.path_timing = Some(timing);
+        true
+    }
+
+    /// Map normalized time to normalized path distance. The endpoints must be (0, 0)
+    /// and (1, 1). Optional signed rotation follows time, independent of arc distance.
+    pub fn set_path_distance_map(&mut self, distances: Vec<(f32, f32)>, turn: f32) -> bool {
+        if self.path.is_none() {
+            return false;
+        }
+        let Some(timing) = PathTiming::from_distances(distances, turn) else { return false };
         self.path_timing = Some(timing);
         true
     }

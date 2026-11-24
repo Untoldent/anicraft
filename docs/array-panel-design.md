@@ -430,10 +430,10 @@ commits the existing preview. **Create Unique Symbols**
 is only shown for Spatial Array. The output choice is part of the Array draft
 and participates in Array Undo/Redo.
 
-**Timeline Animation** is available for Linear and Circle Arrays. The
+**Timeline Animation** is available for Linear, Circle, and Spiral Arrays. The
 **Create Timeline Animation** dialog edits duration in frames, shows seconds
 from the document FPS, and starts at one second rounded to whole frames. Linear
-uses **Classic Tween** (default) or **Hold Keyframes**. Circle uses **Motion Tween**. The preview stays spatial until commit. Cancelling the dialog
+uses **Classic Tween** (default) or **Hold Keyframes**. Circle and Spiral use **Motion Tween**. The preview stays spatial until commit. Cancelling the dialog
 keeps the preview, property stops, and Array history. The dialog remembers the
 entered duration if reopened within the same Array session.
 
@@ -511,6 +511,31 @@ transform stops that shift registration away from the path are unavailable.
 Circle requires a nonzero sweep and a positive radius within the native path
 range.
 
+### Spiral motion paths
+
+Open Radial conversion follows the same Start angle, signed Sweep, Spiral
+Offset, and Centre Drift X/Y as the spatial evaluator. Offset changes radius
+and drift moves the centre per unsigned turn, while Sweep sets travel direction.
+Circle mode ignores the stored offset and drift. Open Radial with both rates
+zero uses the same geometry and timing as Circle.
+
+Spiral uses tangent-matched cubic Bézier segments. The segment count grows with
+the radius, angular sweep and change in radius. The geometric fit targets
+0.01 px before native coordinate rounding and keeps the evaluator's exact
+Start and End. Constant-speed arc-length traversal would change the angular
+pacing, so the native Motion Tween stores a time-to-distance map measured from
+those same cubics. The map is simplified within 0.01 px of measured distance
+(or one floating-point epsilon of the total distance on large paths). It is
+independent of frame count and remains when the path handles are edited.
+
+Spiral reuses the Circle property tracks, stop frame rounding, collision
+correction, and transformation-point restrictions. Spiral **Rotate** adds
+signed angular travel to the authored Rotation track independently of arc
+distance. Spiral supports Linear Distribution, either sweep direction through
+one turn, and inward travel that reaches zero radius at End. Nonlinear
+Distribution, sweeps over one turn, and inward paths that reach zero radius
+before End are deferred. Validation preserves the draft.
+
 ## Create Unique Symbols
 
 **Spatial Array** offers **Create Unique Symbols** in Linear, Radial, and
@@ -553,8 +578,9 @@ their arrow-key behavior while focused.
 
 ### Further Array to Timeline outputs
 
-Linear and Circle conversion are available in [Commit output](#commit-output).
-Future work can use native Motion Tweens for Spiral and Path Arrays. Grid traversal order is undecided. Sequential reveal and
+Linear, Circle, and single-turn Spiral conversion are available in
+[Commit output](#commit-output). Future work includes multi-turn Spiral and
+arbitrary Path conversion. Grid traversal order is undecided. Sequential reveal and
 staggered animation starts across multiple instances or unique Symbols remain
 deferred.
 

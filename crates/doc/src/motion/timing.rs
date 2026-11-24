@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub(super) struct PathTiming {
     // Each key starts an ease from its own progress to the next boundary (or 1).
     segments: Vec<(f32, Easing)>,
+    // Optional conversion from normalized parameter to normalized arc distance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    distances: Vec<(f32, f32)>,
     // A split tween retains the remainder of the original curve, without refitting an ease.
     #[serde(default, skip_serializing_if = "is_zero")]
     start: f32,
@@ -20,13 +23,24 @@ fn is_zero(value: &f32) -> bool {
 
 impl PathTiming {
     pub(super) fn new(segments: Vec<(f32, Easing)>, turn: f32) -> Option<Self> {
-        let timing = Self { segments, start: 0.0, turn };
+        let timing = Self { segments, distances: Vec::new(), start: 0.0, turn };
         timing.is_sane().then_some(timing)
+    }
+
+    pub(super) fn from_distances(distances: Vec<(f32, f32)>, turn: f32) -> Option<Self> {
+        let timing = Self { segments: vec![(0.0, Easing::Linear)], distances, start: 0.0, turn };
+        (timing.is_sane() && !timing.distances.is_empty()).then_some(timing)
     }
 
     pub(super) fn is_sane(&self) -> bool {
         (0.0..1.0).contains(&self.start)
             && (-360.0..=360.0).contains(&self.turn)
+            && (self.distances.is_empty()
+                || (self.segments == [(0.0, Easing::Linear)]
+                    && self.distances.len() <= super::MAX_KEYS
+                    && self.distances.first() == Some(&(0.0, 0.0))
+                    && self.distances.last() == Some(&(1.0, 1.0))
+                    && self.distances.windows(2).all(|p| matches!(p, [a, b] if a.0 < b.0 && a.1 <= b.1))))
             && self.segments.len() <= super::MAX_KEYS
             && self.segments.first().is_some_and(|(t, _)| *t == 0.0)
             && self.segments.windows(2).all(|p| matches!(p, [a, b] if a.0 < b.0))
@@ -42,6 +56,14 @@ impl PathTiming {
 
     pub(super) fn progress(&self, time: f32) -> f32 {
         let time = self.start + (1.0 - self.start) * time;
+        if !self.distances.is_empty() {
+            let next = self.distances.partition_point(|(t, _)| *t <= time);
+            return match (next.checked_sub(1).and_then(|i| self.distances.get(i)), self.distances.get(next)) {
+                (Some(&(a, from)), Some(&(b, to))) => from + (to - from) * (time - a) / (b - a),
+                (None, _) => 0.0,
+                _ => 1.0,
+            };
+        }
         let index = self.segments.partition_point(|(at, _)| *at <= time).saturating_sub(1);
         let Some((a, ease)) = self.segments.get(index) else { return time };
         let b = self.segments.get(index + 1).map_or(1.0, |key| key.0);
@@ -52,12 +74,16 @@ impl PathTiming {
         a + span * ease.apply((time - a) / span)
     }
 
-    pub(super) fn rotation(&self, path_progress: f32) -> f32 {
-        self.turn * path_progress
+    fn turn_progress(&self, time: f32, distance: impl FnOnce() -> f32) -> f32 {
+        if self.distances.is_empty() { distance() } else { time.clamp(0.0, 1.0) }
+    }
+
+    pub(super) fn rotation(&self, time: f32, distance: impl FnOnce() -> f32) -> f32 {
+        if self.turn == 0.0 { 0.0 } else { self.turn * self.turn_progress(time, distance) }
     }
 
     pub(super) fn tail(&self, time: f32, path_progress: f32) -> Option<Self> {
         let start = self.start + (1.0 - self.start) * time.max(0.0);
-        (start < 1.0).then(|| Self { start, turn: self.turn * (1.0 - path_progress), ..self.clone() })
+        (start < 1.0).then(|| Self { start, turn: self.turn * (1.0 - self.turn_progress(time, || path_progress)), ..self.clone() })
     }
 }

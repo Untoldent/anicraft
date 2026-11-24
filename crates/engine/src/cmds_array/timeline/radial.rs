@@ -1,6 +1,7 @@
-//! Native cubic geometry for a signed Circle sweep.
+//! Convert a signed Radial Array into one native Motion Tween.
 
 mod properties;
+mod spiral;
 
 use super::super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution, keep_pivot, posed_element};
 use crate::{EngineError, Result};
@@ -11,7 +12,7 @@ use std::sync::Arc;
 /// At most 30 degrees per cubic. With tangent handles of length
 /// (4/3) * tan(step/4) * radius, radial error is below 4e-7 times the
 /// radius before the motion path's f32 coordinate rounding.
-fn path(radial: RadialDistribution) -> Path {
+fn circle_path(radial: RadialDistribution) -> Path {
     let segments = (radial.sweep.abs() / 30.0).ceil().max(1.0) as u32;
     let step = f64::from(radial.sweep) / f64::from(segments);
     let handle = (4.0 / 3.0) * (step.to_radians() / 4.0).tan();
@@ -40,12 +41,18 @@ pub(super) fn keyframe(
     easing: &ArrayEasing,
     duration: u32,
 ) -> Result<Keyframe> {
+    let spiral = radial.has_spiral_geometry();
     if radial.sweep.abs() > CLOSED_SWEEP_LIMIT {
-        return Err(EngineError::Param("Circle Timeline Animation supports sweeps of up to one revolution (360 degrees).".into()));
+        return Err(EngineError::Param("Radial Timeline Animation supports sweeps of up to one revolution (360 degrees).".into()));
     }
-    if radial.radius == 0.0 || radial.sweep == 0.0 {
-        return Err(EngineError::Param("Circle Timeline Animation needs a positive radius and a nonzero sweep.".into()));
+    if radial.sweep == 0.0 || (!spiral && radial.radius == 0.0) {
+        return Err(EngineError::Param("Radial Timeline Animation needs a nonzero sweep and a path of some length.".into()));
     }
+    let eased_distribution = easing.eases_distribution(stops);
+    if spiral && eased_distribution {
+        return Err(EngineError::Param("Spiral Timeline Animation needs Linear Distribution. Set the Distribution ease to Linear or turn off Distribution easing.".into()));
+    }
+    let path = if spiral { spiral::path(radial)? } else { circle_path(radial) };
     let basis = original.transform.decompose();
     let pose = |stop: &ArrayPropertyStop| {
         let mut base = original.transform;
@@ -58,7 +65,7 @@ pub(super) fn keyframe(
     };
     let element = pose(stops.first().unwrap_or(seed));
     if !element.transform.is_finite() {
-        return Err(EngineError::Param("Circle Timeline Animation needs a finite transform.".into()));
+        return Err(EngineError::Param("Radial Timeline Animation needs a finite transform.".into()));
     }
 
     let base = Props::of(&element);
@@ -66,10 +73,15 @@ pub(super) fn keyframe(
     let last = duration - 1;
     // X/Y keys anchor the original path. Distribution timing uses normalized
     // authored stop positions, independent of rounding the property keys.
-    if !motion.set_path(&path(radial), &base, last) {
-        return Err(EngineError::Param("The Circle is too small or its control points exceed the native motion path range.".into()));
+    if !motion.set_path(&path, &base, last) {
+        return Err(EngineError::Param("The Radial path is too small or its control points exceed the native motion path range.".into()));
     }
-    if easing.eases_distribution(stops) {
+    let turn = if radial.rotate { radial.sweep } else { 0.0 };
+    if spiral {
+        if !spiral::distance_map(&path).is_some_and(|map| motion.set_path_distance_map(map, turn)) {
+            return Err(EngineError::Param("The Spiral exceeds the native motion timing range.".into()));
+        }
+    } else if eased_distribution {
         let segments = match easing.mode {
             ArrayEaseMode::Global => vec![(0.0, easing.preset.clone())],
             ArrayEaseMode::PerSegment => super::property_times(stops)
@@ -82,7 +94,6 @@ pub(super) fn keyframe(
                 })
                 .collect(),
         };
-        let turn = if radial.rotate { radial.sweep } else { 0.0 };
         if !motion.set_path_timing(segments, turn) {
             return Err(EngineError::Param("Circle Distribution needs monotonic easing. Back, Bounce and Elastic overshoot or reverse along the path.".into()));
         }

@@ -153,7 +153,7 @@ fn validation_keeps_the_live_preview_and_rejects_lossy_classic_conversions() {
         ("easing", json!({"preset": "QuadIn"}), "Global easing"),
         ("property_stops", json!([{"offset": 0}, {"offset": 1, "rotation": 360}]), "shortest rotation"),
         ("property_stops", json!([{"offset": 0}, {"offset": 0}]), "identical positions"),
-        ("mode", json!("grid"), "Linear and Circle Arrays only"),
+        ("mode", json!("grid"), "Linear and Radial Arrays only"),
     ] {
         let mut invalid = p.clone();
         invalid[key] = value;
@@ -356,7 +356,6 @@ fn circle_commit_is_atomic_with_existing_classic_spans_and_a_native_editable_pat
     let preview = s.doc.clone();
     for (field, value, message) in [
         ("duration", json!(54), "frame 54"),
-        ("closed_loop", json!(false), "Linear and Circle"),
         ("sweep_angle", json!(361), "one revolution"),
         ("sweep_angle", json!(0), "nonzero sweep"),
         ("animation", json!("classic"), "uses Motion Tween"),
@@ -663,4 +662,163 @@ fn circle_distribution_keeps_unrounded_stop_boundaries_and_survives_native_path_
         near(edited.progress(frame as f32), op.progress(frame as f32));
     }
     assert!(at(&reopened, 10).transform.translation().distance(at(&s, 10).transform.translation()) > 0.1);
+}
+
+#[test]
+fn spiral_cubics_preserve_spatial_geometry_and_angular_timing() {
+    use anicraft_doc::{Property, Props};
+    use anicraft_geom::{PathCmd, walk::cubic_point};
+    for (sweep, offset, drift) in [
+        (360.0, 160.0, [0.0, 0.0]),
+        (-360.0, -100.0, [0.0, 0.0]),
+        (143.0, 0.0, [-85.0, 35.0]),
+        (-247.0, 90.0, [58.0, -120.0]),
+        (360.0, -150.0, [0.0, 0.0]),
+    ] {
+        let mut s = source();
+        let mut p = circle(sweep);
+        p["closed_loop"] = json!(false);
+        p["count"] = json!(49);
+        p["spiral_offset"] = json!(offset);
+        p["drift_x"] = json!(drift[0]);
+        p["drift_y"] = json!(drift[1]);
+        let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+        s.preview_array(&p).unwrap();
+        let expected: Vec<_> = s.selected_elements().iter().map(|(_, el)| el.transform.translation()).collect();
+        s.commit_array_timeline_preview(&p).unwrap();
+
+        let [key] = layer(&s).keyframes.as_slice() else { panic!("expected one native Motion Tween") };
+        let motion = key.motion.as_ref().unwrap();
+        let path = motion.path.as_ref().unwrap();
+        let walker = motion.on_path(&Props::of(&key.elements[0])).unwrap();
+        assert_eq!(motion.track(Property::X).unwrap().keys.len(), 2);
+        assert_eq!(motion.track(Property::Y).unwrap().keys.len(), 2);
+        assert_eq!(walker.point(0.0), radial.point(0.0));
+        assert_eq!(walker.point(48.0), radial.point(1.0));
+        assert_eq!(expected.len(), 49);
+
+        let count = path.cmds.len() - 1;
+        let mut prev = radial.point(0.0);
+        let mut tail: Option<Vec2> = None;
+        for (i, cmd) in path.cmds.iter().skip(1).enumerate() {
+            let PathCmd::CubicTo(a, b, end) = *cmd else { panic!("expected a cubic") };
+            if let Some(tail) = tail {
+                assert!((prev - tail).distance(a - prev) < 0.0002);
+            }
+            for u in [0.125, 0.25, 0.5, 0.75, 0.875] {
+                let time = (i as f64 + u) / count as f64;
+                let ideal = radial.point(time);
+                let cubic = cubic_point(&[prev, a, b, end], u as f32);
+                assert!(cubic.distance(ideal) < 0.0102, "cubic fit: {sweep}, {offset}, {time}");
+                assert!(walker.point(time as f32 * 48.0).distance(ideal) < 0.021, "angular timing: {sweep}, {offset}, {time}");
+            }
+            prev = end;
+            tail = Some(b);
+        }
+        for (frame, want) in (0..49).zip(expected) {
+            let actual = at(&s, frame).transform.translation();
+            assert!(actual.distance(want) < 0.021, "{sweep}, {offset}, {frame}: {actual:?} vs {want:?}");
+        }
+        if sweep == 360.0 && offset == 160.0 {
+            let half_length = walker.walk().at(walker.walk().length() * 0.5);
+            assert!(half_length.distance(walker.point(24.0)) > 25.0, "constant arc-length speed would be wrong");
+        }
+    }
+}
+
+#[test]
+fn open_radial_with_no_offset_or_drift_reuses_circle_conversion() {
+    let mut open = source();
+    let mut closed = source();
+    let mut p = circle(-360.0);
+    p["easing"] = json!({"preset": "QuadInOut"});
+    p["rotate"] = json!(true);
+    closed.execute("array.create_timeline", &p).unwrap();
+    p["closed_loop"] = json!(false);
+    open.execute("array.create_timeline", &p).unwrap();
+    assert_eq!(layer(&open).keyframes[0].motion, layer(&closed).keyframes[0].motion);
+}
+
+#[test]
+fn spiral_uses_signed_angular_rotation_and_editable_property_keys() {
+    use anicraft_doc::{Property, Props};
+    let mut s = source();
+    s.execute("symbol.set_kind", &json!({"kind":"movie_clip"})).unwrap();
+    s.execute("element.set_filters", &json!({"filters":[{"type":"blur","blur_x":2,"quality":2}]})).unwrap();
+    let mut p = circle(-360.0);
+    p["closed_loop"] = json!(false);
+    p["count"] = json!(49);
+    p["spiral_offset"] = json!(120);
+    p["drift_x"] = json!(90);
+    p["drift_y"] = json!(-68);
+    p["rotate"] = json!(true);
+    p["easing"] = json!({"mode":"per_segment","distribution":false,"filters":false});
+    p["property_stops"] = json!([
+        {"offset":0,"outbound_ease":"QuadIn","rotation":0,"alpha":1,"filters":[{"type":"blur","blur_x":2}]},
+        {"offset":0.5,"outbound_ease":"QuadOut","scale_x":1.6,"scale_y":0.8,"rotation":45,"alpha":0.5,"filters":[{"type":"blur","blur_x":12}]},
+        {"offset":1,"scale_x":0.9,"rotation":90,"alpha":1,"filters":[{"type":"blur","blur_x":6}]}
+    ]);
+    let original = s.doc.clone();
+    let steps = s.history_len();
+    s.preview_array(&p).unwrap();
+    let expected: Vec<_> = s.selected_elements().into_iter().map(|(_, el)| el).collect();
+    s.commit_array_timeline_preview(&p).unwrap();
+    for (frame, want) in (0..49).zip(expected) {
+        let mut actual = (*at(&s, frame)).clone();
+        assert!(actual.transform.translation().distance(want.transform.translation()) < 0.021);
+        actual.transform.m[4..].copy_from_slice(&want.transform.m[4..]);
+        compare_pose(&actual, &want);
+    }
+    assert_eq!(s.history_len(), steps + 1);
+    let animation = s.doc.clone();
+    s.undo().unwrap();
+    assert!(s.doc == original);
+    s.redo().unwrap();
+    assert!(s.doc == animation);
+    let mut reopened = Session::new(format::from_json(&format::to_json(&s.doc).unwrap()).unwrap());
+    let key = &layer(&reopened).keyframes[0];
+    let props = Props::of(&key.elements[0]);
+    let motion = key.motion.clone().unwrap();
+    let keys = &motion.track(Property::Rotation).unwrap().keys;
+    assert_eq!(keys.iter().map(|k| (k.frame, k.value)).collect::<Vec<_>>(), [(0, 0.0), (24, 45.0), (48, 90.0)]);
+    compare_pose(&at(&s, 12), &at(&reopened, 12));
+    let mut path = motion.path.clone().unwrap();
+    let slot = anicraft_geom::edit::C1;
+    let handle = path.point(1, slot).unwrap();
+    assert!(path.set_point(1, slot, handle + Vec2::new(20.0, -40.0)));
+    reopened.execute("motion.set_path", &json!({"d":path.to_svg()})).unwrap();
+    let edited = layer(&reopened).keyframes[0].motion.as_ref().unwrap();
+    assert_ne!(edited.path, motion.path);
+    near(edited.on_path(&props).unwrap().progress(12.0), motion.on_path(&props).unwrap().progress(12.0));
+    assert!(at(&reopened, 12).transform.translation().distance(at(&s, 12).transform.translation()) > 0.1);
+}
+
+#[test]
+fn spiral_unsupported_conversion_and_duration_collisions_keep_the_draft() {
+    let mut s = source();
+    let mut p = circle(360.0);
+    p["closed_loop"] = json!(false);
+    p["spiral_offset"] = json!(90.0);
+    p["property_stops"] = json!([{"offset":0}, {"offset":0.5,"alpha":0.4}, {"offset":1}]);
+    let steps = s.history_len();
+    s.preview_array(&p).unwrap();
+    let draft = s.doc.clone();
+    for (field, value, reason) in [
+        ("sweep_angle", json!(-361), "one revolution"),
+        ("spiral_offset", json!(-151), "zero radius before End"),
+        ("easing", json!({"preset":"QuadIn"}), "Linear Distribution"),
+    ] {
+        let mut invalid = p.clone();
+        invalid[field] = value;
+        let error = s.commit_array_timeline_preview(&invalid).unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert!(s.doc == draft && s.history_len() == steps && s.array_preview_active());
+    }
+    p["duration"] = json!(2);
+    let error = s.commit_array_timeline_preview(&p).unwrap_err();
+    assert!(matches!(error, EngineError::ArrayDuration { suggested: Some(3), .. }));
+    assert!(s.doc == draft && s.array_preview_active());
+    p["duration"] = json!(3);
+    s.commit_array_timeline_preview(&p).unwrap();
+    near(at(&s, 1).color.alpha(), 0.4);
 }

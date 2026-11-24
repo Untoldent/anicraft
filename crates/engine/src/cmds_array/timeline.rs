@@ -1,6 +1,6 @@
 //! Convert an Array to native timeline spans on the source layer.
 
-mod circle;
+mod radial;
 
 use super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, MAX_ARRAY_INSTANCES, keep_pivot, parse_radial, parse_stops, posed_element};
 use crate::params::{opt_bool, opt_f32, opt_str, opt_u32};
@@ -16,17 +16,17 @@ pub(super) fn spec() -> CommandSpec {
         label: "Create Timeline Animation",
         menu: "",
         shortcut: None,
-        params: "{duration: frames (at least 2), animation?: classic|hold (Linear, default classic) or motion (Circle, default motion), mode?: linear|radial (Circle uses closed_loop: true, center_x, center_y, radius?, start_angle?, sweep_angle?, rotate?), start_x?, start_y?, end_x?, end_y?, count?: 1..500 (Hold samples only), property_stops?, easing?}. Stops use the authored instance values from array.create with source_values enabled. Converts one Symbol exposure on the active layer at the playhead.",
+        params: "{duration: frames (at least 2), animation?: classic|hold (Linear, default classic) or motion (Radial, default motion), mode?: linear|radial (center_x, center_y, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate?), start_x?, start_y?, end_x?, end_y?, count?: 1..500 (Hold samples only), property_stops?, easing?}. Stops use the authored instance values from array.create with source_values enabled. Converts one Symbol exposure on the active layer at the playhead.",
         mutates: true,
         run: create,
     }
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
-    let circle = match opt_str(p, "mode")?.unwrap_or("linear") {
+    let is_radial = match opt_str(p, "mode")?.unwrap_or("linear") {
         "linear" => false,
-        "radial" if opt_bool(p, "closed_loop")?.unwrap_or(true) => true,
-        _ => return Err(EngineError::Param("Timeline Animation is available for Linear and Circle Arrays only.".into())),
+        "radial" => true,
+        _ => return Err(EngineError::Param("Timeline Animation is available for Linear and Radial Arrays only.".into())),
     };
     if opt_bool(p, "create_unique_symbols")?.unwrap_or(false) {
         return Err(EngineError::Param("Create Unique Symbols is available for Spatial Array only.".into()));
@@ -34,10 +34,10 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("alpha_stops").is_some() {
         return Err(EngineError::Param("Timeline Animation uses authored property_stops.".into()));
     }
-    let classic = match (circle, opt_str(p, "animation")?) {
+    let classic = match (is_radial, opt_str(p, "animation")?) {
         (false, None | Some("classic")) => true,
         (false, Some("hold")) | (true, None | Some("motion")) => false,
-        (true, _) => return Err(EngineError::Param("Circle Timeline Animation uses Motion Tween.".into())),
+        (true, _) => return Err(EngineError::Param("Radial Timeline Animation uses Motion Tween.".into())),
         (false, _) => return Err(EngineError::Param("Choose Classic Tween or Hold Keyframes.".into())),
     };
     let start = s.frame;
@@ -117,9 +117,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     });
     let easing = ArrayEasing::parse(p)?;
     let origin = original.transform.translation();
-    let keys = if circle {
+    let keys = if is_radial {
         let radial = parse_radial(p, origin)?;
-        vec![circle::keyframe(source, original, radial, &seed, &stops, &easing, duration)?]
+        vec![radial::keyframe(source, original, radial, &seed, &stops, &easing, duration)?]
     } else {
         let from = Vec2::new(opt_f32(p, "start_x")?.unwrap_or(origin.x), opt_f32(p, "start_y")?.unwrap_or(origin.y));
         let to = Vec2::new(opt_f32(p, "end_x")?.unwrap_or(from.x), opt_f32(p, "end_y")?.unwrap_or(from.y));

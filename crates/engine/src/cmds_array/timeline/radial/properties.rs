@@ -1,4 +1,4 @@
-//! Compile Circle stops into ordinary native property tracks. X and Y belong to the path.
+//! Compile Radial stops into ordinary native property tracks. X and Y belong to the path.
 
 use super::super::{frame_offsets, overshoots, property_times};
 use crate::cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, RadialDistribution};
@@ -18,7 +18,7 @@ pub(super) fn write(
     span: std::ops::Range<u32>,
     pose: impl Fn(&ArrayPropertyStop) -> Element,
 ) -> Result<()> {
-    let first = authored.first().ok_or_else(|| EngineError::Param("Circle needs property stops.".into()))?;
+    let first = authored.first().ok_or_else(|| EngineError::Param("Radial needs property stops.".into()))?;
     let times = property_times(authored);
     let stops: Vec<_> = times.iter().map(|&t| ArrayPropertyStop::sample(authored.iter(), t as f32)).collect();
     let poses: Vec<_> = stops.iter().map(&pose).collect();
@@ -28,21 +28,21 @@ pub(super) fn write(
     let filters = authored.iter().map(&pose).any(|p| p.kind.filters() != base.kind.filters());
     let duration = span.end - span.start;
     let last = duration - 1;
-    // Explicit path timing drives the Circle turn separately from authored Rotation keys.
-    let keyed_turn = radial.rotate && !easing.eases_distribution(authored);
+    // Explicit path timing drives the Radial turn separately from authored Rotation keys.
+    let keyed_turn = radial.rotate && !radial.has_spiral_geometry() && !easing.eases_distribution(authored);
     let sweep = if keyed_turn { radial.sweep } else { 0.0 };
     let props = Props::of(base);
 
     let pivot = base.pivot().unwrap_or(Vec2::ZERO);
     if pivot != Vec2::ZERO && (radial.rotate || rotation) {
         return Err(EngineError::Param(
-            "Circle Motion Tween cannot rotate about an offset transformation point while keeping the registration point on the path.".into(),
+            "Radial Motion Tween cannot rotate about an offset transformation point while keeping the registration point on the path.".into(),
         ));
     }
     if poses.iter().any(|p| p.transform.translation() != radial.point(0.0))
         || stops.iter().any(|s| (pivot.x != 0.0 && s.scale[0] != first.scale[0]) || (pivot.y != 0.0 && s.scale[1] != first.scale[1]))
     {
-        return Err(EngineError::Param("These Circle transform stops shift the registration point around an offset transformation point.".into()));
+        return Err(EngineError::Param("These Radial transform stops shift the registration point around an offset transformation point.".into()));
     }
 
     if !(scales || rotation || colours || filters) {
@@ -77,13 +77,13 @@ pub(super) fn write(
         // with the matching 180° base rotation keeps reflected artwork intact.
         let reconstructed = props.transform();
         if base.transform.m[..4].iter().zip(reconstructed.m).any(|(&a, b)| (a - b).abs() > 1e-5 * a.abs().max(1.0)) {
-            return Err(EngineError::Param("This Circle transform cannot be represented by native scale tracks.".into()));
+            return Err(EngineError::Param("This Radial transform cannot be represented by native scale tracks.".into()));
         }
         for (axis, property) in [Property::ScaleX, Property::ScaleY].into_iter().enumerate() {
             let values: Vec<_> = stops.iter().map(|s| s.scale.get(axis).copied().unwrap_or(1.0) * sign * 100.0).collect();
             let start = values.first().copied().unwrap_or(100.0);
             if values.iter().any(|&v| v.abs() < 0.01 || v.signum() != start.signum()) {
-                return Err(EngineError::Param("Circle scale tracks cannot reach or cross zero.".into()));
+                return Err(EngineError::Param("Radial scale tracks cannot reach or cross zero.".into()));
             }
             tracks.channel(property, &values, easing.transform, false)?;
         }
@@ -120,7 +120,7 @@ impl Tracks<'_> {
         }
         let ease = self.segments.get(index).copied().unwrap_or(&Easing::Linear);
         if self.global && self.segments.len() > 1 && *ease != Easing::Linear {
-            return Err(EngineError::Param("Use Per Segment or Linear easing for changing Circle properties with interior stops.".into()));
+            return Err(EngineError::Param("Use Per Segment or Linear easing for changing Radial properties with interior stops.".into()));
         }
         Ok(ease)
     }
@@ -138,7 +138,7 @@ impl Tracks<'_> {
         for (i, pair) in values.windows(2).enumerate() {
             let ease = self.ease(i, enabled && !property.is_stepped(), pair.first() != pair.last())?;
             if overshoots(ease) {
-                return Err(EngineError::Param(format!("Circle Motion Tween cannot preserve overshoot on {}.", property.label())));
+                return Err(EngineError::Param(format!("Radial Motion Tween cannot preserve overshoot on {}.", property.label())));
             }
             curves.push(ease.clone());
         }
@@ -161,7 +161,7 @@ impl Tracks<'_> {
             } else if turn == 0.0 {
                 // Array's Back and Elastic stay inside this envelope.
                 if overshoots(ease) && ![-1.0, 2.0].into_iter().all(|y| range.contains(&(from + keyed * y))) {
-                    return Err(EngineError::Param("Circle rotation overshoot exceeds the native rotation range.".into()));
+                    return Err(EngineError::Param("Radial rotation overshoot exceeds the native rotation range.".into()));
                 }
                 ease.clone()
             } else {
@@ -176,7 +176,7 @@ impl Tracks<'_> {
 fn motion_keys(motion: &mut MotionTween, property: Property, base: f32, frames: &[u32], values: &[f32], curves: &[Easing]) -> Result<()> {
     let range = property.range();
     if values.iter().any(|value| !range.contains(value)) {
-        return Err(EngineError::Param(format!("Circle {} exceeds the native property range.", property.label())));
+        return Err(EngineError::Param(format!("Radial {} exceeds the native property range.", property.label())));
     }
     for (&frame, &value) in frames.iter().zip(values) {
         motion.set_key(property, frame, value, base);
@@ -311,7 +311,7 @@ fn filter_tracks(tracks: &mut Tracks<'_>, base: &[FilterEntry], poses: &[Element
             || snapshots.iter().any(|f| without_tracks(f) != without_tracks(entry))
         {
             return Err(EngineError::Param(format!(
-                "Circle Motion Tween cannot animate changes to untracked settings in filter {} ({}), such as gradient stop positions or bevel type.",
+                "Radial Motion Tween cannot animate changes to untracked settings in filter {} ({}), such as gradient stop positions or bevel type.",
                 slot + 1,
                 entry.filter.label()
             )));
