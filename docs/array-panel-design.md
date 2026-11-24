@@ -7,11 +7,10 @@
 
 ## The idea
 
-An Array operation makes a spatial arrangement of ordinary, independent AniCraft
-instances or artwork. It interpolates properties *across generated instances* (not
-across timeline frames) using draggable property stops. The final result is baked,
-not a persistent procedural object. In this first iteration, only a selected
-symbol instance is supported.
+An Array previews a spatial arrangement of one selected Symbol instance, with
+properties interpolated across samples using draggable property stops. Spatial
+commit creates ordinary independent instances. A Linear Array can also commit
+as a native animation of the selected Symbol on the timeline.
 
 Preserve the existing `array.create` engine command and its inclusive count
 semantics: **10 means 10 total instances, including the original.** Instance 1
@@ -70,7 +69,9 @@ Array history. Only the compact Array settings are stored per step.
 ### Quitting with an Array preview
 
 The window close button, application menu and Quit shortcut open the same Array question.
-**Apply Array and Quit** commits the preview in one document undo step.
+**Apply Array and Quit** uses the selected output and commits in one document
+undo step. Timeline Animation opens its configuration dialog first. Cancelling
+that dialog returns to the active Array.
 **Discard Array and Quit** restores the original artwork without a document undo step.
 **Keep Editing** or Escape dismisses the question and keeps the preview and its session history.
 An invalid preview leaves Discard and Keep Editing available.
@@ -421,9 +422,50 @@ progression when unchecked. Filters is available when the source has a filter.
   object, or mergeable raw artwork. Initially limit to one symbol instance,
   with explicit feedback.
 
+## Commit output
+
+**Commit As** is a two-option selector above Cancel and Commit at the bottom
+of the Array panel. It defaults to **Spatial Array**, which
+commits the existing preview. **Create Unique Symbols**
+is only shown for Spatial Array. The output choice is part of the Array draft
+and participates in Array Undo/Redo.
+
+**Timeline Animation** is available for Linear Arrays in Milestone 1. The
+**Create Timeline Animation** dialog edits duration in frames, shows seconds
+from the document FPS, starts at one second rounded to whole frames, and offers **Classic Tween** (default) or **Hold
+Keyframes**. The preview stays spatial until commit. Cancelling the dialog
+keeps the preview, property stops, and Array history. The dialog remembers the
+entered duration if reopened within the same Array session.
+
+- Classic Tween uses ordinary keyframes at the authored property stops and
+  includes Start and End. Native Position, Rotation, Scale, Color, and Filters
+  groups carry compatible Array easing. Instance count does not control the
+  number of Classic keys.
+- Hold Keyframes uses every evaluated spatial sample in Linear order. An Array
+  with one sample holds the Start pose for the full duration.
+- Both outputs use one instance identity and its existing Symbol definition.
+  Exposure starts at the playhead and lasts exactly the selected duration.
+  Each pose uses the nearest frame, with halfway cases rounded up. The first
+  and last poses of a moving animation occupy the first and last frames.
+- Commit is one document undo step. It uses the original layer, requires a
+  compatible source keyframe, and reports any occupied destination range.
+  Later content stays at its original frame. Validation errors leave the draft
+  open. A duration collision lists every affected frame and its numbered stops
+  or samples. **Use N frames** applies the shortest valid duration using the
+  same rounding as conversion. Coincident stops must be moved apart.
+
+Classic Tween supports Linear and compatible Per Segment easing and can apply
+non-Linear Global easing to a single span with endpoint stops. It reports
+frame collisions and combinations that cannot preserve the Array evaluation,
+including non-Linear Global easing across intermediate stops, clamped property
+overshoot, long rotations and wrapped filter angles, certain combined Colour
+Effect and Alpha transitions, and collapsed or sign-changing animated scales.
+Linear position can overshoot within one native span. Hold samples support the
+full Linear Array property and easing evaluation.
+
 ## Create Unique Symbols
 
-The shared Commit controls offer **Create Unique Symbols** in Linear, Radial, and
+**Spatial Array** offers **Create Unique Symbols** in Linear, Radial, and
 Grid. It starts off, so ordinary Commit keeps all instances on the source Symbol.
 Toggling it participates in Array session Undo/Redo and is retained with a
 cancelled draft. The Library stays unchanged during preview and on Cancel.
@@ -461,16 +503,13 @@ spacing, and orientation, and participate in Array session Undo/Redo.
 Numeric fields, text fields, and other keyboard-editable controls should keep
 their arrow-key behavior while focused.
 
-### Array to Timeline
+### Further Array to Timeline outputs
 
-Array-to-timeline conversion could take three forms.
-
-- Animate one Symbol through the Array's positions across frames.
-- Reveal Array elements sequentially.
-- Stagger animation start times across multiple instances or independently cloned Symbols.
-
-Explore how Spiral, Radial, Linear, and Grid distributions would map to timeline instructions.
-Grid traversal order and whether animation guides would help or be required remain open.
+Linear conversion is available in [Commit output](#commit-output). Future work
+can use native Motion Tweens for editable curved trajectories in Circle, Spiral,
+and Path Arrays. Grid traversal order is undecided. Sequential reveal and
+staggered animation starts across multiple instances or unique Symbols remain
+deferred.
 
 ### Alternative Drop Shadow compositing
 
@@ -538,6 +577,7 @@ tool, and whether the spiral remains parametric after drawing or becomes ordinar
 21. Global Grid Property Distribution with X, X + Y, and Y modes.
 22. Staggered Grid offsets with independent row and column vectors and shared accumulation.
 23. Shared Create Unique Symbols Commit option with independent timelines and collision-safe names.
+24. Linear Array to Timeline, using native Classic Tween and Hold Keyframes with a shared Commit As selection.
 
 Later: Keyboard nudging, Path/node placement, more stop properties,
 custom easing, Chaos, multi-selection, and optional grouping/merging.

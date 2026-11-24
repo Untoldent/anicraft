@@ -647,7 +647,7 @@ Use **Filters** under **Easing** to ease the numbers, colours, and matching ramp
 Quality, Type, and switches hold their value until the next authored Array stop.
 Edits from one opening of a filter colour picker undo together.
 
-**Create Unique Symbols**, beside **Commit**, is off by default. Turn it on to give
+**Commit As** at the bottom of the Array panel defaults to **Spatial Array**, which keeps the instances shown in the preview. **Create Unique Symbols** is off by default. Turn it on to give
 each Array instance its own editable Symbol definition and timeline. Names continue
 from the highest numbered sibling in the source folder, so Box_8 is followed by
 Box_9 even if earlier numbers are unused. The original Symbol and its other
@@ -656,8 +656,28 @@ shared. Transforms, colour, alpha, and filters remain editable on the instances.
 Undo removes the new definitions and restores the original placement. Redo
 restores the same definitions and instances.
 
-**Commit** creates independent instances in one undo step. The next Array starts with defaults
-at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
+Linear Arrays can also **Commit As › Timeline Animation**. Click **Commit**,
+enter a duration of at least two frames, then choose **Classic Tween** or
+**Hold Keyframes**. The dialog shows the duration in seconds at the document's
+frame rate. Duration defaults to one second, rounded to whole frames. The panel
+remembers your entered duration while the Array session is active. The animation starts at the playhead and uses one instance of the
+existing Symbol. **Cancel** in the dialog returns to the Array preview.
+
+**Classic Tween** creates editable keyframes at Start, End, and authored
+property stops. **Hold Keyframes** makes the Symbol jump between the actual
+Array samples. For example, eight samples over 48 frames produce eight poses,
+including the final pose at frame 48. If poses land on the same frame, the dialog lists the numbered stops or samples
+and their frames. **Use N frames** sets the shortest valid duration when one is
+available. Click **Create Animation** to apply it. Separate coincident stops
+in the Array editor. If Classic Tween reports an incompatible ease
+or property transition, adjust the Array settings or use Hold Keyframes.
+
+Timeline commit requires a compatible source keyframe on a normal artwork
+layer with no overlapping destination content. It preserves the draft if
+validation fails. Motion Tween output for curved Arrays is planned.
+
+Either output commits in one document undo step. The next Array starts with
+defaults at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the
 original artwork and selection and retains the unfinished settings for the selected source.
 Picking another source clears those settings. Dim Stage and handle visibility carry over.
 If you hide the panel, use **Show Array** above the stage to return to the preview. Use

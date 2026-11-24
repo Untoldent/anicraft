@@ -5,7 +5,7 @@ use crate::app::{App, Drag};
 use crate::array_gizmo::{Endpoints, Geometry, GizmoDrag, GridGeometry, RADIAL_FIELD_LIMIT};
 use crate::colour_panel::PropertyStop;
 use crate::dock::{Panel, Place};
-use crate::theme::{FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
+use crate::theme::{FORM_LABEL_DIALOG, FORM_LABEL_DOCK, Section, T, Type, form_row, section, text, with_type};
 use anicraft_engine::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution as Radial, Session};
 use anicraft_engine::doc::{ColorEffect, Easing, Element, ElementId, ElementKind, Filter, FilterEntry, LayerId, Rgba};
 use egui::{Id, Key, Modifiers, Ui};
@@ -19,6 +19,21 @@ enum Mode {
     Linear,
     Grid,
     Radial,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CommitAs {
+    #[default]
+    Spatial,
+    Timeline,
+}
+
+struct TimelineConfig {
+    position: Option<egui::Pos2>,
+    frames: u32,
+    hold: bool,
+    quit: bool,
+    error: Option<anicraft_engine::EngineError>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +84,7 @@ struct Settings {
     radial: Radial,
     grid: GridSettings,
     backwards: bool,
+    commit_as: CommitAs,
     create_unique_symbols: bool,
     stops: Vec<PropertyStop>,
     easing: ArrayEasing,
@@ -90,6 +106,7 @@ impl Settings {
             },
             grid: GridSettings::at([x, y]),
             backwards: false,
+            commit_as: CommitAs::Spatial,
             create_unique_symbols: false,
             stops: vec![PropertyStop::new(0, 0.0, 1.0), PropertyStop::new(1, 1.0, 1.0)],
             easing: ArrayEasing::default(),
@@ -226,6 +243,8 @@ pub struct State {
     draft_source: Option<(LayerId, ElementId)>,
     error: Option<String>,
     reset_pending: bool,
+    timeline_config: Option<TimelineConfig>,
+    timeline_frames: Option<u32>,
     stop_editor_epoch: u64,
     open_filter_cards: Vec<bool>,
     selected_stop: Option<usize>,
@@ -242,6 +261,8 @@ impl Default for State {
             draft_source: None,
             error: None,
             reset_pending: false,
+            timeline_config: None,
+            timeline_frames: None,
             stop_editor_epoch: 0,
             open_filter_cards: Vec::new(),
             selected_stop: None,
@@ -320,12 +341,56 @@ impl State {
         }
     }
 
+    fn can_commit(&self) -> bool {
+        self.settings.as_ref().is_some_and(|settings| {
+            settings.commit_as == CommitAs::Spatial || self.mode() == Some(Mode::Linear)
+        }) && self.error.is_none() && !self.reset_pending
+    }
+
+    fn request_commit(&mut self, s: &mut Session, quit: bool) {
+        if !self.can_commit() || self.timeline_config.is_some() {
+            return;
+        }
+        if self.settings.as_ref().is_some_and(|settings| settings.commit_as == CommitAs::Timeline) {
+            self.timeline_config = Some(TimelineConfig {
+                position: None,
+                frames: self.timeline_frames.unwrap_or_else(|| anicraft_engine::array_timeline_default_duration(s.doc.stage.fps, s.frame)),
+                hold: false,
+                quit,
+                error: None,
+            });
+        } else {
+            self.finish(s, true);
+        }
+    }
+
+    pub(crate) fn timeline_modal_open(&self) -> bool {
+        self.timeline_config.is_some()
+    }
+
+    fn create_timeline(&mut self, s: &mut Session, config: &TimelineConfig) -> anicraft_engine::Result<()> {
+        let settings = self.settings.as_ref()
+            .ok_or_else(|| anicraft_engine::EngineError::State("The Array draft is unavailable.".into()))?;
+        let mut params = settings.params(Mode::Linear);
+        params["end_x"] = json!(settings.linear.end[0]);
+        params["end_y"] = json!(settings.linear.end[1]);
+        params["duration"] = json!(config.frames);
+        params["animation"] = json!(if config.hold { "hold" } else { "classic" });
+        // The remembered Spatial option belongs only to that output.
+        if let Some(fields) = params.as_object_mut() {
+            fields.remove("create_unique_symbols");
+        }
+        s.commit_array_timeline_preview(&params)?;
+        self.finish(s, true);
+        Ok(())
+    }
+
     fn finish(&mut self, s: &mut Session, commit: bool) {
         if commit && self.error.is_some() {
             return;
         }
         let unique = self.mode().zip(self.settings.as_ref())
-            .filter(|(_, settings)| commit && settings.create_unique_symbols);
+            .filter(|(_, settings)| commit && s.array_preview_active() && settings.create_unique_symbols);
         if let Some((mode, settings)) = unique {
             if let Err(error) = s.commit_unique_array_preview(&settings.params(mode)) {
                 self.error = Some(error.to_string());
@@ -334,6 +399,7 @@ impl State {
         } else {
             s.finish_array_preview(commit);
         }
+        self.timeline_frames = None;
         let was_active = self.active.take().is_some();
         if commit {
             self.discard_draft();
@@ -342,12 +408,14 @@ impl State {
             self.draft_source = s.selection.first();
         }
         self.error = None;
+        self.timeline_config = None;
         self.reset_pending = false;
         self.gizmo_drag = None;
     }
 
     pub(crate) fn discard_draft(&mut self) {
         self.settings = None;
+        self.timeline_config = None;
         self.draft_source = None;
         self.reset_pending = false;
         self.selected_stop = None;
@@ -562,44 +630,46 @@ pub(crate) fn history_shortcut(app: &mut App, ctx: &egui::Context) -> bool {
 pub(crate) fn edit_bar(app: &mut App, ui: &mut Ui) {
     ui.horizontal_centered(|ui| {
         ui.label(text(Type::Label, tr!("Array preview")));
-        let floating = app.dock.is_floating(Panel::Array);
-        if !app.panel_visible(Panel::Array) || floating {
-            if ui.button(tr!("Show Array")).clicked() {
-                app.show_panel(Panel::Array);
-                if crate::dock_ui::own_windows(app, ui.ctx())
-                    && let Some(Place::Floating { window, .. }) = app.dock.place(Panel::Array)
-                    && let Some(float) = app.dock.floating.get(window)
-                {
-                    let viewport = egui::ViewportId::from_hash_of(("dock_float", float.id));
-                    ui.ctx().send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
-                }
-            }
-            finish_buttons(&mut app.array_panel, &mut app.s, ui);
-            if !app.panel_visible(Panel::Array) && let Some(error) = &app.array_panel.error {
-                ui.label(text(Type::Caption, crate::i18n::t_dyn(error)));
+        if (!app.panel_visible(Panel::Array) || app.dock.is_floating(Panel::Array))
+            && ui.button(tr!("Show Array")).clicked()
+        {
+            app.show_panel(Panel::Array);
+            if crate::dock_ui::own_windows(app, ui.ctx())
+                && let Some(Place::Floating { window, .. }) = app.dock.place(Panel::Array)
+                && let Some(float) = app.dock.floating.get(window)
+            {
+                let viewport = egui::ViewportId::from_hash_of(("dock_float", float.id));
+                ui.ctx().send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             }
         }
     });
 }
 
-fn finish_buttons(state: &mut State, s: &mut Session, ui: &mut Ui) {
-    if ui.add_enabled(state.error.is_none() && !state.reset_pending, egui::Button::new(tr!("Commit"))).clicked() {
-        state.finish(s, true);
-        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-    }
-    if ui.button(tr!("Cancel")).clicked() {
-        state.finish(s, false);
-        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-    }
-
-    let Some(mut unique) = state.settings.as_ref().filter(|_| state.active.is_some())
-        .map(|settings| settings.create_unique_symbols) else { return };
-    if ui.add_enabled_ui(!state.reset_pending, |ui| {
-        crate::theme::checkbox(ui, &mut unique, tr!("Create Unique Symbols"))
-    }).inner.changed() {
+fn commit_as(state: &mut State, s: &mut Session, ui: &mut Ui) {
+    let Some(settings) = state.settings.as_ref().filter(|_| state.active.is_some()) else { return };
+    let timeline_supported = state.mode() == Some(Mode::Linear);
+    let mut output = settings.commit_as;
+    ui.label(text(Type::Label, tr!("Commit As")));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (choice, label) in [
+            (CommitAs::Spatial, tr!("Spatial Array")),
+            (CommitAs::Timeline, tr!("Timeline Animation")),
+        ] {
+            let response = ui.add_enabled(
+                !state.reset_pending && (choice == CommitAs::Spatial || timeline_supported),
+                egui::Button::selectable(output == choice, text(Type::Body, label)),
+            );
+            let response = if choice == CommitAs::Timeline {
+                response.on_disabled_hover_text(tr!("Timeline Animation is available for Linear Arrays only."))
+            } else { response };
+            if response.clicked() { output = choice; }
+        }
+    });
+    if output != settings.commit_as {
         let before = state.before_edit(None);
         if let Some(settings) = &mut state.settings {
-            settings.create_unique_symbols = unique;
+            settings.commit_as = output;
         }
         state.record_edit(before, None);
         if state.error.is_some() { state.refresh(s); }
@@ -607,18 +677,172 @@ fn finish_buttons(state: &mut State, s: &mut Session, ui: &mut Ui) {
     }
 }
 
+fn commit_button(state: &mut State, s: &mut Session, ui: &mut Ui) {
+    let commit = ui.add_enabled(state.can_commit(), egui::Button::new(tr!("Commit")));
+    let commit = if state.mode() != Some(Mode::Linear)
+        && state.settings.as_ref().is_some_and(|settings| settings.commit_as == CommitAs::Timeline)
+    {
+        commit.on_disabled_hover_text(tr!("Timeline Animation is available for Linear Arrays only."))
+    } else {
+        commit
+    };
+    if commit.clicked() {
+        state.request_commit(s, false);
+        if state.timeline_modal_open() && ui.ctx().viewport_id() != egui::ViewportId::ROOT {
+            ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+    }
+}
+
+fn finish_buttons(state: &mut State, s: &mut Session, ui: &mut Ui) {
+    commit_as(state, s, ui);
+    if let Some(mut unique) = state.settings.as_ref()
+        .filter(|settings| settings.commit_as == CommitAs::Spatial)
+        .map(|settings| settings.create_unique_symbols)
+    {
+        if ui.add_enabled_ui(!state.reset_pending, |ui| {
+            crate::theme::checkbox(ui, &mut unique, tr!("Create Unique Symbols"))
+        }).inner.changed() {
+            let before = state.before_edit(None);
+            if let Some(settings) = &mut state.settings {
+                settings.create_unique_symbols = unique;
+            }
+            state.record_edit(before, None);
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+        }
+    } else {
+        ui.label(text(Type::Caption, tr!("Animation settings appear on Commit.")));
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        commit_button(state, s, ui);
+        if ui.button(tr!("Cancel")).clicked() {
+            state.finish(s, false);
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+        }
+    });
+}
+
+pub(crate) fn show_timeline_modal(app: &mut App, ctx: &egui::Context) {
+    let Some(mut config) = app.array_panel.timeline_config.take() else { return };
+    let mut cancel = false;
+    let mut create = false;
+    let id = Id::new("array_timeline");
+    let area = egui::Area::new(id)
+        .kind(egui::UiKind::Modal)
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .current_pos(config.position.unwrap_or_else(|| ctx.content_rect().center()))
+        .constrain_to(ctx.content_rect())
+        .movable(false)
+        .sense(egui::Sense::hover());
+    let mut title_motion = egui::Vec2::ZERO;
+    let modal = egui::Modal::new(id).area(area).show(ctx, |ui| {
+        ui.set_width(360.0);
+        let target = crate::theme::TARGET;
+        // A layout scope alone inherits the modal's available height and centers
+        // the title in it. Center the widgets only within one title row.
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), target),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                cancel = ui.add_sized([target, target], egui::Button::new(text(Type::Label, "×")))
+                    .named(tr!("Close")).on_hover_text(tr!("Close")).clicked();
+                let title = tr!("Create Timeline Animation");
+                title_motion = ui.add_sized(
+                    [ui.available_width(), target],
+                    egui::Label::new(text(Type::Title, title)).halign(egui::Align::LEFT)
+                        .sense(egui::Sense::drag()),
+                ).named(title).drag_delta();
+            },
+        );
+        ui.add_space(8.0);
+        form_row(ui, FORM_LABEL_DIALOG, tr!("Duration (frames)"), |ui| {
+            let max = (anicraft_engine::MAX_FRAME + 1).saturating_sub(app.s.frame).max(2);
+            if with_type(ui, Type::Data, |ui| ui.add(
+                egui::DragValue::new(&mut config.frames).range(2..=max).max_decimals(0)
+            )).named(tr!("Duration (frames)")).changed() {
+                config.error = None;
+            }
+        });
+        form_row(ui, FORM_LABEL_DIALOG, tr!("Duration (seconds)"), |ui| {
+            let seconds = f64::from(config.frames) / f64::from(app.s.doc.stage.fps);
+            let formatted = format!("{seconds:.2}");
+            ui.label(text(Type::Data, &formatted))
+                .named(&tr!("{seconds} seconds", seconds = formatted));
+        });
+        form_row(ui, FORM_LABEL_DIALOG, tr!("Animation Type"), |ui| {
+            let before = config.hold;
+            egui::ComboBox::from_id_salt("array_animation_type")
+                .selected_text(if config.hold { tr!("Hold Keyframes") } else { tr!("Classic Tween") })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut config.hold, false, tr!("Classic Tween"));
+                    ui.selectable_value(&mut config.hold, true, tr!("Hold Keyframes"));
+                })
+                .response
+                .named(tr!("Animation Type"));
+            if before != config.hold {
+                config.error = None;
+            }
+        });
+        if let Some(error) = &config.error {
+            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                ui.label(text(Type::Caption, crate::i18n::t_dyn(&error.to_string())));
+            });
+        }
+        if let Some(anicraft_engine::EngineError::ArrayDuration { suggested: Some(frames), .. }) = config.error.as_ref()
+            && ui.button(tr!("Use {frames} frames", frames = frames)).clicked()
+        {
+            // The engine checked every required key at this exact duration.
+            config.frames = *frames;
+            config.error = None;
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            cancel |= ui.button(tr!("Cancel")).clicked();
+            create = ui.button(tr!("Create Animation")).clicked();
+        });
+    });
+    if title_motion != egui::Vec2::ZERO {
+        config.position = Some(modal.response.rect.center() + title_motion);
+        ctx.request_repaint();
+    }
+    app.array_panel.timeline_frames = Some(config.frames);
+    if cancel || modal.should_close() {
+        app.array_quit_pending = false;
+        return;
+    }
+    if create {
+        match app.array_panel.create_timeline(&mut app.s, &config) {
+            Ok(()) => {
+                let quit = config.quit || std::mem::take(&mut app.array_quit_pending);
+                app.array_quit_pending = false;
+                if quit {
+                    crate::tabs::quit(app);
+                }
+                ctx.request_repaint();
+                return;
+            }
+            Err(error) => config.error = Some(error),
+        }
+    }
+    app.array_panel.timeline_config = Some(config);
+}
+
 pub(crate) fn can_apply_on_quit(app: &App) -> bool {
-    app.array_panel.error.is_none()
+    app.array_panel.can_commit()
 }
 
 pub(crate) fn finish_for_quit(app: &mut App, apply: bool) {
-    app.array_panel.finish(&mut app.s, apply);
+    if apply {
+        app.array_panel.request_commit(&mut app.s, true);
+    } else {
+        app.array_panel.finish(&mut app.s, false);
+    }
+    app.array_quit_pending = false;
     if !app.s.array_preview_active() {
-        app.array_quit_pending = false;
         crate::tabs::quit(app);
-    } else if apply {
-        // Surface the commit error in the panel while keeping the draft available.
-        app.array_quit_pending = false;
+    } else if apply && !app.array_panel.timeline_modal_open() {
         app.show_panel(Panel::Array);
     }
 }
@@ -1039,7 +1263,6 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
     }
 
     if let Some(mode) = state.mode() {
-        ui.horizontal_wrapped(|ui| finish_buttons(state, &mut app.s, ui));
         if state.mode().is_some() && view_options(ui, state) {
             app.stage_cache.shown_state = None;
         }
@@ -1082,6 +1305,10 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
             state.reset(&mut app.s);
             ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
+    }
+    if state.active.is_some() {
+        ui.separator();
+        finish_buttons(state, &mut app.s, ui);
     }
 }
 
@@ -1744,6 +1971,131 @@ mod tests {
         (app, ctx)
     }
 
+    fn commit_control(ctx: &egui::Context, app: &mut App, label: &str) -> Node {
+        // The commit controls are the last section of the dock's scrollable content.
+        frame(ctx, app, vec![Event::PointerMoved(pos2(1450.0, 300.0)), Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -3000.0),
+            modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move,
+        }]);
+        nodes(ctx, app).into_iter().find(|(_, n)| n.label() == Some(label))
+            .unwrap_or_else(|| panic!("missing {label}")).1
+    }
+
+    #[test]
+    fn timeline_output_is_shared_and_cancel_and_validation_keep_the_spatial_draft() {
+        let (mut app, ctx) = linear_app();
+        app.s.doc.stage.fps = 30.0;
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let pick = |app: &mut App, name| {
+            let node = if app.modal_open() {
+                nodes(&ctx, app).into_iter().find(|(_, n)| n.label() == Some(name))
+                    .unwrap_or_else(|| panic!("missing {name}")).1
+            } else {
+                commit_control(&ctx, app, name)
+            };
+            click(&ctx, app, &node);
+        };
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().commit_as, CommitAs::Spatial);
+        pick(&mut app, "Create Unique Symbols");
+        pick(&mut app, "Timeline Animation");
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().commit_as, CommitAs::Timeline);
+        assert!(!nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("Create Unique Symbols")));
+        pick(&mut app, "Spatial Array");
+        assert!(app.array_panel.settings.as_ref().unwrap().create_unique_symbols);
+        pick(&mut app, "Timeline Animation");
+        for label in ["Commit", "Cancel"] {
+            assert_eq!(nodes(&ctx, &mut app).iter().filter(|(_, n)| n.label() == Some(label)).count(), 1);
+        }
+
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
+        assert!(!app.array_panel.can_commit());
+        assert!(app.array_panel.step(&mut app.s, false));
+        assert_eq!(app.array_panel.mode(), Some(Mode::Linear));
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().commit_as, CommitAs::Timeline);
+        assert!(app.array_panel.step(&mut app.s, false));
+        assert_eq!(app.array_panel.settings.as_ref().unwrap().commit_as, CommitAs::Spatial);
+        assert!(app.array_panel.step(&mut app.s, true));
+
+        let (preview, draft, steps) = (app.s.doc.clone(), app.array_panel.settings.clone(), app.s.history_len());
+        pick(&mut app, "Commit");
+        assert!(app.modal_open());
+        assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, 30);
+        assert!(nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("1.00 seconds")));
+        app.array_panel.timeline_config.as_mut().unwrap().frames = 45;
+        assert!(nodes(&ctx, &mut app).iter().any(|(_, n)| n.label() == Some("1.50 seconds")));
+        assert!(!app.array_panel.timeline_config.as_ref().unwrap().hold);
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        assert!(!app.modal_open());
+        assert!(app.s.array_preview_active() && app.array_panel.can_step(false));
+        assert!(app.s.doc == preview && app.array_panel.settings == draft);
+
+        app.array_panel.request_commit(&mut app.s, false);
+        let config = app.array_panel.timeline_config.as_mut().unwrap();
+        assert_eq!(config.frames, 45);
+        config.hold = true;
+        config.frames = 2;
+        pick(&mut app, "Create Animation");
+        assert!(app.array_panel.timeline_config.as_ref().unwrap().error.as_ref().unwrap().to_string().contains("10 frames"));
+        assert!(app.s.doc == preview && app.array_panel.settings == draft && app.s.history_len() == steps);
+
+        pick(&mut app, "Use 10 frames");
+        assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, 10);
+        assert!(app.array_panel.timeline_config.as_ref().unwrap().error.is_none());
+        assert!(app.s.array_preview_active());
+        pick(&mut app, "Create Animation");
+        assert!(!app.s.array_preview_active() && !app.modal_open());
+        assert_eq!(app.s.history_len(), steps + 1);
+        assert_eq!(app.s.selection.len(), 1);
+    }
+
+    #[test]
+    fn timeline_modal_title_drags_and_close_preserves_draft_like_cancel() {
+        let (mut app, ctx) = linear_app();
+        app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
+        let before = app.array_panel.before_edit(None);
+        app.array_panel.settings.as_mut().unwrap().commit_as = CommitAs::Timeline;
+        app.array_panel.record_edit(before, None);
+        let draft = app.array_panel.settings.clone();
+        let doc = app.s.doc.clone();
+        let steps = app.s.history_len();
+        let find = |app: &mut App, name| nodes(&ctx, app).into_iter()
+            .find(|(_, n)| n.label() == Some(name)).unwrap_or_else(|| panic!("missing {name}")).1;
+        let center = |node: &Node| {
+            let r = node.bounds().unwrap();
+            pos2(((r.x0 + r.x1) / 2.0) as f32, ((r.y0 + r.y1) / 2.0) as f32)
+        };
+
+        app.array_panel.request_commit(&mut app.s, false);
+        app.array_panel.timeline_config.as_mut().unwrap().frames = 61;
+        let from = center(&find(&mut app, "Create Timeline Animation"));
+        let close = center(&find(&mut app, "Close"));
+        let duration = center(&find(&mut app, "Duration (frames)"));
+        let area = egui::AreaState::load(&ctx, Id::new("array_timeline")).unwrap().rect();
+        assert!(from.y - area.top() < 36.0, "title {from:?}, modal {area:?}");
+        assert!((close.y - from.y).abs() < 3.0 && close.x > from.x, "title {from:?}, close {close:?}");
+        assert!((0.0..52.0).contains(&(duration.y - from.y)), "title {from:?}, duration {duration:?}");
+        assert!(area.height() < 230.0, "modal {area:?}");
+        begin_drag(&ctx, &mut app, from);
+        for step in [vec2(35.0, 20.0), vec2(95.0, 50.0)] {
+            frame(&ctx, &mut app, vec![Event::PointerMoved(from + step)]);
+        }
+        frame(&ctx, &mut app, vec![pointer_button(from + vec2(95.0, 50.0), false)]);
+        let moved = center(&find(&mut app, "Create Timeline Animation"));
+        assert!(moved.x > from.x + 30.0 && moved.y > from.y + 15.0, "{from:?} -> {moved:?}");
+
+        for button in ["Close", "Cancel"] {
+            let action = find(&mut app, button);
+            click(&ctx, &mut app, &action);
+            assert!(!app.modal_open());
+            assert!(app.s.array_preview_active() && app.array_panel.can_step(false));
+            assert!(app.s.doc == doc && app.array_panel.settings == draft);
+            assert_eq!(app.s.history_len(), steps);
+            app.array_panel.request_commit(&mut app.s, false);
+            assert_eq!(app.array_panel.timeline_config.as_ref().unwrap().frames, 61);
+        }
+    }
+
     fn screen(app: &App, [x, y]: [f32; 2]) -> Pos2 {
         let zoom = app.view.zoom;
         let size = vec2(app.s.doc.stage.width as f32, app.s.doc.stage.height as f32);
@@ -2023,7 +2375,7 @@ mod tests {
 
         let preview = app.s.doc.clone();
         let before_commit = anicraft_render::render_frame(&preview, 0, 1.0).unwrap().to_rgba8();
-        let commit = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1;
+        let commit = commit_control(&ctx, &mut app, "Commit");
         click(&ctx, &mut app, &commit);
         assert!(!app.s.array_preview_active() && !app.stage_cache.filtered_array_warmed());
         assert_eq!(app.s.history_len(), history + 1);
@@ -2588,8 +2940,7 @@ mod tests {
         let base = app.s.doc.clone();
         let base_ids = app.s.selection.clone();
         let steps = app.s.history_len();
-        let checkbox = |app: &mut App| nodes(&ctx, app).into_iter()
-            .find(|(_, node)| node.label() == Some("Create Unique Symbols")).unwrap().1;
+        let checkbox = |app: &mut App| commit_control(&ctx, app, "Create Unique Symbols");
         let unique = |app: &App| app.array_panel.settings.as_ref().unwrap().create_unique_symbols;
         app.array_panel.select_mode(&mut app.s, Some(Mode::Linear));
         let preview = app.s.doc.clone();
@@ -2608,8 +2959,7 @@ mod tests {
         app.array_panel.select_mode(&mut app.s, Some(Mode::Grid));
         assert!(unique(&app));
         assert_eq!(app.s.doc.library, base.library);
-        let cancel = nodes(&ctx, &mut app).into_iter()
-            .find(|(_, node)| node.label() == Some("Cancel")).unwrap().1;
+        let cancel = commit_control(&ctx, &mut app, "Cancel");
         click(&ctx, &mut app, &cancel);
         assert_eq!(app.s.doc, base);
         assert_eq!(app.s.selection, base_ids);
@@ -2623,8 +2973,7 @@ mod tests {
         assert_eq!(app.s.doc, preview);
         let toggle = checkbox(&mut app);
         click(&ctx, &mut app, &toggle);
-        let commit = nodes(&ctx, &mut app).into_iter()
-            .find(|(_, node)| node.label() == Some("Commit")).unwrap().1;
+        let commit = commit_control(&ctx, &mut app, "Commit");
         click(&ctx, &mut app, &commit);
         assert!(!app.s.array_preview_active());
         assert_eq!(app.s.doc.library.len(), base.library.len() + 9);
@@ -2820,8 +3169,8 @@ mod tests {
         history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
         assert_eq!(app.array_panel.settings, after);
         let final_preview = app.s.doc.clone();
-        let shown = nodes(&ctx, &mut app);
-        click(&ctx, &mut app, &shown.iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1);
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.s.history_len(), steps + 1);
         assert!(app.array_panel.settings.is_none() && !app.s.array_preview_active());
         history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
@@ -3199,14 +3548,16 @@ mod tests {
         assert_eq!(stop.value, ArrayPropertyStop { offset: stop.value.offset, ..authored.stops[0].value.clone() });
         press(&mut app, "Remove array stop");
         assert_eq!(state(&app), authored);
-        press(&mut app, "Cancel");
+        let action = commit_control(&ctx, &mut app, "Cancel");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.s.doc, source);
         assert_eq!(app.s.history_len(), doc_steps);
         press(&mut app, "Array type");
         press(&mut app, "Linear");
         assert_eq!(state(&app), authored);
         assert_eq!(pixels(&app), preview);
-        press(&mut app, "Commit");
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert_eq!(pixels(&app), preview);
         assert_eq!(app.s.history_len(), doc_steps + 1);
     }
@@ -3338,14 +3689,16 @@ mod tests {
         assert_eq!(ramp(&app, 1), left);
         history_key(&ctx, &mut app, Key::Z, Modifiers::NONE);
         assert_eq!(settings(&app), authored);
-        press(&mut app, "Cancel");
+        let action = commit_control(&ctx, &mut app, "Cancel");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.s.doc, source);
         assert_eq!(app.s.history_len(), doc_steps);
         press(&mut app, "Array type");
         press(&mut app, "Linear");
         assert_eq!(settings(&app), authored);
         assert_eq!(render(&app), preview);
-        press(&mut app, "Commit");
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert_eq!(render(&app), preview);
         assert_eq!(app.s.history_len(), doc_steps + 1);
     }
@@ -3406,7 +3759,8 @@ mod tests {
         assert!(app.s.array_preview_active());
         history_key(&ctx, &mut app, Key::Y, Modifiers::NONE);
         assert_eq!(pixels(&app), preview);
-        press(&mut app, "Commit");
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert!(!app.s.array_preview_active());
         assert_eq!(app.s.history_len(), doc_steps + 1);
         assert_eq!(pixels(&app), preview);
@@ -3841,7 +4195,7 @@ mod tests {
             assert!(app.array_panel.can_step(true));
             match exit {
                 "Cancel" => {
-                    let cancel = nodes(&ctx, &mut app).into_iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1;
+                    let cancel = commit_control(&ctx, &mut app, "Cancel");
                     click(&ctx, &mut app, &cancel);
                 }
                 "Escape" => {
@@ -3943,8 +4297,8 @@ mod tests {
         app.array_panel.refresh(&mut app.s);
         app.array_panel.dim_stage = false;
         app.array_panel.show_gizmo = false;
-        let fields = nodes(&ctx, &mut app);
-        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1);
+        let action = commit_control(&ctx, &mut app, "Cancel");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.array_panel.settings.as_ref().unwrap().radial.spiral_offset, 35.0);
 
         crate::dock_ui::apply(&mut app, vec![crate::dock_ui::Act::Close(Panel::Array)]);
@@ -4115,13 +4469,14 @@ mod tests {
         assert!((offset.numeric_value().unwrap() - 60.0).abs() < 0.05);
         let (_, drift_x) = fields.iter().find(|(_, n)| n.label() == Some("Centre Drift X")).unwrap();
         assert!((drift_x.numeric_value().unwrap() - 95.0).abs() < 0.05);
-        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1);
+        let cancel = commit_control(&ctx, &mut app, "Cancel");
+        click(&ctx, &mut app, &cancel);
         assert!(app.s.doc == doc && app.s.selection == selection);
         assert_eq!(app.s.history_len(), steps);
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));
         assert_eq!(current(&app), ended);
-        let fields = nodes(&ctx, &mut app);
-        click(&ctx, &mut app, &fields.iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1);
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert!(app.array_panel.gizmo_geometry().is_none());
         assert_eq!(app.s.history_len(), steps + 1);
         app.s.undo().unwrap();
@@ -4182,8 +4537,8 @@ mod tests {
         assert_eq!(app.array_panel.gizmo_endpoints(), Some(typed));
         preview_ends(&app, typed);
 
-        let shown = nodes(&ctx, &mut app);
-        click(&ctx, &mut app, &shown.iter().find(|(_, n)| n.label() == Some("Commit")).unwrap().1);
+        let action = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.s.history_len(), steps + 1);
         assert!(app.array_panel.gizmo_endpoints().is_none());
         app.s.undo().unwrap();
@@ -4207,10 +4562,12 @@ mod tests {
         config.stops.insert(1, PropertyStop::new(2, 0.25, 0.4));
         app.array_panel.refresh(&mut app.s);
 
-        for label in ["Hide Array Handles", "Dim Stage", "Commit"] {
+        for label in ["Hide Array Handles", "Dim Stage"] {
             let shown = nodes(&ctx, &mut app);
             click(&ctx, &mut app, &shown.iter().find(|(_, n)| n.label() == Some(label)).unwrap().1);
         }
+        let commit = commit_control(&ctx, &mut app, "Commit");
+        click(&ctx, &mut app, &commit);
         assert_eq!(app.s.selection.len(), 4);
         assert_eq!(app.array_panel.mode(), None);
         assert!(app.array_panel.settings.is_none() && !app.s.array_preview_active());
@@ -4308,8 +4665,8 @@ mod tests {
         assert_eq!(app.array_panel.settings, recovery);
         app.array_panel.set_endpoints(&mut app.s, ends);
         let recovery = app.array_panel.settings.clone();
-        let shown = nodes(&ctx, &mut app);
-        click(&ctx, &mut app, &shown.iter().find(|(_, n)| n.label() == Some("Cancel")).unwrap().1);
+        let action = commit_control(&ctx, &mut app, "Cancel");
+        click(&ctx, &mut app, &action);
         assert_eq!(app.array_panel.settings, recovery);
         assert!(app.s.doc == doc && app.s.selection == selection);
         assert_eq!(app.s.history_len(), steps);

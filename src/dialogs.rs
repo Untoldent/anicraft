@@ -32,6 +32,7 @@ pub fn show_all(app: &mut App, ctx: &egui::Context) {
     confirm_modal(app, ctx);
     close_modal(app, ctx);
     array_quit_modal(app, ctx);
+    crate::array_panel::show_timeline_modal(app, ctx);
     palette(app, ctx);
     shortcut_sheet(app, ctx);
 }
@@ -158,7 +159,7 @@ fn close_modal(app: &mut App, ctx: &egui::Context) {
 }
 
 fn array_quit_modal(app: &mut App, ctx: &egui::Context) {
-    if !app.array_quit_pending || app.document_modal_open() || app.file_dialog_open() {
+    if !app.array_quit_pending || app.array_panel.timeline_modal_open() || app.document_modal_open() || app.file_dialog_open() {
         return;
     }
     let mut apply = None;

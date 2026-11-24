@@ -95,7 +95,7 @@ pub use anicraft_svg as svg;
 /// Whether a path is an Animate document (`.fla`, `.xfl`, or an XFL folder) that `file.open`
 /// imports.
 pub use cmds_file::is_animate;
-pub use cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution};
+pub use cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution, array_timeline_default_duration};
 pub use cmds_modify::{Item as SelectedItem, transform_origins};
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +106,8 @@ pub enum EngineError {
     Param(String),
     #[error("{0}")]
     State(String),
+    #[error("{message}")]
+    ArrayDuration { message: String, suggested: Option<u32> },
     #[error("file format: {0}")]
     Format(String),
     #[error("I/O: {0}")]

@@ -3291,7 +3291,7 @@ impl App {
 
     /// Any modal (prompt, confirmation, close guard) is open: global shortcuts pause.
     pub fn modal_open(&self) -> bool {
-        self.array_quit_pending || self.document_modal_open()
+        self.array_quit_pending || self.array_panel.timeline_modal_open() || self.document_modal_open()
     }
 
     pub(crate) fn document_modal_open(&self) -> bool {

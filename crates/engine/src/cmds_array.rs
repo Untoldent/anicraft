@@ -15,6 +15,9 @@ use std::num::NonZeroU32;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
+mod timeline;
+pub use timeline::array_timeline_default_duration;
+
 pub const MAX_ARRAY_INSTANCES: u32 = 500;
 pub const CLOSED_SWEEP_LIMIT: f32 = 360.0;
 
@@ -503,12 +506,24 @@ impl Session {
             .ok_or_else(|| EngineError::Param("Array settings must be an object".into()))?;
         params.insert("create_unique_symbols".into(), Value::Bool(true));
 
+        self.commit_array_output("array.create", &Value::Object(params))
+    }
+
+    /// Turn the active Linear preview into one native timeline animation.
+    pub fn commit_array_timeline_preview(&mut self, params: &Value) -> Result<()> {
+        self.commit_array_output("array.create_timeline", params)
+    }
+
+    fn commit_array_output(&mut self, command: &str, params: &Value) -> Result<()> {
+        if !self.array_preview {
+            return Err(EngineError::State("no active Array preview".into()));
+        }
         // Replay once from the same source as the preview. Keep the transient
         // pose and recording if commit fails so the artist can edit or cancel.
         let preview = self.snapshot("Array");
         let recording = self.rec.clone();
         self.restore_gesture();
-        if let Err(error) = self.execute_command("array.create", &Value::Object(params)) {
+        if let Err(error) = self.execute_command(command, params) {
             self.restore(preview);
             self.rec = recording;
             return Err(error);
@@ -675,7 +690,7 @@ pub fn specs() -> Vec<CommandSpec> {
         params: "{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), create_unique_symbols?: bool, dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y, stagger?: {accumulate?: bool, rows?: {enabled?: bool, every?: positive integer, x?: number, y?: number}, columns?: {enabled?: bool, every?: positive integer, x?: number, y?: number}} (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid uses an evenly spaced base lattice. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Grid stagger rows and columns default to disabled with every=2 and stage offsets of (50, 0) and (0, 50) px respectively. Offsets add at intersections. With accumulate off, every Nth row or column gets one offset. With accumulate on, each qualifying row or column adds an offset that persists on subsequent rows or columns. The first row and first column never add an offset, including when every=1. Stagger leaves the base direction and property sampling intact. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all. With create_unique_symbols (default false), each instance references a separate copy of the original definition in its Library folder. Names continue the highest numbered suffix in the same naming family. Instance properties and shared nested Library references are preserved.",
         mutates: true,
         run: create,
-    }]
+    }, timeline::spec()]
 }
 
 fn parse_stops(p: &Value, source: Option<&ArrayPropertyStop>, stack: Option<&[FilterEntry]>) -> Result<Option<Vec<ArrayPropertyStop>>> {
@@ -1153,33 +1168,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         if !transform.is_finite() {
             return Err(EngineError::Param("array positions exceeded finite coordinate range".into()));
         }
-        let mut el = original.clone();
+        let mut el = posed_element(&original, transform, stop, seed.as_ref(), compose_colour);
         // Instance #1 is the original and keeps its ID.
         if i > 0 { el.id = ElementId(s.doc.alloc_id()); }
-        el.transform = transform;
-        if let Some(stop) = stop {
-            el.color = if let Some(seed) = &seed {
-                if (stop.color, stop.alpha) == (seed.color, seed.alpha) { original.color } else { stop.color_effect() }
-            } else if compose_colour {
-                stop.apply_color(original.color)
-            } else {
-                original.color.with_alpha(stop.alpha)
-            };
-            if !stop.filters.is_empty() && let Some(stack) = el.kind.filters_mut() {
-                let supported = stack.iter_mut().filter(|entry| ArrayPropertyStop::supports_filter(&entry.filter));
-                for (entry, filter) in supported.zip(stop.filters) {
-                    if !entry.enabled && matches!(entry.filter, Filter::AdjustColor { .. }) { continue; }
-                    // The Blur stop still controls sizes alone. Preserve its source quality,
-                    // including values from older imported documents.
-                    match (&mut entry.filter, filter) {
-                        (Filter::Blur { blur_x, blur_y, .. }, Filter::Blur { blur_x: x, blur_y: y, .. }) => {
-                            (*blur_x, *blur_y) = (x, y);
-                        }
-                        (source, filter) => *source = filter,
-                    }
-                }
-            }
-        }
         ids.push(el.id);
         copies.push(Arc::new(el));
     }
@@ -1206,6 +1197,42 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     kf.elements.splice(at..at, copies);
     s.select_only(ids.iter().copied());
     Ok(json!({"count": count, "mode": mode, "instances": ids.iter().map(|id| id.0).collect::<Vec<_>>()}))
+}
+
+// Preview and both outputs use the same source-property and filter-slot rules.
+fn posed_element(
+    original: &Element,
+    transform: Affine,
+    stop: Option<ArrayPropertyStop>,
+    seed: Option<&ArrayPropertyStop>,
+    compose_colour: bool,
+) -> Element {
+    let mut el = original.clone();
+    el.transform = transform;
+    if let Some(stop) = stop {
+        el.color = if let Some(seed) = seed {
+            if (stop.color, stop.alpha) == (seed.color, seed.alpha) { original.color } else { stop.color_effect() }
+        } else if compose_colour {
+            stop.apply_color(original.color)
+        } else {
+            original.color.with_alpha(stop.alpha)
+        };
+        if !stop.filters.is_empty() && let Some(stack) = el.kind.filters_mut() {
+            let supported = stack.iter_mut().filter(|entry| ArrayPropertyStop::supports_filter(&entry.filter));
+            for (entry, filter) in supported.zip(stop.filters) {
+                if !entry.enabled && matches!(entry.filter, Filter::AdjustColor { .. }) { continue; }
+                // The Blur stop still controls sizes alone. Preserve its source quality,
+                // including values from older imported documents.
+                match (&mut entry.filter, filter) {
+                    (Filter::Blur { blur_x, blur_y, .. }, Filter::Blur { blur_x: x, blur_y: y, .. }) => {
+                        (*blur_x, *blur_y) = (x, y);
+                    }
+                    (source, filter) => *source = filter,
+                }
+            }
+        }
+    }
+    el
 }
 
 #[cfg(test)]

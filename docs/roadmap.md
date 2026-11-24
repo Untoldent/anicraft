@@ -12,9 +12,11 @@ This integration depends on craft-libs #1962 and still requires hosted parity va
 
 The experimental [Array panel](array-panel-design.md) previews Linear, Grid, and Radial arrays of
 one symbol instance, with a neutral track for Transform and Colour Effect stops. Array mode stays active
-when its dock tab is hidden or closed. Commit bakes the result in one undo step and resets the
-next Array to defaults at its source symbol. Cancel, Escape and None retain the unfinished
-configuration while the original instance stays selected. Commit can optionally give each
+when its dock tab is hidden or closed. Spatial Array commits the preview in one undo step and
+resets the next Array to defaults at its source symbol. Linear Arrays can also commit one
+Symbol instance to native Classic Tween or Hold Keyframes, beginning at the playhead.
+Motion Tween output for curved paths remains planned. Cancel, Escape and None retain the unfinished
+configuration while the original instance stays selected. Spatial Array can give each
 instance its own Symbol definition and timeline in the same undo step. The selected-stop card has draggable
 scales and multi-turn rotation in Transform, and Alpha, Brightness, Tint and Advanced channels
 in Colour Effect. The default stops start with the source instance's values. An inserted stop
