@@ -1852,6 +1852,9 @@ fn field(ui: &mut Ui, label: &str, value: &mut f32, suffix: &str, range: std::op
     .inner
 }
 
+#[cfg(all(test, gpu_stage))]
+pub(crate) use tests::test_window_device;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2289,7 +2292,7 @@ mod tests {
     }
 
     #[cfg(gpu_stage)]
-    fn test_window_device() -> eframe::egui_wgpu::RenderState {
+    pub(crate) fn test_window_device() -> eframe::egui_wgpu::RenderState {
         use eframe::egui_wgpu::{RenderState, Renderer, wgpu};
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
