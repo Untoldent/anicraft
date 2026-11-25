@@ -674,6 +674,11 @@ fn spiral_cubics_preserve_spatial_geometry_and_angular_timing() {
         (143.0, 0.0, [-85.0, 35.0]),
         (-247.0, 90.0, [58.0, -120.0]),
         (360.0, -150.0, [0.0, 0.0]),
+        (420.0, 75.0, [0.0, 0.0]),
+        (-420.0, -55.0, [0.0, 0.0]),
+        (720.0, -60.0, [-33.0, 18.0]),
+        (-720.0, 0.0, [32.0, -40.0]),
+        (1080.0, 28.0, [10.0, -22.0]),
     ] {
         let mut s = source();
         let mut p = circle(sweep);
@@ -804,9 +809,10 @@ fn spiral_unsupported_conversion_and_duration_collisions_keep_the_draft() {
     s.preview_array(&p).unwrap();
     let draft = s.doc.clone();
     for (field, value, reason) in [
-        ("sweep_angle", json!(-361), "one revolution"),
-        ("spiral_offset", json!(-151), "zero radius before End"),
-        ("easing", json!({"preset":"QuadIn"}), "Linear Distribution"),
+        ("sweep_angle", json!(-36_000), "approximation range"),
+        ("easing", json!({"preset":"BounceOut"}), "monotonic easing"),
+        ("easing", json!({"preset":"BackIn"}), "monotonic easing"),
+        ("easing", json!({"mode":"per_segment","preset":"ElasticOut"}), "monotonic easing"),
     ] {
         let mut invalid = p.clone();
         invalid[field] = value;
@@ -821,4 +827,133 @@ fn spiral_unsupported_conversion_and_duration_collisions_keep_the_draft() {
     p["duration"] = json!(3);
     s.commit_array_timeline_preview(&p).unwrap();
     near(at(&s, 1).color.alpha(), 0.4);
+}
+
+#[test]
+fn spiral_global_easing_keeps_intersections_and_repeated_sections_in_order() {
+    use anicraft_doc::Props;
+
+    for (sweep, drift, revisit) in [(720.0, 600.0, 12), (-1080.0, 0.0, 16)] {
+        let mut p = circle(sweep);
+        p["closed_loop"] = json!(false);
+        p["start_angle"] = json!(0.0);
+        p["drift_x"] = json!(drift);
+        let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+        let mut linear = source();
+        linear.execute("array.create_timeline", &p).unwrap();
+        let first = at(&linear, 0).transform.translation();
+        assert!(at(&linear, revisit).transform.translation().distance(first) < 0.01);
+        assert!(at(&linear, revisit / 2).transform.translation().distance(first) > 50.0);
+        let path = layer(&linear).keyframes[0].motion.as_ref().unwrap().path.clone();
+        for preset in [Easing::QuadIn, Easing::QuadOut, Easing::QuadInOut, Easing::CubicOut, Easing::QuartIn, Easing::QuintInOut, Easing::SineIn, Easing::CircOut] {
+            let mut s = source();
+            p["easing"] = json!({"preset":preset.name().unwrap(),"colour_effect":false});
+            p["property_stops"] = json!([{"offset":0}, {"offset":0.5,"alpha":0.4}, {"offset":1}]);
+            s.execute("array.create_timeline", &p).unwrap();
+            let key = &layer(&s).keyframes[0];
+            let motion = key.motion.as_ref().unwrap();
+            assert_eq!(motion.path, path);
+            let walker = motion.on_path(&Props::of(&key.elements[0])).unwrap();
+            assert!(walker.progress(revisit as f32) > 0.0);
+            for frame in [0, 6, 12, 18, 24, 34, 43, 48] {
+                let ideal = radial.point(f64::from(preset.apply(frame as f32 / 48.0)));
+                assert!(at(&s, frame).transform.translation().distance(ideal) < 0.025);
+            }
+            near(at(&s, 24).color.alpha(), 0.4);
+        }
+    }
+}
+
+#[test]
+fn spiral_per_segment_distribution_and_rotate_follow_spatial_progress_independently_of_properties() {
+    for (sweep, distribution, transform, filters) in [
+        (720.0, true, false, true), (-720.0, true, true, false), (-720.0, false, true, true),
+    ] {
+        let mut s = source();
+        s.execute("symbol.set_kind", &json!({"kind":"movie_clip"})).unwrap();
+        s.execute("element.set_filters", &json!({"filters":[
+            {"type":"blur","blur_x":2,"quality":2}, {"type":"adjust_color","hue":23,"enabled":false}
+        ]})).unwrap();
+        let mut p = circle(sweep);
+        p["closed_loop"] = json!(false);
+        p["count"] = json!(49);
+        p["spiral_offset"] = json!(58.0);
+        p["drift_x"] = json!(22.0);
+        p["drift_y"] = json!(-44.0);
+        p["rotate"] = json!(true);
+        p["easing"] = json!({"mode":"per_segment","distribution":distribution,"transform":transform,"colour_effect":false,"filters":filters});
+        p["property_stops"] = json!([
+            {"offset":0,"outbound_ease":"QuadIn","rotation":0,"alpha":1,"filters":[{"type":"blur","blur_x":2}]},
+            {"offset":0.5,"outbound_ease":"QuadOut","rotation":45,"scale_x":2,"alpha":0.5,"filters":[{"type":"blur","blur_x":14}]},
+            {"offset":1,"rotation":90,"scale_x":0.5,"alpha":1,"filters":[{"type":"blur","blur_x":6}]}
+        ]);
+        let original = s.doc.clone();
+        let steps = s.history_len();
+        s.preview_array(&p).unwrap();
+        let expected: Vec<_> = s.selected_elements().into_iter().map(|(_, el)| el).collect();
+        s.commit_array_timeline_preview(&p).unwrap();
+        for (frame, want) in (0..49).zip(expected) {
+            let mut actual = (*at(&s, frame)).clone();
+            assert!(actual.transform.translation().distance(want.transform.translation()) < 0.025);
+            actual.transform.m[4..].copy_from_slice(&want.transform.m[4..]);
+            compare_pose(&actual, &want);
+        }
+
+        let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+        assert!(at(&s, 24).transform.translation().distance(radial.point(0.5)) < 0.025);
+        near(at(&s, 24).color.alpha(), 0.5);
+        assert_eq!(s.history_len(), steps + 1);
+        let animation = s.doc.clone();
+        s.undo().unwrap();
+        assert!(s.doc == original);
+        s.redo().unwrap();
+        assert!(s.doc == animation);
+        let mut reopened = Session::new(format::from_json(&format::to_json(&s.doc).unwrap()).unwrap());
+        compare_pose(&at(&s, 12), &at(&reopened, 12));
+        let key = &layer(&reopened).keyframes[0];
+        let props = anicraft_doc::Props::of(&key.elements[0]);
+        let original_motion = key.motion.clone().unwrap();
+        let mut path = original_motion.path.clone().unwrap();
+        let handle = anicraft_geom::edit::C1;
+        let from = path.point(1, handle).unwrap();
+        assert!(path.set_point(1, handle, from + Vec2::new(22.0, -38.0)));
+        reopened.execute("motion.set_path", &json!({"d":path.to_svg()})).unwrap();
+        let edited = layer(&reopened).keyframes[0].motion.as_ref().unwrap();
+        assert_ne!(edited.path, original_motion.path);
+        for frame in [12.0, 24.0, 39.0] {
+            near(edited.on_path(&props).unwrap().progress(frame), original_motion.on_path(&props).unwrap().progress(frame));
+        }
+    }
+}
+
+#[test]
+fn inward_multi_turn_spirals_hold_or_follow_drift_after_radius_reaches_zero() {
+    use anicraft_geom::Affine;
+
+    for (drift, ease) in [([0.0, 0.0], Easing::Linear), ([0.0, 0.0], Easing::QuadIn), ([40.0, -30.0], Easing::QuadOut)] {
+        let mut s = source();
+        let mut p = circle(-720.0);
+        p["closed_loop"] = json!(false);
+        p["rotate"] = json!(true);
+        p["spiral_offset"] = json!(-120.0);
+        p["drift_x"] = json!(drift[0]);
+        p["drift_y"] = json!(drift[1]);
+        p["easing"] = json!({"preset":ease.name().unwrap()});
+        let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+        s.execute("array.create_timeline", &p).unwrap();
+        assert_eq!(at(&s, 0).transform.translation(), radial.point(0.0));
+        assert_eq!(at(&s, 48).transform.translation(), radial.point(1.0));
+        for frame in [8, 16, 24, 29, 30, 31, 34, 39, 42, 47, 48] {
+            let t = f64::from(ease.apply(frame as f32 / 48.0));
+            let actual = at(&s, frame);
+            assert!(actual.transform.translation().distance(radial.point(t)) < 0.025, "{drift:?}, {ease:?}, frame {frame}");
+            let expected = Affine::rotate(radial.travel(t).to_radians() as f32);
+            for (a, b) in actual.transform.m[..4].iter().zip(expected.m) {
+                near(*a, b);
+            }
+            if drift == [0.0, 0.0] && t >= 0.625 {
+                assert_eq!(actual.transform.translation(), radial.point(1.0));
+            }
+        }
+    }
 }

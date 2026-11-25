@@ -517,24 +517,33 @@ Open Radial conversion follows the same Start angle, signed Sweep, Spiral
 Offset, and Centre Drift X/Y as the spatial evaluator. Offset changes radius
 and drift moves the centre per unsigned turn, while Sweep sets travel direction.
 Circle mode ignores the stored offset and drift. Open Radial with both rates
-zero uses the same geometry and timing as Circle.
+zero uses the same geometry and timing as Circle through one turn. Beyond
+that it can traverse the same coordinates on several successive turns.
 
-Spiral uses tangent-matched cubic Bézier segments. The segment count grows with
-the radius, angular sweep and change in radius. The geometric fit targets
-0.01 px before native coordinate rounding and keeps the evaluator's exact
-Start and End. Constant-speed arc-length traversal would change the angular
-pacing, so the native Motion Tween stores a time-to-distance map measured from
-those same cubics. The map is simplified within 0.01 px of measured distance
-(or one floating-point epsilon of the total distance on large paths). It is
-independent of frame count and remains when the path handles are edited.
+Spiral uses tangent-matched cubic Bézier segments through multiple signed
+revolutions. The segment count grows with the radius, angular sweep, and
+change in radius. The fit targets 0.01 px before native coordinate rounding
+and keeps the evaluator's exact Start and End. The path is measured in
+traversal order, including coincident sections and self-intersections.
+The fit allows up to 256 curved cubics plus a straight continuation at
+zero radius. Native coordinate and timing-map limits also apply.
+
+Linear, Global, and Per Segment use the same monotonic Distribution presets
+and normalized stop boundaries as Circle. The native Motion Tween eases time
+to the authored angular parameter and maps that parameter to distance along
+the cubics. The map is simplified within 0.01 px of measured distance (or
+one floating-point epsilon of the total distance on large paths), independently
+of frame count. Path-handle edits keep the stored pacing. Back, Bounce, and
+Elastic remain unavailable for Distribution.
 
 Spiral reuses the Circle property tracks, stop frame rounding, collision
-correction, and transformation-point restrictions. Spiral **Rotate** adds
-signed angular travel to the authored Rotation track independently of arc
-distance. Spiral supports Linear Distribution, either sweep direction through
-one turn, and inward travel that reaches zero radius at End. Nonlinear
-Distribution, sweeps over one turn, and inward paths that reach zero radius
-before End are deferred. Validation preserves the draft.
+correction, and transformation-point restrictions. **Rotate** adds the same
+signed, eased angular travel to the authored Rotation track, retaining whole
+turns within the native rotation range. If an inward Spiral reaches zero radius
+early, its registration follows the drifting centre along a straight segment or
+holds at a stationary centre. The join may have a corner as in the spatial
+evaluator, and rotation can continue during the hold. A stationary path with
+no length or a path beyond native limits is rejected with the draft intact.
 
 ## Create Unique Symbols
 
@@ -578,9 +587,8 @@ their arrow-key behavior while focused.
 
 ### Further Array to Timeline outputs
 
-Linear, Circle, and single-turn Spiral conversion are available in
-[Commit output](#commit-output). Future work includes multi-turn Spiral and
-arbitrary Path conversion. Grid traversal order is undecided. Sequential reveal and
+Linear, Circle, and Spiral conversion are available in
+[Commit output](#commit-output). Future work includes arbitrary Path conversion. Grid traversal order is undecided. Sequential reveal and
 staggered animation starts across multiple instances or unique Symbols remain
 deferred.
 

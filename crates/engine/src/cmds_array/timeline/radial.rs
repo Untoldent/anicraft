@@ -5,7 +5,7 @@ mod spiral;
 
 use super::super::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, RadialDistribution, keep_pivot, posed_element};
 use crate::{EngineError, Result};
-use anicraft_doc::{Element, Keyframe, MotionTween, Props};
+use anicraft_doc::{Easing, Element, Keyframe, MotionTween, Property, Props};
 use anicraft_geom::{Path, PathCmd, Vec2};
 use std::sync::Arc;
 
@@ -41,18 +41,26 @@ pub(super) fn keyframe(
     easing: &ArrayEasing,
     duration: u32,
 ) -> Result<Keyframe> {
-    let spiral = radial.has_spiral_geometry();
-    if radial.sweep.abs() > CLOSED_SWEEP_LIMIT {
-        return Err(EngineError::Param("Radial Timeline Animation supports sweeps of up to one revolution (360 degrees).".into()));
+    let spiral = radial.needs_angular_path();
+    if radial.closed_loop && radial.sweep.abs() > CLOSED_SWEEP_LIMIT {
+        return Err(EngineError::Param("Circle Timeline Animation supports sweeps of up to one revolution (360 degrees).".into()));
     }
     if radial.sweep == 0.0 || (!spiral && radial.radius == 0.0) {
         return Err(EngineError::Param("Radial Timeline Animation needs a nonzero sweep and a path of some length.".into()));
     }
     let eased_distribution = easing.eases_distribution(stops);
-    if spiral && eased_distribution {
-        return Err(EngineError::Param("Spiral Timeline Animation needs Linear Distribution. Set the Distribution ease to Linear or turn off Distribution easing.".into()));
+    let turn = if radial.rotate { radial.sweep } else { 0.0 };
+    if !Property::Rotation.range().contains(&turn) {
+        return Err(EngineError::Param("Radial Rotate exceeds the native rotation range.".into()));
     }
-    let path = if spiral { spiral::path(radial)? } else { circle_path(radial) };
+    let spiral_path = spiral.then(|| spiral::path(radial)).transpose()?;
+    let circle;
+    let path = if let Some(spiral) = &spiral_path {
+        &spiral.path
+    } else {
+        circle = circle_path(radial);
+        &circle
+    };
     let basis = original.transform.decompose();
     let pose = |stop: &ArrayPropertyStop| {
         let mut base = original.transform;
@@ -73,29 +81,34 @@ pub(super) fn keyframe(
     let last = duration - 1;
     // X/Y keys anchor the original path. Distribution timing uses normalized
     // authored stop positions, independent of rounding the property keys.
-    if !motion.set_path(&path, &base, last) {
+    if !motion.set_path(path, &base, last) {
         return Err(EngineError::Param("The Radial path is too small or its control points exceed the native motion path range.".into()));
     }
-    let turn = if radial.rotate { radial.sweep } else { 0.0 };
-    if spiral {
-        if !spiral::distance_map(&path).is_some_and(|map| motion.set_path_distance_map(map, turn)) {
-            return Err(EngineError::Param("The Spiral exceeds the native motion timing range.".into()));
-        }
-    } else if eased_distribution {
-        let segments = match easing.mode {
-            ArrayEaseMode::Global => vec![(0.0, easing.preset.clone())],
-            ArrayEaseMode::PerSegment => super::property_times(stops)
-                .into_iter()
-                .map(|time| time as f32)
-                .take_while(|&time| time < 1.0)
-                .map(|time| {
-                    let next = stops.partition_point(|stop| stop.offset <= time);
-                    (time, easing.distribution_segment(stops, next).clone())
-                })
-                .collect(),
+    if spiral || eased_distribution {
+        let segments = if !eased_distribution {
+            vec![(0.0, Easing::Linear)]
+        } else {
+            match easing.mode {
+                ArrayEaseMode::Global => vec![(0.0, easing.preset.clone())],
+                ArrayEaseMode::PerSegment => super::property_times(stops)
+                    .into_iter()
+                    .map(|time| time as f32)
+                    .take_while(|&time| time < 1.0)
+                    .map(|time| {
+                        let next = stops.partition_point(|stop| stop.offset <= time);
+                        (time, easing.distribution_segment(stops, next).clone())
+                    })
+                    .collect(),
+            }
         };
-        if !motion.set_path_timing(segments, turn) {
-            return Err(EngineError::Param("Circle Distribution needs monotonic easing. Back, Bounce and Elastic overshoot or reverse along the path.".into()));
+        let valid = if let Some(spiral) = &spiral_path {
+            let map = spiral.distance_map().ok_or_else(|| EngineError::Param("The Spiral exceeds the native motion timing range.".into()))?;
+            motion.set_path_distance_map(segments, map, turn)
+        } else {
+            motion.set_path_timing(segments, turn)
+        };
+        if !valid {
+            return Err(EngineError::Param("Radial Distribution needs monotonic easing. Back, Bounce and Elastic overshoot or reverse along the path.".into()));
         }
     }
     properties::write(&mut motion, &element, radial, stops, easing, source.start..source.start + duration, pose)?;

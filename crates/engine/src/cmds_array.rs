@@ -217,8 +217,8 @@ impl RadialDistribution {
         [x + dx * turns, y + dy * turns]
     }
 
-    fn has_spiral_geometry(self) -> bool {
-        !self.closed_loop && (self.spiral_offset != 0.0 || self.centre_drift != [0.0; 2])
+    fn needs_angular_path(self) -> bool {
+        !self.closed_loop && (self.spiral_offset != 0.0 || self.centre_drift != [0.0; 2] || self.sweep.abs() > CLOSED_SWEEP_LIMIT)
     }
 
     pub fn point(self, fraction: f64) -> Vec2 {

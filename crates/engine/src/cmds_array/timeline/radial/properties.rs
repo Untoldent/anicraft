@@ -29,7 +29,7 @@ pub(super) fn write(
     let duration = span.end - span.start;
     let last = duration - 1;
     // Explicit path timing drives the Radial turn separately from authored Rotation keys.
-    let keyed_turn = radial.rotate && !radial.has_spiral_geometry() && !easing.eases_distribution(authored);
+    let keyed_turn = radial.rotate && !radial.needs_angular_path() && !easing.eases_distribution(authored);
     let sweep = if keyed_turn { radial.sweep } else { 0.0 };
     let props = Props::of(base);
 

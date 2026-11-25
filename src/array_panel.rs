@@ -2161,7 +2161,7 @@ mod tests {
         settings.radial.closed_loop = false;
         settings.radial.spiral_offset = 48.0;
         settings.radial.centre_drift = [24.0, -18.0];
-        settings.radial.sweep = -420.0;
+        settings.radial.sweep = -36_000.0;
         app.array_panel.refresh(&mut app.s);
         let choice = commit_control(&ctx, &mut app, "Timeline Animation");
         click(&ctx, &mut app, &choice);
@@ -2180,7 +2180,7 @@ mod tests {
         click_named(&mut app, "Cancel");
         assert!(!app.modal_open());
 
-        app.array_panel.settings.as_mut().unwrap().radial.sweep = -300.0;
+        app.array_panel.settings.as_mut().unwrap().radial.sweep = -720.0;
         app.array_panel.refresh(&mut app.s);
         app.array_panel.request_commit(&mut app.s, false);
         click_named(&mut app, "Create Animation");

@@ -786,13 +786,14 @@ impl MotionTween {
         true
     }
 
-    /// Map normalized time to normalized path distance. The endpoints must be (0, 0)
-    /// and (1, 1). Optional signed rotation follows time, independent of arc distance.
-    pub fn set_path_distance_map(&mut self, distances: Vec<(f32, f32)>, turn: f32) -> bool {
+    /// Apply the segment eases to normalized time, then map that parameter to normalized
+    /// arc distance. The distance map endpoints must be (0, 0) and (1, 1). Optional
+    /// signed rotation follows the eased parameter, including where the path holds still.
+    pub fn set_path_distance_map(&mut self, segments: Vec<(f32, Easing)>, distances: Vec<(f32, f32)>, turn: f32) -> bool {
         if self.path.is_none() {
             return false;
         }
-        let Some(timing) = PathTiming::from_distances(distances, turn) else { return false };
+        let Some(timing) = PathTiming::from_distances(segments, distances, turn) else { return false };
         self.path_timing = Some(timing);
         true
     }
