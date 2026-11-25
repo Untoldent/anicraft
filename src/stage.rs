@@ -508,7 +508,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // Ctrl+X/C/V go back to artwork.
         app.timeline_focus = false;
     }
-    if app.tool == Tool::Pen && !panning && !paused {
+    if !array_active && app.tool == Tool::Pen && !panning && !paused {
         crate::pathtools::pen_input(app, ui, &resp, xf);
     }
 

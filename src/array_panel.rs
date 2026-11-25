@@ -4809,6 +4809,79 @@ mod tests {
     }
 
     #[test]
+    fn properties_adjust_color_sliders_click_to_set_and_undo() {
+        let (mut app, ctx) = linear_app();
+        app.dock.right.size = Some(450.0);
+        app.show_panel(Panel::Properties);
+        for group in &mut app.dock.right.groups {
+            group.folded = !group.tabs.contains(&Panel::Properties);
+        }
+        app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+        app.s.execute("element.set_filters", &json!({"filters": [{"type": "adjust_color"}]})).unwrap();
+        let before = app.s.doc.clone();
+        let steps = app.s.history_len();
+        let controls = nodes(&ctx, &mut app);
+        for (label, limit) in [("Brightness", 100.0), ("Contrast", 100.0), ("Saturation", 100.0), ("Hue", 180.0)] {
+            let (_, slider) = controls.iter().find(|(_, n)| n.label() == Some(label) && n.role() == Role::Slider)
+                .unwrap_or_else(|| panic!("missing {label} slider"));
+            assert_eq!(slider.min_numeric_value(), Some(-limit));
+            assert_eq!(slider.max_numeric_value(), Some(limit));
+            assert!(controls.iter().any(|(_, n)| n.label() == Some(label) && n.role() == Role::SpinButton));
+        }
+        let hue = controls.iter().find(|(_, n)| n.label() == Some("Hue") && n.role() == Role::Slider).unwrap().1.bounds().unwrap();
+        let pos = pos2((hue.x0 + (hue.x1 - hue.x0) * 0.8) as f32, ((hue.y0 + hue.y1) / 2.0) as f32);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(&ctx, &mut app, vec![pointer_button(pos, pressed)]);
+        }
+        let selected = app.s.selected_elements();
+        assert!(matches!(selected[0].1.kind.filters().unwrap()[0].filter, Filter::AdjustColor { hue, .. } if hue > 50.0));
+        assert_eq!(app.s.history_len(), steps + 1);
+        let after = app.s.doc.clone();
+        app.s.undo().unwrap();
+        assert!(app.s.doc == before);
+        app.s.redo().unwrap();
+        assert!(app.s.doc == after);
+    }
+
+    #[test]
+    fn array_with_hidden_handles_does_not_buffer_pen_points() {
+        let (mut app, ctx) = linear_app();
+        app.tool = crate::app::Tool::Pen;
+        assert!(app.pen.is_none());
+        let (doc, selection, steps) = (app.s.doc.clone(), app.s.selection.clone(), app.s.history_len());
+        for label in ["Array type", "Linear", "Hide Array Handles"] {
+            let controls = nodes(&ctx, &mut app);
+            click(&ctx, &mut app, &controls.iter().find(|(_, n)| n.label() == Some(label)).unwrap().1);
+        }
+        assert!(app.s.array_preview_active() && app.array_panel.gizmo_geometry().is_none());
+        let positions = [-100.0, 100.0].map(|dx| app.stage_cache.canvas.center() + vec2(dx, 60.0));
+        let click_stage = |app: &mut App| {
+            for pos in positions {
+                frame(&ctx, app, vec![Event::PointerMoved(pos)]);
+                for pressed in [true, false] {
+                    frame(&ctx, app, vec![pointer_button(pos, pressed)]);
+                }
+            }
+        };
+        click_stage(&mut app);
+        let buffered_during_array = app.pen.is_some();
+        frame(&ctx, &mut app, vec![key(Key::Escape, true)]);
+        frame(&ctx, &mut app, vec![key(Key::Escape, false)]);
+        assert!(!app.s.array_preview_active() && app.tool == crate::app::Tool::Pen);
+        let buffered_after_cancel = app.pen.is_some();
+        app.tool = crate::app::Tool::Select;
+        frame(&ctx, &mut app, vec![]);
+        assert!(!buffered_during_array && !buffered_after_cancel, "Array clicks buffered an ordinary Pen path");
+        assert!(app.pen.is_none() && app.s.doc == doc && app.s.selection == selection);
+        assert_eq!(app.s.history_len(), steps);
+
+        app.tool = crate::app::Tool::Pen;
+        click_stage(&mut app);
+        assert!(app.pen.is_some(), "the same clicks reach the Pen in ordinary editing");
+    }
+
+    #[test]
     fn radial_visibility_toggle_controls_instance_registrations() {
         let (mut app, ctx) = linear_app();
         app.array_panel.select_mode(&mut app.s, Some(Mode::Radial));

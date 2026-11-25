@@ -1807,12 +1807,18 @@ pub(crate) fn effect_filter_rows(ui: &mut egui::Ui, layout: FilterRows, fname: &
                 (brightness, tr!("Brightness"), 100.0, ""), (contrast, tr!("Contrast"), 100.0, ""),
                 (saturation, tr!("Saturation"), 100.0, ""), (hue, tr!("Hue"), 180.0, "°"),
             ] {
-                let name = match layout {
-                    FilterRows::Properties => label.to_owned(),
-                    FilterRows::Array => tr!("{filter} {parameter}", filter = fname, parameter = label),
-                };
                 layout.show(ui, label, |ui| with_type(ui, Type::Data, |ui| {
-                    if ui.add(egui::DragValue::new(value).range(-limit..=limit).suffix(unit).speed(limit / 100.0).max_decimals(0)).named(&name).changed() {
+                    let response = match layout {
+                        FilterRows::Properties => a11y::slider(ui, value, -limit..=limit, label, a11y::SliderLook {
+                            max_decimals: Some(0),
+                            ..Default::default()
+                        }),
+                        FilterRows::Array => {
+                            let name = tr!("{filter} {parameter}", filter = fname, parameter = label);
+                            ui.add(egui::DragValue::new(value).range(-limit..=limit).suffix(unit).speed(limit / 100.0).max_decimals(0)).named(&name)
+                        }
+                    };
+                    if response.changed() {
                         *changed = Some(tr_noop!("Adjust colour"));
                     }
                 }));
