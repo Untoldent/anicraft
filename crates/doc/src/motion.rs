@@ -554,6 +554,7 @@ pub struct MotionTween {
     /// timing along it.
     pub path: Option<Path>,
     path_timing: Option<PathTiming>,
+    exact_path_affine: bool,
     /// Orient to path: the object turns as the path turns (relative to its turn at the start).
     pub orient: bool,
     /// Anchors between the ends pinned to frames (ADR 0049), by frame; both frames and anchors
@@ -578,6 +579,9 @@ struct TweenFile {
     path: Option<Path>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path_timing: Option<PathTiming>,
+    /// Older documents use the native property decomposition and limits.
+    #[serde(default, skip_serializing_if = "is_false")]
+    exact_path_affine: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     orient: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -590,14 +594,14 @@ impl From<TweenFile> for MotionTween {
     fn from(f: TweenFile) -> MotionTween {
         let mut tracks = f.tracks;
         tracks.extend(f.filter_tracks);
-        MotionTween { target: f.target, tracks, path: f.path, path_timing: f.path_timing, orient: f.orient, pins: f.pins, keep_area: f.keep_area }
+        MotionTween { target: f.target, tracks, path: f.path, path_timing: f.path_timing, exact_path_affine: f.exact_path_affine, orient: f.orient, pins: f.pins, keep_area: f.keep_area }
     }
 }
 
 impl From<MotionTween> for TweenFile {
     fn from(m: MotionTween) -> TweenFile {
         let (filter_tracks, tracks) = m.tracks.into_iter().partition(|t| t.property.is_filter());
-        TweenFile { target: m.target, tracks, filter_tracks, path: m.path, path_timing: m.path_timing, orient: m.orient, pins: m.pins, keep_area: m.keep_area }
+        TweenFile { target: m.target, tracks, filter_tracks, path: m.path, path_timing: m.path_timing, exact_path_affine: m.exact_path_affine, orient: m.orient, pins: m.pins, keep_area: m.keep_area }
     }
 }
 
@@ -771,7 +775,13 @@ impl OnPath<'_> {
 
 impl MotionTween {
     pub fn new(target: ElementId) -> MotionTween {
-        MotionTween { target, tracks: Vec::new(), path: None, path_timing: None, orient: false, pins: Vec::new(), keep_area: false }
+        MotionTween { target, tracks: Vec::new(), path: None, path_timing: None, exact_path_affine: false, orient: false, pins: Vec::new(), keep_area: false }
+    }
+
+    /// Opt in to preserving the source matrix on position-only paths and on paths
+    /// that can rotate it directly. Ordinary Motion Tweens use the legacy evaluator.
+    pub fn preserve_path_affine(&mut self) {
+        self.exact_path_affine = true;
     }
 
     /// Use an explicit monotonic path timing curve. Each segment starts at the same
@@ -1340,7 +1350,7 @@ impl MotionTween {
         // A position-only path can translate the exact source matrix. A path with
         // rotation keys and a registration pivot can turn that matrix directly too.
         // This avoids decomposing a constant shear, reflection or collapsed axis.
-        if on_path.is_some() && !self.orient && !self.keep_area
+        if self.exact_path_affine && on_path.is_some() && !self.orient && !self.keep_area
             && !self.tracks.iter().any(|t| matches!(t.property, Property::ScaleX | Property::ScaleY | Property::Skew)
                 || (t.property == Property::Rotation && base.pivot().is_some_and(|p| p != Vec2::ZERO)))
         {
@@ -1473,7 +1483,7 @@ impl MotionTween {
                 Some(Track { property: t.property, keys })
             })
             .collect();
-        let mut tail = MotionTween { target: self.target, tracks, path: None, path_timing: None, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area };
+        let mut tail = MotionTween { target: self.target, tracks, path: None, path_timing: None, exact_path_affine: self.exact_path_affine, orient: self.orient, pins: Vec::new(), keep_area: self.keep_area };
         let Some(op) = self.on_path(base) else { return tail };
         let f = frame as f32;
         match op.walk().tail(op.distance(f)) {

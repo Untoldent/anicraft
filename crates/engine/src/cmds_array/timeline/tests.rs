@@ -323,6 +323,78 @@ fn circle_motion_preserves_the_matrix_and_custom_pivot_and_supports_signed_rotat
 }
 
 #[test]
+fn radial_exact_affine_survives_native_span_edits_and_round_trip() {
+    for spiral in [false, true] {
+        let mut s = source();
+        s.execute("modify.transform", &json!({"a":1, "b":0, "c":60, "d":1, "e":0, "f":0})).unwrap();
+        let mut p = circle(-360.0);
+        if spiral {
+            p["closed_loop"] = json!(false);
+            p["sweep_angle"] = json!(-720);
+            p["spiral_offset"] = json!(32);
+            p["drift_x"] = json!(44);
+            p["drift_y"] = json!(-25);
+        }
+        let original = s.doc.clone();
+        s.execute("array.create_timeline", &p).unwrap();
+        let pose = |s: &Session, frame| {
+            let at = at(s, frame).transform;
+            let registration = at.translation();
+            // Eight local pixels of Y have 480 px of horizontal shear, beyond the
+            // ordinary Motion Tween property's 89-degree limit.
+            assert!((at.apply(Vec2::new(0.0, 8.0)).x - registration.x - 480.0).abs() < 0.001);
+            registration
+        };
+        let radial = parse_radial(&p, Vec2::ZERO).unwrap();
+        assert!(pose(&s, 0).distance(radial.point(0.0)) < 0.001);
+        assert!(pose(&s, 24).distance(radial.point(0.5)) < 0.03);
+        assert!(pose(&s, 48).distance(radial.point(1.0)) < 0.001);
+        let middle = pose(&s, 10);
+        s.undo().unwrap();
+        assert!(s.doc == original);
+        s.redo().unwrap();
+        assert_eq!(pose(&s, 10), middle);
+
+        let saved = format::to_json(&s.doc).unwrap();
+        assert!(saved.contains("exact_path_affine"));
+        // Linear Circle has no timing map and must opt in just like Spiral.
+        assert_eq!(saved.contains("path_timing"), spiral);
+        let mut reopened = Session::new(format::from_json(&saved).unwrap());
+        assert_eq!(pose(&reopened, 10), middle);
+        let mut path = layer(&reopened).keyframes[0].motion.as_ref().unwrap().path.clone().unwrap();
+        let handle = path.point(1, anicraft_geom::edit::C1).unwrap();
+        assert!(path.set_point(1, anicraft_geom::edit::C1, handle + Vec2::new(0.0, 60.0)));
+        reopened.execute("motion.set_path", &json!({"frame": 0, "d": path.to_svg()})).unwrap();
+        let edited = pose(&reopened, 10);
+        assert!(edited.distance(middle) > 0.1);
+        reopened.undo().unwrap();
+        assert_eq!(pose(&reopened, 10), middle);
+        reopened.redo().unwrap();
+        assert_eq!(pose(&reopened, 10), edited);
+
+        // The Motion Editor can author and retime a property on either generated path.
+        reopened.execute("motion.set_key", &json!({"frame": 10, "property": "alpha", "value": 55})).unwrap();
+        reopened.execute("motion.move_keys", &json!({"keys": [{"property": "alpha", "frame": 10}], "by": 2})).unwrap();
+        near(at(&reopened, 12).color.transform().mul[3], 0.55);
+        assert_eq!(pose(&reopened, 10), edited);
+
+        reopened.execute("timeline.copy_frames", &json!({"frame": 0, "count": 49})).unwrap();
+        reopened.execute("timeline.paste_frames", &json!({"frame": 49})).unwrap();
+        assert_eq!(pose(&reopened, 59), edited);
+        reopened.undo().unwrap();
+        reopened.execute("timeline.resize_span", &json!({"frame": 0, "frames": 97})).unwrap();
+        assert!(pose(&reopened, 20).distance(edited) < 0.001);
+        let cut = pose(&reopened, 24);
+        reopened.execute("motion.split", &json!({"frame": 24})).unwrap();
+        assert!(pose(&reopened, 24).distance(cut) < 0.03);
+        let tail = pose(&reopened, 60);
+        let saved = format::to_json(&reopened.doc).unwrap();
+        let reopened = Session::new(format::from_json(&saved).unwrap());
+        assert_eq!(pose(&reopened, 60), tail);
+    }
+}
+
+#[test]
 fn circle_commit_is_atomic_with_existing_classic_spans_and_a_native_editable_path() {
     let mut s = source();
     s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();

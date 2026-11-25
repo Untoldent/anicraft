@@ -78,6 +78,7 @@ pub(super) fn keyframe(
 
     let base = Props::of(&element);
     let mut motion = MotionTween::new(element.id);
+    motion.preserve_path_affine();
     let last = duration - 1;
     // X/Y keys anchor the original path. Distribution timing uses normalized
     // authored stop positions, independent of rounding the property keys.

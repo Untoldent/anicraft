@@ -710,7 +710,9 @@ eased sweep to the authored Rotation keys, including full turns.
 When an inward Spiral reaches zero radius, the Symbol follows the drifting
 centre in a straight line or holds at the centre if drift is zero. Rotation
 can continue during the hold. If a very long or complex Spiral exceeds native
-path limits, shorten the sweep or reduce its size.
+path limits, shorten the sweep or reduce its size. Splitting a Spiral Motion
+Tween during a zero-radius stationary hold may discard the remaining
+path-driven rotation in the new tail span.
 
 Either output commits in one document undo step. The next Array starts with
 defaults at the newly selected symbol's position. **Cancel**, **Escape**, or choosing **None** restores the

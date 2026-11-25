@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+* **Array panel** (Window › Array): preview and commit Linear, Grid, and Radial
+  layouts, including Circle and Spiral. Property stops and easing vary transforms,
+  colour effects, and filters across instances. Spatial output can give each
+  instance a unique Symbol with its own timeline. Linear Arrays can create an
+  editable Classic Tween or Hold Keyframes. Circle and Spiral Arrays can create
+  editable Motion Tweens with independent property and path easing. Preview
+  edits have their own Undo/Redo, and each commit is one document undo step.
+
 * **Themes of your own** (#340, ADR 0117, M8): a theme is a small JSON file that names colours
   for the interface's roles, kept in `themes` in the settings folder (`data/themes` in a
   portable copy).
