@@ -417,16 +417,19 @@ filtered instances that touch it, so tiles can repeat the same padded layer work
 submissions can retain all those intermediates concurrently. New pointer updates replace the
 pending batch already, but prior submissions and finished textures can still consume memory.
 
-Exact preview pictures expire when their keys leave the visible preview. The stage keeps one
-displayed replacement per missing tile while newer tiles arrive. The display owns its texture
-handle independently of the render cache, including when a tile is uploaded from CPU memory.
+Exact preview pictures expire when their keys leave the visible preview. The background worker
+checks again before rasterizing each tile and releases stale results as they finish. The stage
+keeps one displayed replacement per missing tile while newer tiles arrive. The display owns its
+texture handle independently of the render cache.
 
 Filtered window textures and headless readbacks share an allowance of 64 MiB on integrated,
 virtual, and unclassified devices, or 128 MiB when the adapter reports a discrete GPU. A scoped
 allocation failure brings the discrete allowance back to 64 MiB for that renderer. The estimate
-counts float layers, coverage, layer copies in paint buffers, and the output texture or both
-readback buffers. Bitmap and finished tile caches have their own bounds. Driver padding,
-window resources and other applications can add pressure beyond those estimates. Allocator
+counts float layers, coverage, paints, tile lists, edges, per-pass parameters and ramps, GPU
+binning buffers, and the output texture or both readback buffers. Small buffers are charged
+at least one 4 KiB page to account for allocation overhead. Bitmap and finished tile caches
+have their own bounds. Driver allocation policy, window resources and other applications can
+add pressure beyond those estimates. Allocator
 reports are optional diagnostics. Per-resource texture and buffer limits are checked
 independently, and no driver ID or reported VRAM size sets the allowance.
 

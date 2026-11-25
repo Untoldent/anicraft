@@ -2289,7 +2289,7 @@ mod tests {
     }
 
     #[cfg(gpu_stage)]
-    fn high_quality_filter_gpu_drag_lifecycle(filters: Vec<Value>) {
+    fn test_window_device() -> eframe::egui_wgpu::RenderState {
         use eframe::egui_wgpu::{RenderState, Renderer, wgpu};
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
@@ -2298,10 +2298,18 @@ mod tests {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
         let target_format = wgpu::TextureFormat::Rgba8Unorm;
         let renderer = Renderer::new(&device, target_format, Default::default());
-        let textures = RenderState {
+        RenderState {
             adapter, instance, device: device.clone(), queue, target_format, available_adapters: vec![],
             renderer: Arc::new(egui::mutex::RwLock::new(renderer)), surface_config: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
-        };
+        }
+    }
+
+    #[cfg(gpu_stage)]
+    fn high_quality_filter_gpu_drag_lifecycle(filters: Vec<Value>) {
+        use eframe::egui_wgpu::wgpu;
+        let textures = test_window_device();
+        let device = textures.device.clone();
+        let info = textures.adapter.get_info();
         let (mut app, ctx) = linear_app();
         app.stage_cache.gpu.set_window_device(Some(&textures));
         app.prefs.stage_renderer = crate::prefs::StageRenderer::Gpu;
@@ -2398,6 +2406,96 @@ mod tests {
             eprintln!("live allocations peak {:.1} MiB, latter half {:.1} MiB", high_water as f64 / 1048576.0, late_water as f64 / 1048576.0);
         } else {
             eprintln!("allocator report unavailable");
+        }
+    }
+
+    #[cfg(gpu_stage)]
+    #[test]
+    #[ignore = "requires a hardware adapter; measures rapid Quantity changes with real stage textures"]
+    fn filtered_quantity_churn_across_array_modes() {
+        use eframe::egui_wgpu::wgpu;
+
+        let textures = test_window_device();
+        let device = &textures.device;
+        let info = textures.adapter.get_info();
+        eprintln!("Quantity pressure on {} ({:?})", info.name, info.backend);
+        for (label, mode, closed, filtered) in [
+            ("plain Spiral", Mode::Radial, false, false),
+            ("filtered Linear", Mode::Linear, true, true),
+            ("filtered Circle", Mode::Radial, true, true),
+            ("filtered Spiral", Mode::Radial, false, true),
+        ] {
+            let (mut app, ctx) = linear_app();
+            app.stage_cache.gpu.set_window_device(Some(&textures));
+            app.prefs.stage_renderer = crate::prefs::StageRenderer::Gpu;
+            app.prefs.render_mode = crate::prefs::RenderMode::Background;
+            app.view.fit = false;
+            app.view.zoom = 1.0;
+            app.s.execute("symbol.set_kind", &json!({"kind": "movie_clip"})).unwrap();
+            if filtered {
+                app.s.execute("element.set_filters", &json!({"filters": [
+                    {"type":"glow","blur_x":16,"blur_y":12,"quality":3},
+                    {"type":"drop_shadow","blur_x":14,"blur_y":10,"distance":12,"quality":3}
+                ]})).unwrap();
+            }
+            let base = app.s.doc.clone();
+            let history = app.s.history_len();
+            app.array_panel.select_mode(&mut app.s, Some(mode));
+            let settings = app.array_panel.settings.as_mut().unwrap();
+            settings.count = 16;
+            settings.linear = Endpoints { start: [230.0, 280.0], end: [580.0, 340.0] };
+            settings.radial.centre = [410.0, 290.0];
+            settings.radial.radius = 65.0;
+            settings.radial.closed_loop = closed;
+            settings.radial.sweep = if closed { -360.0 } else { -720.0 };
+            settings.radial.spiral_offset = 28.0;
+            settings.radial.centre_drift = [15.0, -10.0];
+            settings.easing.mode = ArrayEaseMode::PerSegment;
+            settings.stops.first_mut().unwrap().value.outbound = Some(Easing::QuadIn);
+            let mut middle = PropertyStop::new(2, 0.5, 1.0);
+            middle.value = settings.stops.first().unwrap().value.clone();
+            middle.value.offset = 0.5;
+            middle.value.outbound = Some(Easing::QuadOut);
+            settings.stops.insert(1, middle);
+            app.array_panel.refresh(&mut app.s);
+
+            let started = std::time::Instant::now();
+            while !matches!(app.stage_cache.gpu.state(), crate::gpu_stage::State::Running { direct: true, .. }) {
+                assert!(started.elapsed().as_secs() < 90, "{label}: {:?}", app.stage_cache.gpu.state());
+                app.shot.as_mut().unwrap().frames = 0;
+                frame(&ctx, &mut app, vec![]);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let live_bytes = || device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes);
+            let mut peaks = [0, 0];
+            for peak in &mut peaks {
+                for count in [120, 410, 260, 500, 330, 490, 500] {
+                    // Drive the same count change and refresh as the Quantity control.
+                    app.array_panel.settings.as_mut().unwrap().count = count;
+                    app.array_panel.refresh(&mut app.s);
+                    app.shot.as_mut().unwrap().frames = 0;
+                    frame(&ctx, &mut app, vec![]);
+                    assert_eq!(app.s.selection.len(), count as usize);
+                    assert_eq!(app.s.committed_document().0, &base);
+                    *peak = (*peak).max(live_bytes());
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                wait_for_stage(&ctx, &mut app, |app| {
+                    app.stage_cache.shown_state == Some(app.s.state)
+                        && app.stage_cache.service.as_ref().is_some_and(|svc| !svc.busy())
+                });
+                *peak = (*peak).max(live_bytes());
+                assert!(matches!(app.stage_cache.gpu.state(), crate::gpu_stage::State::Running { direct: true, .. }));
+            }
+            let draft = app.array_panel.settings.clone();
+            app.array_panel.finish(&mut app.s, false);
+            assert!(app.s.doc == base && app.s.history_len() == history);
+            app.array_panel.select_mode(&mut app.s, Some(mode));
+            assert!(app.array_panel.settings == draft && app.s.selection.len() == 500);
+            eframe::App::on_exit(&mut app, None);
+            drop(app);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            eprintln!("{label}: sampled live peaks {:?} bytes; after drop and fence {} bytes", peaks, live_bytes());
         }
     }
 

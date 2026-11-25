@@ -267,6 +267,12 @@ fn filter_budget(device_type: wgpu::DeviceType, backend: wgpu::Backend) -> u64 {
     }
 }
 
+/// Charge short-lived buffers with a page-sized minimum. This is an admission
+/// estimate, not a driver memory report.
+fn scratch_allocation(bytes: u64) -> u64 {
+    bytes.max(1).next_multiple_of(4096)
+}
+
 struct FilteredFlight<S> {
     limit: u64,
     pending: VecDeque<(S, u64)>,
@@ -326,9 +332,15 @@ struct LayerJob {
 struct Cost {
     work: u64,
     layer_pixels: u64,
-    layer_bytes: u64,
+    scratch_bytes: u64,
     entries: usize,
     pieces: usize,
+}
+
+impl Cost {
+    fn filtered_scratch(&self) -> u64 {
+        if self.layer_pixels == 0 { 0 } else { self.scratch_bytes }
+    }
 }
 
 impl Job {
@@ -336,12 +348,24 @@ impl Job {
         c.work += self.binned.work;
         c.entries += self.binned.entries;
         c.pieces += self.binned.pieces;
+        let b = &self.binned;
+        let pieces = b.gpu.as_ref().map_or(b.geo.len() as u64, |plan| u64::from(plan.piece_cap));
+        c.scratch_bytes += scratch_allocation(b.paints_len.max(1) as u64 * 16)
+            + scratch_allocation((u64::from(b.ops_at) + b.op_heads.len() as u64).max(4) * 4)
+            + scratch_allocation(pieces.max(1) * 16)
+            + scratch_allocation(48); // fine-pass uniform
+        if let Some(plan) = &b.gpu {
+            c.scratch_bytes += plan.scratch_bytes(b.op_heads.len());
+        }
         for l in &self.layers {
             let n = u64::from(l.view.width) * u64::from(l.view.height);
             c.layer_pixels += n;
-            // Two float halves, a copy in the parent's paint buffer, and optionally three
-            // coverage slots. Filter passes reuse these buffers regardless of quality.
-            c.layer_bytes += n * (48 + if layers::needs_coverage(&l.ops) { 12 } else { 0 });
+            // The parent's paints already include the copy. Each filter dispatch
+            // allocates its own uniform even though it reuses the pixel buffers.
+            c.scratch_bytes += scratch_allocation(32 * n) + layers::scratch_bytes(&l.ops);
+            if layers::needs_coverage(&l.ops) {
+                c.scratch_bytes += scratch_allocation(12 * n);
+            }
             // Each filter pass walks the layer once (per pixel or per line).
             c.work += n.div_ceil(256) * layers::passes(&l.ops);
             l.job.cost(c);
@@ -624,7 +648,7 @@ impl GpuRenderer {
         self.guard(|| {
             let (job, stats, mut timings, cost) = self.prepare(dl, view, binning)?;
             let t = Instant::now();
-            let (premul8, pixmap) = self.run_readback(&job, view, output, cost.layer_bytes)?;
+            let (premul8, pixmap) = self.run_readback(&job, view, output, cost.filtered_scratch())?;
             timings.gpu = ms(t);
             Ok(GpuFrame { width: view.width, height: view.height, premul8, pixmap, stats, timings, entries: cost.entries, pieces: cost.pieces, gpu_binned: job.binned.gpu.is_some() })
         })
@@ -645,7 +669,7 @@ impl GpuRenderer {
             if w > max || h > max {
                 return Err(GpuError::TooLarge(format!("image {w}×{h} is larger than this GPU's textures ({max} px)")));
             }
-            let reservation = self.reserve_filtered(cost.layer_bytes, 4 * u64::from(w) * u64::from(h))?;
+            let reservation = self.reserve_filtered(cost.filtered_scratch(), scratch_allocation(4 * u64::from(w) * u64::from(h)))?;
             let scopes = Scopes::push(&self.device);
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("anicraft-stage"),
@@ -926,14 +950,14 @@ impl GpuRenderer {
         pass.dispatch_workgroups(b.tiles_x, b.tiles_y, 1);
     }
 
-    fn run_readback(&self, job: &Job, view: &View, output: Output, layer_bytes: u64) -> Result<(Vec<u8>, Option<Pixmap>), GpuError> {
+    fn run_readback(&self, job: &Job, view: &View, output: Output, scratch_bytes: u64) -> Result<(Vec<u8>, Option<Pixmap>), GpuError> {
         let (w, h) = (view.width, view.height);
         let out_bytes = u64::from(w) * u64::from(h) * if output == Output::Float { 16 } else { 4 };
         let cap = self.limits.max_storage_buffer_binding_size.min(self.limits.max_buffer_size);
         if out_bytes > cap {
             return Err(GpuError::TooLarge(format!("the image needs {} MB, more than this GPU binds ({} MB)", out_bytes >> 20, cap >> 20)));
         }
-        let reservation = self.reserve_filtered(layer_bytes, out_bytes * 2)?;
+        let reservation = self.reserve_filtered(scratch_bytes, scratch_allocation(out_bytes) * 2)?;
         let scopes = Scopes::push(&self.device);
         let obuf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("out"), size: out_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: out_bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });

@@ -96,6 +96,35 @@ fn filtered_scratch_policy_tracks_completions_and_lowers_the_discrete_budget_on_
     assert_eq!(flight.bytes, 0);
 }
 
+#[test]
+fn dense_shadow_glow_budget_includes_small_filter_allocations() {
+    let v = view(24, 24, None);
+    let bin = || binning::bin(&prepare_scene(&list(vec![]), &v).unwrap().0, v.width, v.height).unwrap();
+    let ops: Vec<_> = ["drop_shadow", "glow"].iter().map(|name| {
+        let mut filter = Filter::new(name).unwrap();
+        filter.set_param(anicraft_doc::FilterParam::Quality, 3.0);
+        anicraft_render::filters::resolve(&filter, 1.0)
+    }).collect();
+    let mut root = Job { binned: bin(), layers: vec![] };
+    let cost = |job: &Job| {
+        let mut c = Cost::default();
+        job.cost(&mut c);
+        c.filtered_scratch()
+    };
+    assert_eq!(cost(&root), 0);
+    root.layers.extend((0..500).map(|_| LayerJob {
+        at: 0, job: Box::new(Job { binned: bin(), layers: vec![] }), view: v, ops: ops.clone(),
+    }));
+    let pixels_only = 500 * 60 * u64::from(v.width) * u64::from(v.height);
+    let charged = cost(&root);
+    assert!(charged > pixels_only + 500 * layers::passes(&ops) * 4096);
+    let mut flight = FilteredFlight::new(SHARED_FILTER_BYTES);
+    flight.submitted(1, charged);
+    let mut fenced = Vec::new();
+    flight.make_room(charged, |index| { fenced.push(*index); Ok(()) }).unwrap();
+    assert_eq!(fenced, [1], "two dense filtered generations cannot overlap their scratch reservations");
+}
+
 /// Run on a hardware adapter with `WGPU_BACKEND=vulkan`. Sample the driver's allocator
 /// after successive 512 px tile batches, keeping the same output textures between passes.
 #[test]

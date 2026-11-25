@@ -422,20 +422,25 @@ pub fn render_batch(jobs: &[FrameJob]) -> Vec<FrameImage> {
 
 /// [`render_batch`] with the service's rasterizer for the jobs made for it.
 fn render_batch_by(jobs: &[FrameJob], slot: &RasterSlot) -> Vec<FrameImage> {
-    let mut scenes: HashMap<u64, Arc<DisplayList>> = HashMap::new();
-    for j in jobs {
-        scenes.entry(j.scene).or_insert_with(|| j.prepared.clone().unwrap_or_else(|| Arc::new(j.display_list())));
+    let scenes = batch_scenes(jobs);
+    jobs.par_iter().map(|job| render_tile(job, slot, &scenes)).collect()
+}
+
+fn batch_scenes(jobs: &[FrameJob]) -> HashMap<u64, Arc<DisplayList>> {
+    let mut scenes = HashMap::new();
+    for job in jobs {
+        scenes.entry(job.scene).or_insert_with(|| job.prepared.clone().unwrap_or_else(|| Arc::new(job.display_list())));
     }
-    jobs.par_iter()
-        .map(|j| {
-            // A job made for another rasterizer (queued before a switch) is drawn by the oracle.
-            let raster = slot.raster.as_ref().filter(|_| j.raster != 0 && j.raster == slot.id);
-            match scenes.get(&j.scene) {
-                Some(dl) => render_job_by(j, dl, raster),
-                None => render_job_by(j, &j.display_list(), raster),
-            }
-        })
-        .collect()
+    scenes
+}
+
+fn render_tile(job: &FrameJob, slot: &RasterSlot, scenes: &HashMap<u64, Arc<DisplayList>>) -> FrameImage {
+    // A job queued for another rasterizer is drawn by the oracle.
+    let raster = slot.raster.as_ref().filter(|_| job.raster != 0 && job.raster == slot.id);
+    match scenes.get(&job.scene) {
+        Some(dl) => render_job_by(job, dl, raster),
+        None => render_job_by(job, &job.display_list(), raster),
+    }
 }
 
 /// The rasterizer in use and its id (0 and `None`: the oracle).
@@ -510,8 +515,16 @@ impl FrameCache {
         }
     }
 
+    fn accepts(&self, job: &FrameJob) -> bool {
+        !job.preview || self.preview_keys.contains(&job.key)
+    }
+
+    fn needs_render(&self, generation: u64, job: &FrameJob) -> bool {
+        generation == self.generation && self.accepts(job) && !self.contains(job.key)
+    }
+
     fn insert_job(&mut self, job: &FrameJob, img: Arc<FrameImage>) {
-        if job.preview && !self.preview_keys.contains(&job.key) { return; }
+        if !self.accepts(job) { return; }
         self.insert(img);
         if job.preview && self.contains(job.key) { self.preview_images.insert(job.key); }
         if !job.preview { self.preview_images.remove(&job.key); }
@@ -807,6 +820,21 @@ impl Drop for RenderService {
     }
 }
 
+fn render_worker_tile(s: &Shared, generation: u64, job: &FrameJob, slot: &RasterSlot, scenes: &HashMap<u64, Arc<DisplayList>>) {
+    // Quantity can replace the preview while an older batch evaluates the scene
+    // or works through its tiles. Skip tiles that have not reached rasterization.
+    if !s.cache.lock().unwrap_or_else(PoisonError::into_inner).needs_render(generation, job) {
+        return;
+    }
+    let image = Arc::new(render_tile(job, slot, scenes));
+    // Publish each tile as it finishes, so a discarded native image is dropped
+    // immediately instead of waiting for the rest of the parallel batch.
+    let mut cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.generation == generation {
+        cache.insert_job(job, image);
+    }
+}
+
 fn worker_loop(s: &Shared) {
     loop {
         // Take a whole batch: urgent first, topped up with prefetch work.
@@ -833,18 +861,11 @@ fn worker_loop(s: &Shared) {
         };
         let todo: Vec<FrameJob> = {
             let cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            if cache.generation == generation {
-                jobs.iter().filter(|j| !cache.contains(j.key)).cloned().collect()
-            } else {
-                Vec::new()
-            }
+            jobs.iter().filter(|j| cache.needs_render(generation, j)).cloned().collect()
         };
         let slot = s.raster.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let imgs = render_batch_by(&todo, &slot);
-        {
-            let mut cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            cache.insert_batch(generation, &todo, imgs.into_iter().map(Arc::new));
-        }
+        let scenes = batch_scenes(&todo);
+        todo.par_iter().for_each(|job| render_worker_tile(s, generation, job, &slot, &scenes));
         {
             let mut q = s.queue.lock().unwrap_or_else(PoisonError::into_inner);
             for j in &jobs {
@@ -898,6 +919,34 @@ mod tests {
         cache.prepare_preview(&[]);
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(stable.key));
+    }
+
+    #[test]
+    fn a_superseded_preview_tile_skips_rasterization_even_after_batch_preparation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let service = RenderService::new(DEFAULT_CACHE_BYTES, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        service.set_rasterizer(Some(Arc::new(move |_, view| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok((Raster::Native { image: Arc::new(()), width: view.width, height: view.height }, RenderStats::default()))
+        })));
+        let doc = Document::default();
+        let view = job(&doc, 0, 0).view;
+        let old = service.job(1, &doc, 0, view, None).preview_tile(true);
+        let new = service.job(2, &doc, 0, view, None).preview_tile(true);
+        service.prepare_preview(&[old.key]);
+        let generation = service.cache().generation;
+        let scenes = batch_scenes(&[old.clone(), new.clone()]);
+        service.prepare_preview(&[new.key]);
+        let slot = service.slot();
+        render_worker_tile(&service.shared, generation, &old, &slot, &scenes);
+        render_worker_tile(&service.shared, generation, &new, &slot, &scenes);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(service.cached(old.key).is_none());
+        assert!(service.cached(new.key).unwrap().native.is_some());
+        service.prepare_preview(&[]);
+        assert_eq!(service.cache().native_bytes(), 0);
     }
 
     #[test]
