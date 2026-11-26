@@ -14,7 +14,7 @@
 //! The test at the bottom runs the whole interface headless with AccessKit on and fails on any
 //! interactive node without a name or role.
 
-use egui::{Id, Rect, Response, Stroke, StrokeKind, WidgetInfo, WidgetType};
+use egui::{Id, Rect, Response, Stroke, StrokeKind, WidgetInfo, Role};
 
 /// Names a control for assistive technology, for controls whose text is a value or nothing.
 pub trait Named {
@@ -48,7 +48,7 @@ pub fn focus_ring(ui: &egui::Ui, resp: &Response) {
 /// assistive technology, and its focus ring.
 /// A control allocated with `Sense::hover()` because it can't act now (Align with nothing
 /// selected) reads as unavailable.
-pub fn control(ui: &egui::Ui, resp: &Response, typ: WidgetType, name: &str, on: Option<bool>) {
+pub fn control(ui: &egui::Ui, resp: &Response, typ: Role, name: &str, on: Option<bool>) {
     let enabled = resp.enabled() && (resp.sense.senses_click() || resp.sense.senses_drag());
     resp.widget_info(|| match on {
         Some(v) => WidgetInfo::selected(typ, enabled, v, name),
@@ -77,8 +77,8 @@ pub fn pointer_only() -> egui::Sense {
     egui::Sense::click_and_drag() - egui::Sense::FOCUSABLE
 }
 
-/// Names the resize handle egui puts on a panel (`Panel::…(id)`, its `id.with("__resize")`),
-/// which it leaves anonymous.
+/// Names the resize handle egui puts on a panel (`Panel::…(id)` shown in `ui`: its
+/// `ui.scope_id().with(id).with("__resize")`), which it leaves anonymous.
 pub fn name_resize(ctx: &egui::Context, id: Id, name: &str) {
     ctx.accesskit_node_builder(id, |node| {
         node.set_role(egui::accesskit::Role::Splitter);
@@ -192,18 +192,18 @@ impl Region {
     }
 
     fn key(self) -> Id {
-        Id::new(("a11y_region", self))
+        Id::unique(("a11y_region", self))
     }
 }
 
 /// Sets this frame's Ctrl+F6 order (the dock's, ADR 0075).
 pub fn set_order(ctx: &egui::Context, order: Vec<Region>) {
-    ctx.data_mut(|d| d.insert_temp(Id::new("a11y_region_order"), order));
+    ctx.data_mut(|d| d.insert_temp(Id::unique("a11y_region_order"), order));
 }
 
 /// The Ctrl+F6 order: the stage, the panels as docked, the tools.
 pub fn order(ctx: &egui::Context) -> Vec<Region> {
-    ctx.data(|d| d.get_temp::<Vec<Region>>(Id::new("a11y_region_order"))).unwrap_or_else(|| vec![Region::Stage, Region::Tools])
+    ctx.data(|d| d.get_temp::<Vec<Region>>(Id::unique("a11y_region_order"))).unwrap_or_else(|| vec![Region::Stage, Region::Tools])
 }
 
 /// Where a panel is this frame and the widget that takes focus when Ctrl+F6 lands on it.
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn the_layer_footer_buttons_fit_and_are_named() {
         let (t, _, _) = tree(|_, _| {});
-        let names = ["New layer", "Delete layer", "New folder above the active layer (move layers in under it with Up and Down)", "Move layer up", "Move layer down"];
+        let names = ["New layer", "Delete layer", "New folder above the active layer (several selected layers go into it)", "Move layer up", "Move layer down"];
         let rects: Vec<egui::accesskit::Rect> = names
             .iter()
             .map(|n| {
@@ -443,7 +443,7 @@ mod tests {
         for tool in [Tool::Bone, Tool::Bind, Tool::Warp, Tool::Rect, Tool::Star, Tool::Text, Tool::Pencil, Tool::Brush, Tool::PaintBrush, Tool::Eraser, Tool::PaintBucket, Tool::InkBottle, Tool::Eyedropper, Tool::Pen] {
             found.extend(check(&format!("{tool:?} tool"), |a, _| a.tool = tool));
         }
-        for panel in ["select", "motion", "motionspan", "motionpath", "motionpoints", "motionedit", "motionpins", "motionpinsspan", "rawsub", "camera", "cameraview", "bones", "springbones", "shapebones", "shapeweights", "mixedbones", "warp", "sound", "envelope", "audiokeys", "audiokeysevent", "lipsync", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames", "actions", "script", "scriptproblems", "testscript", "onion", "onionmenu", "editmultiple", "library", "librarymenu", "edittransform", "onionsymbol", "layerprops", "layeropacity", "pivot", "frameview", "layercolour", "timelinepolish", "convert", "mixed", "bitmap", "nineslice", "nineslicedit", "find", "explorer", "publish", "publishreport", "publishanim", "start", "drop", "droplibrary", "testmovie", "testmovieinside", "templates", "savetemplate", "droptimeline", "textfields", "testtext", "richtext", "softmask", "pathtext", "gradient", "gradientbucket", "swatches", "swatchpanel", "brushlibrary", "brushcurve", "paintbrush"] {
+        for panel in ["select", "motion", "motionspan", "motionpath", "motionpoints", "motionedit", "motionpins", "motionpinsspan", "rawsub", "camera", "cameraview", "bones", "springbones", "shapebones", "shapeweights", "mixedbones", "warp", "sound", "envelope", "audiokeys", "audiokeysevent", "lipsync", "datachart", "datatable", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames", "actions", "script", "scriptproblems", "testscript", "onion", "onionmenu", "editmultiple", "library", "librarymenu", "edittransform", "onionsymbol", "layerprops", "layeropacity", "pivot", "frameview", "layercolour", "timelinepolish", "convert", "mixed", "bitmap", "nineslice", "nineslicedit", "find", "explorer", "publish", "publishreport", "publishanim", "start", "drop", "droplibrary", "testmovie", "testmovieinside", "templates", "savetemplate", "droptimeline", "textfields", "testtext", "richtext", "softmask", "pathtext", "gradient", "gradientbucket", "swatches", "swatchpanel", "brushlibrary", "brushcurve", "paintbrush", "videoimport"] {
             found.extend(check(panel, |a, _| a.open_panel(Some(panel))));
         }
         // Every panel in front where it docks, and floating (ADR 0075); the other workspaces.
@@ -664,11 +664,72 @@ mod tests {
     }
 
     #[test]
+    fn hide_edges_menu_item_exposes_its_checked_state() {
+        use egui::accesskit::Toggled;
+        let (_, mut app, ctx) = tree(|_, _| {});
+        let checked = |app: &mut App| {
+            let mut output = ctx.run_ui(input(1.0), |ui| crate::menus::cmd_item(app, ui, "view.hide_edges"));
+            output.textures_delta.clear();
+            let tree = output.platform_output.accesskit_update.expect("AccessKit tree");
+            let item = tree.nodes.iter().map(|(_, node)| node).find(|node| node.label() == Some("Hide Edges")).expect("named Hide Edges item");
+            assert_eq!(item.role(), Role::MenuItemCheckBox);
+            assert!(item.keyboard_shortcut().is_some());
+            item.toggled()
+        };
+        assert_eq!(checked(&mut app), Some(Toggled::False));
+        app.run("view.hide_edges", serde_json::json!({}));
+        assert_eq!(checked(&mut app), Some(Toggled::True));
+    }
+
+    #[test]
     fn access_keys_take_the_first_free_letter() {
         let keys = crate::menus::access_keys(&["File", "Edit", "View", "Insert", "Modify", "Commands", "Control", "Window", "Help"]);
         let letters: String = keys.iter().map(|k| k.map_or('-', |(_, c)| c)).collect();
         assert_eq!(letters, "FEVIMCOWH", "Control takes its O, as in Animate");
         assert_eq!(crate::menus::access_keys(&["Fichier", "Édition", "Ändern", "日本"]), vec![Some((0, 'F')), Some((1, 'D')), Some((1, 'N')), None]);
+    }
+
+    /// #455: once a menu is open, pointing at another title opens that menu; leaving the bar
+    /// keeps the open one, and with no menu open, pointing at a title opens nothing.
+    #[test]
+    fn an_open_menu_follows_the_pointer_along_the_bar() {
+        use egui::{Event, PointerButton};
+        let (_, mut app, ctx) = tree(|_, _| {});
+        let tops = app.menu_keys.top_ids().to_vec();
+        let open = |ctx: &egui::Context| -> Vec<usize> { (0..tops.len()).filter(|i| egui::Popup::is_id_open(ctx, tops[*i].with("popup"))).collect() };
+        let at = |ctx: &egui::Context, i: usize| ctx.read_response(tops[i]).map(|r| r.rect.center()).unwrap_or_else(|| panic!("menu {i} was not drawn"));
+        let events = |ctx: &egui::Context, app: &mut App, events: Vec<Event>| {
+            frame(ctx, app, egui::RawInput { events, ..input(1.0) });
+            frame(ctx, app, input(1.0));
+        };
+        let move_to = |ctx: &egui::Context, app: &mut App, to: egui::Pos2| {
+            let from = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(to + egui::vec2(0.0, 300.0));
+            for step in 1..=4 {
+                events(ctx, app, vec![Event::PointerMoved(from + (to - from) * (step as f32 / 4.0))]);
+            }
+        };
+        let button = |pos: egui::Pos2, pressed: bool| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        // No menu open: the pointer over the titles opens nothing.
+        let (file, edit, window) = (at(&ctx, 0), at(&ctx, 1), at(&ctx, 7));
+        move_to(&ctx, &mut app, file);
+        move_to(&ctx, &mut app, edit);
+        assert_eq!(open(&ctx), Vec::<usize>::new());
+        // Click File, then roll over Edit and Window: each opens in turn.
+        move_to(&ctx, &mut app, file);
+        events(&ctx, &mut app, vec![button(file, true)]);
+        events(&ctx, &mut app, vec![button(file, false)]);
+        assert_eq!(open(&ctx), [0], "a click opens File");
+        move_to(&ctx, &mut app, edit);
+        assert_eq!(open(&ctx), [1], "Edit opens under the pointer, and File closes");
+        assert!(!app.menu_keys.open_items(&ctx).is_empty(), "with its items");
+        move_to(&ctx, &mut app, window);
+        assert_eq!(open(&ctx), [7]);
+        // Down into the menu, or off the bar: the open menu stays.
+        move_to(&ctx, &mut app, window + egui::vec2(10.0, 60.0));
+        assert_eq!(open(&ctx), [7]);
+        // The arrow keys still move along the bar with the pointer resting where it is.
+        move_to(&ctx, &mut app, at(&ctx, 2));
+        assert_eq!(open(&ctx), [2]);
     }
 
     #[test]

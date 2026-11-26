@@ -92,7 +92,8 @@ With the **Selection** tool (**V**) on merged drawing:
 * **Double-click** a line to select every line joined to it, or a fill to select the fill and
   its outline.
 * **Drag a marquee** to select the parts of fills and lines under it, cut at the marquee's
-  edges, plus any objects wholly inside it. **Shift** adds more. If you click away without
+  edges, plus any objects it touches (symbol instances, groups, drawing objects, text and
+  bitmaps are taken whole). **Shift** adds more. If you click away without
   changing anything, the drawing is whole again.
 * **Drag an unselected line** or the edge of a fill to **bend** it into a curve through the
   pointer. Its ends stay put, and a straight edge bends into one even arc wherever you grab it.
@@ -238,10 +239,14 @@ stroke's frame and the fill behind it), or in the drawing tool's options in Prop
 **Fill** swatch and its on/off checkbox, and the **Stroke** swatch, its checkbox and its
 width. The Pencil and the Line tool only draw lines, so they show no fill.
 
-Click any colour swatch to open the colour picker. **Swatches**, the default, shows the 216
-web-safe colours with greys and primaries beside them; a shade or highlight of a colour is
-usually one cell away. The colours you mix or type are kept in the row below for this session.
-**Mixer** sets any colour by hue, saturation and brightness . Under it, the **Alpha**
+Click any colour swatch to open the colour picker. Along its top are the colour and its
+**hex**; they show the swatch under the pointer as you move over the palette, so you can read
+a colour before you click it. The palette, which opens first, is the 216 web-safe colours in
+the order Animate has them (in each block green grows to the right and blue downwards), with
+greys and primaries beside them; a shade or highlight of a colour is usually one cell away.
+The colours you mix or type are kept in the row below for this session. The button at the top
+right, a colour wheel, opens the **mixer**, which sets any colour by hue, saturation and
+brightness; the same button, now a grid of swatches, goes back. Under it, the **Alpha**
 row sets how clear a solid fill or a stroke is, from 0 % (clear) to 100 % (opaque). A clear
 fill is still a fill: you can select it and erase it; **None** is no fill at all. Each stop of
 a gradient has its own alpha, so a gradient can fade out. The hex field shows the colour as
@@ -317,7 +322,7 @@ A gradient shows as a bar with its colour stops under it:
 * **Click the bar** to add a stop there. **Drag a stop** to move it, or drag it down off the
   bar to remove it. A gradient has 2 to 15 stops.
 * Click a stop to pick it. Its **position** and **Remove** show under the bar, and the colour
-  picker below them (Swatches, Mixer, the **hex** field and **alpha**) sets its colour and
+  picker below them (the **hex** field, the swatches or the mixer, and **alpha**) sets its colour and
   opacity. Type `#rrggbbaa` for a colour with opacity.
 * From the keyboard, **Tab** to a stop, move it with the **arrow keys** (**Shift** for bigger
   steps) and press **Delete** to remove it. The bar itself adds a stop in the widest gap.
@@ -398,6 +403,9 @@ a few curves, not hundreds of points. In merged drawing the new fill joins the d
 merges with a fill of the same colour that it touches and cuts into others, as any fill does.
 A drawing object keeps its own fill and gets the outline as a second object above it.
 
+The same action is a button at the top of a shape's properties. With no line selected
+the button is unavailable, and a fill on its own stays as it is.
+
 **Expand Fill…** moves the edge of each selected fill out or in by a **Distance** in pixels.
 **Expand** grows the fill and rounds its corners, as if you had drawn round it with a round
 brush; **Inset** shrinks it and keeps the corners sharp. Holes get smaller as the fill grows,
@@ -418,7 +426,8 @@ Both dialogs remember what you entered. Each command is one undo step.
 ## Transforming artwork
 
 With the **Free Transform** tool (**Q**), drag a handle (a corner or the middle of an edge) to
-**scale** (**Shift** keeps the proportions, **Alt** scales about the transformation point),
+**scale** (the opposite handle stays where it is; **Shift** keeps the proportions, **Alt**
+scales about the transformation point instead),
 the line between two handles to **skew** (the opposite edge stays where it is; **Alt** skews
 about the transformation point), just outside a corner to **rotate** (the pointer turns
 into a curved arrow there; **Shift** snaps to 15°), or inside the box to **move**.
@@ -488,6 +497,15 @@ shortcut editor. A merged drawing (a fill and the lines on its edges) counts as 
 **Break Apart** turns text into shapes, a symbol instance into the artwork inside it, and a
 drawing object into merged drawing.
 
+**Modify › Timeline › Distribute to Layers** (**Ctrl+Shift+D**) puts each selected object
+(a symbol instance, group, drawing object, text or bitmap) on a new layer of its own, just
+above the layer it was on and named after its symbol, for the same frames. Break Apart a
+symbol instance first (**Ctrl+B**), then Distribute to Layers, to spread its contents over
+layers. Each new layer keeps its layer's camera depth and the layer it follows. Raw shapes stay
+where they are. It is refused, with a message saying why, on a tweened keyframe or the end of a
+tween, for an instance that goes on from the keyframe before or after, and on a layer below full
+opacity.
+
 ### Envelope
 
 **Modify › Transform › Envelope** bends the selected shapes and drawing objects. A mesh of
@@ -530,7 +548,13 @@ Use the **Align** panel in the right-hand dock, or **Modify › Align**: **Left*
 (**Ctrl+Alt+1**), **Horizontal Center** (**Ctrl+Alt+2**), **Right** (**Ctrl+Alt+3**), **Top**
 (**Ctrl+Alt+4**), **Vertical Center** (**Ctrl+Alt+5**) and **Bottom** (**Ctrl+Alt+6**).
 **Distribute Horizontal Centers** and **Distribute Vertical Centers** space three or more
-things evenly. Tick **To stage** in the Align panel (or press **Ctrl+Alt+8**) to align to the
+things evenly by their centres; **Space Evenly Horizontally** and **Space Evenly Vertically**
+make the gaps between them equal instead, leaving the outer two where they are (things that
+overlap too much to keep their order are left as they are). **Match Width** gives every
+selected thing the width of the widest one and **Match Height** the height of the tallest,
+each keeping its other side; **Match Width and Height** does both, so the width and the height
+can come from two different things. With **To stage** they use the stage's width and height.
+Each thing keeps its top-left corner, and a straight line keeps its zero width or height. Tick **To stage** in the Align panel (or press **Ctrl+Alt+8**) to align to the
 stage instead of the selection. A single shape always aligns to the stage. Align works across
 layers.
 

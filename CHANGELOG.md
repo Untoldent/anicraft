@@ -9,6 +9,450 @@
   editable Classic Tween or Hold Keyframes. Circle and Spiral Arrays can create
   editable Motion Tweens with independent property and path easing. Preview
   edits have their own Undo/Redo, and each commit is one document undo step.
+* **Flash 8 to CS4 `.fla` files open** (backlog P-039, ADR 0120, #163; by rcoenen, #478 and
+  #481): the binary `.fla` of the Flash 8 to CS4 era, which AniCraft used to refuse, now opens
+  like an Animate file, untitled, so Save asks for a new `.anicraft` name.
+  * **What comes across**: scenes, layers and folders, keyframes with their timing, shapes with
+    curves, gradients and strokes (dashed and dotted ones with their pattern), groups, symbol
+    instances (matrix, loop, first frame, colour effect), classic and shape tweens with their
+    eases and shape hints, static and dynamic text, bitmaps, sounds on frames, button names,
+    frame scripts (kept, never run), library folders and the stage size and frame rate.
+  * **Checked against the same documents saved by Animate**: on nine published sample rigs and
+    templates every timeline, layer, keyframe and instance matches (337 timelines, 1,628
+    layers, 6,993 keyframes, 4,457 instances), and against a Flash 8 file a community member
+    made, which reads to its end with one thing left out and named.
+  * **Not yet**, and named in the import report: filters, movie clip component settings, bitmap
+    fills and sound in and out points; ragged, stipple and hatched strokes are drawn solid, as
+    from Animate documents. Files from Flash MX 2004 and earlier are refused with the reason.
+  * **A damaged or hostile file can't crash or stall the import**: it is refused with a
+    one-sentence reason, or opens with what was left out counted. One import reads at most
+    twice the file's size in streams, decoding a stream costs at most 64 times its length,
+    and keyframes, text and bitmap pixels count against allowances for the whole document.
+  * `anicraft-cli fla-dump <file> [--stream name]` lists a legacy file's streams and records.
+  * Animate's own lossless bitmaps and uncompressed sounds (`bin/*.dat`) now decode in modern
+    `.fla` and XFL files too, instead of being reported as unreadable.
+* **Small fixes from outside, second batch** (M8, backlog P-012 and P-016). Fifteen pull
+  requests by Mex (MMexicann), merged with their commits.
+  * **The command line says when an option is wrong.** `anicraft-cli render --frmae 12` wrote
+    frame 1 without a word; now every subcommand refuses an option it doesn't read, with its
+    usage and exit code 2, before anything is opened (outside PR #552, widened from `render` to
+    all of them). `export --out` wins over a `path` or `dir` inside `--options` (#542). `serve`
+    stops at a `quit` line that starts with a byte-order mark (#544). On the app's own command
+    line, the last `--theme` wins whether it names a built-in theme or a file (#556), and
+    `--open` and `--renderer` say they need a value instead of swallowing the next option (#554).
+  * **Cut Frames that fails leaves the clipboard alone** (#545): the frames copied before are
+    still there to paste.
+  * **F5 with a folder selected past the end of the timeline** says a folder holds no frames,
+    instead of giving the folder a keyframe (#548).
+  * **Deleting a scene before the one you are in keeps your place** (#541): the frame, the
+    layer, the selection and the symbol you are editing stay as they were.
+  * **A swatch dropped outside the grid stays where it was** (#553), and the drop mark shows
+    only where a drop would land.
+  * **An update waits for unsaved work in every tab**, not only the one in front (#540).
+  * **`.wave` and `.oga` files show in the import pickers** (#550); AniCraft already read them.
+  * **On macOS, a backslash in a file name is part of the name** in Recent Files and its
+    thumbnails, not a folder separator (#543).
+  * Docs: the README and the guide list the packages a release has (no 32-bit Windows build;
+    Arch Linux, RISC-V deb and rpm, FreeBSD ARM64) (#549); where a portable copy keeps its
+    settings (#551); `formats` and `export` in the headless chapter (#539).
+* **Nineteen outside pull requests: parity and editing fixes** (M8, ADR 0134). Their commits
+  are merged here; what was added on top is said with each.
+  * **Closing the window no longer crashes on macOS** (#594, rcoenen): see the entry below.
+    Added: the rest of this batch ported to egui 0.37, and the pseudo-locale sweep knows the
+    names egui's colour mixer gives its own parts.
+  * **An imported Animate file keeps its name** (#596, rcoenen): see the entry below. Added:
+    the path it resolves goes through `engine::vfs`, so an agent's roots apply.
+  * **100 % zoom is one stage pixel on one screen pixel** (#590, ViktorBystrov72; #565),
+    whatever the display's scale or the interface scale; Fit in Window may go below 5 %.
+  * **View › Hide Edges** (Ctrl+Shift+E; #588, ViktorBystrov72; #298) hides the selection's
+    marks and keeps the selection. Added: every toggling menu item, not only this one, is a
+    check item with its state to a screen reader.
+  * **`file.import {match_stage: true}`** sets the stage to an imported SVG's size (#587,
+    ViktorBystrov72; #155).
+  * **Timeline** (AyberkA0): a button beside Layers shows only the active layer's row (#584,
+    #529); Next and Previous Frame stop at the ends instead of going round (#583), a press
+    selects at once and the playhead follows a drag (#582; both #561); a click on an empty
+    cell past a layer's frames selects it again (#573, #567).
+  * **Selecting and aligning** (AyberkA0): the marquee takes the instances, groups and objects
+    it touches (#580, #522); Match Width, Match Height, Match Width and Height, and Space
+    Evenly in the Align panel and Modify › Align (#578, #566); align and distribute line up
+    outlines, not stroke edges (#574, #569); To Stage inside a symbol aligns to its
+    registration point (#575, #568). Added: Match Size and Space Evenly measure outlines as
+    align does, a group opened inside a symbol counts as inside it, and the Align panel is
+    tall enough by default to show its new row.
+  * **Modify › Timeline › Distribute to Layers** (Ctrl+Shift+D; #579, AyberkA0; #517).
+  * **Export Frame as PNG and Export PNG Sequence take `background: false`** for real
+    transparency, also in Publish Settings (#581, AyberkA0; #536). Added: joined with the
+    note of what a frame left out (ADR 0128).
+  * **Properties** (AyberkA0): each filter is a card that folds (#577, #533, #534); raw shapes
+    moved, sized or turned by the fields merge when deselected, as after a drag (#576, #571);
+    a swatch picked closes the colour picker (#572, #570).
+  * **Convert Lines to Fills at the top of a shape's properties** (#562, Neel Patel; #530).
+
+* **An imported Animate file keeps its name** (ADR 0009 note; outside PR #596 by rcoenen): a `.fla`, `.xfl` or XFL folder
+  opens with its own name on its tab and in the window title instead of "Untitled", marked as
+  imported (a dim "Imported" on the tab, "(imported)" in the title, where it came from in the
+  tooltip). Saving still never writes over it: Save asks for a new name, suggesting an
+  `.anicraft` of the same name beside the original, and from then on the tab shows that file.
+  Opening the same Animate file again shows its tab. Save dialogs now open in the suggested
+  file's folder.
+
+* **Closing the window no longer crashes on macOS** (outside PR #594 by rcoenen). Quitting, closing the window and the end of
+  a `--screenshot` run could stop with `NSRangeException` (`Cannot remove an observer
+  <_NSTouchBarFinderObservation …> for the key path "nextResponder"`) and exit code 134. The
+  accessibility layer put the window's view back to its own class on close, after macOS had
+  given it another class to watch it for the Touch Bar. eframe and egui go to 0.37, which
+  brings AccessKit 0.27.2 with the fix (AccessKit/accesskit#835). Single-line text fields are now
+  as tall as the buttons beside them, as egui 0.37 draws them.
+
+* **An Animate drawing no longer loses lines without a word** (M4, ADR 0133, #498, #347,
+  backlog P-006).
+  * A stroke in a style AniCraft doesn't know was dropped, and the report still said
+    "Imported everything in the file". It is now drawn as a solid line with its weight, colour,
+    caps and joints, and counted.
+  * One unreadable command in a shape's outline lost everything after it on that edge. An
+    outline is written as runs, each starting at its own point: the command now costs the
+    rest of its own run only, the runs after it are drawn, and the report counts the run that
+    was cut short.
+  * The report also counts fills whose outline has a gap (they are closed straight across,
+    which can fill in more than the fill covered), fills of a kind AniCraft doesn't know, and
+    lines and fills in a style their shape doesn't have.
+  * The corpus has a package for these (`unknowns`), with its report, a golden frame and
+    probes.
+  * #498 came without a file, so which of these its drawing runs into is not confirmed: the
+    report line it now gets, or the file, will say. The merge of raw shapes on opening and the
+    GPU stage were ruled out with generated sketches.
+  * #347 (a `.fla` refused on macOS with the system's "cannot open files in this format"):
+    v0.2.1 did not take documents the system hands over; `main` has since ADR 0062. Not
+    re-tested on a Mac here.
+  * Not yet: the same recovery in the shared reader (storytold/craft-libs#3282).
+* **Memory and frame time stay flat** (M8, P-004, ADR 0132;
+  [#314](https://github.com/storytold/anicraft/issues/314),
+  [#477](https://github.com/storytold/anicraft/issues/477)).
+  * **Memory follows what is on screen, not how long you have been editing.** Dragging
+    something made a new picture of the stage on every pointer move, and each one stayed in
+    memory until hundreds of megabytes were in use (the "900 MB for a 24-frame move" of #314).
+    AniCraft now keeps the pictures of the document as it is and as it was one step ago, at
+    the zoom on screen and the one before, plus the frames you have played; a long drag or a
+    long zoom ends with the memory it started with.
+  * **Zooming with Ctrl+wheel or a pinch no longer redraws the stage for every step of the
+    zoom.** The picture on screen is scaled while the zoom changes and drawn sharp once it
+    rests. In the web version, which draws on the interface's own thread, this was the
+    stutter of #477; there, moving around the stage now also draws for at most 8 ms of a
+    frame and fills in the rest over the next frames.
+  * **Zoomed far into a large drawing, a stage tile no longer goes through the whole
+    drawing.** The parts of a filled shape above, below and to the right of the tile are left
+    out before drawing. The pictures are the same to the last bit (tests compare them).
+  * **What is on screen is drawn before look-ahead.** A visible tile used to wait for up to
+    31 tiles being drawn ahead around the view or along the timeline.
+  * One step further back in the undo history is redrawn when you return to it (a few
+    milliseconds) instead of being found in memory.
+
+* **Timeline and panel bugs from the tracker** (M8, backlog P-009 and P-010, ADR 0131).
+  * **Several layers selected at once** (#512). **Ctrl**-click a layer's name to add it or take
+    it out, **Shift**-click for every layer from the active one, or **Shift+Up** and
+    **Shift+Down** on the focused timeline. Drag any one of them and they all move, landing
+    together in the order they had; the folder button puts them in a new folder; Delete Layer
+    takes them all and asks once. Each is one undo step. Headless: `add: toggle | range` on
+    `layer.select`, `layers: [ids]` on `layer.move` and `layer.delete`, `wrap` on
+    `layer.new_folder`, `layer_selection` in the session state.
+  * **A click on the frame ruler leaves no frames selected** (#195; jayzed80, outside PR #222),
+    also when the playhead stays inside the selection, so **F5** then adds frames on every
+    layer as in Animate. **F6** and **F7** stay on the layer you're on.
+  * **A new mask is locked**, as Animate leaves it (#429): the result shows without the mask's
+    edge in the layer colour. Unlock the mask layer to see the edge and reshape it.
+  * **The "1–9 of 16 layers" count no longer lies over the buttons** in the layer list's header
+    (#523; Mex, outside PR #535). In a column too narrow for it, the heading shows it on hover.
+  * **The Movie Explorer's list uses the whole height of its pane** (#513; Mex, outside PR
+    #532) instead of stopping at about ten rows.
+  * Tests now pin two reports that `main` no longer shows: a click on the fill or stroke square
+    under the tools opens its colour picker (#246), and the docks keep their size while the
+    pointer moves over them at every interface scale (#159, not reproduced; the issue stays
+    open for a retest).
+* **Text reads right: mixed directions, and letters from a fallback face** (M5, backlog P-008,
+  ADR 0130). With outside pull requests #39 and #40 by SoldierPePe, whose commits are merged
+  here and rebuilt on styled text.
+  * **Hebrew and Arabic with Latin words and numbers read the right way round.** Text follows
+    the Unicode bidi algorithm: a number or a Latin word inside right-to-left text keeps its
+    order ("2026" was drawn as "6202"), a right-to-left paragraph runs from the right, and a
+    wrapped one starts with its first words. Styled runs keep their style, colour and underline
+    through the reordering. It is the same in static text, text on a path and text fields, and
+    so in every export.
+  * **Letters your font doesn't have come from another font** instead of showing as boxes:
+    Arabic in Consolas, Japanese in Arial. The rest of the block keeps your font, a letter
+    takes its marks along, and the line keeps its height. `text.create` and `text.edit` say
+    which font lent the letters, and how many characters no installed font has.
+  * **In a text field in Test Movie, Left and Right move the caret the way they point** through
+    text that mixes directions, and a selection across a change of direction is highlighted in
+    its separate stretches.
+  * Arabic letters join across a change of style inside a word. Letter spacing follows a
+    letter with its marks instead of each glyph. A stretch of text in another script is shaped
+    with that script's rules.
+  * Not yet: a direction setting for a paragraph (it is the first letter's) and alignment to
+    its start; the typing field beside the stage still shows right-to-left text unordered
+    while the block on the stage is right; right-to-left text a script sets in the HTML page.
+* **A long Brush stroke no longer freezes the window** (M8, ADR 0129, #519, backlog P-003).
+  * A stroke drawn for a long time, over itself again and again, took longer to turn into a
+    shape the longer it was, and a part of it selected over the rest cost seconds on every
+    frame. The outline's tracing is now bounded however long the stroke is (a fast scribble of
+    60 000 samples: 1.5 s before, 0.4 s now, of which the trace is at most 0.3 s), and the
+    selection's stipple is cut row by row (seconds a frame before, a few milliseconds now).
+  * In the editor a long stroke's outline is traced off the window's thread: the stroke stays
+    on the stage as you drew it, you can go on painting at once, and it becomes a shape, in
+    one undo step, a moment later. Anything else you do waits for it first, so strokes and
+    edits always happen in the order you made them.
+  * `anicraft-cli bench --stroke <samples>` measures a long stroke (painting, picking, moving,
+    the merge on deselect), and `bench --stroke-file <file>` a document's own artwork.
+  * Not yet: the Subselection tool, the Paint Bucket and the shape tools' snapping are still
+    slow on a single shape of ten thousand points and more.
+* **Free Transform on a skewed symbol** (M8, #117, backlog P-005): scaling from a corner,
+  turning from outside it and skewing from an edge are now covered end to end by a test on a
+  slanted instance (the fix itself came with ADR 0111). The guide says what a handle scales
+  from (#193). Rotation on Windows and FreeBSD (#479) could not be reproduced on Windows 10
+  and stays open.
+* **Documents too large to draw, shape-tween outlines on a guide, and small fixes from outside**
+  (M8, backlog P-002, P-011 and P-012; ADR 0128).
+  * **Security: no nesting of symbols hangs AniCraft.** The allowance of work one frame has
+    (a million elements) now also counts the layers looked at, the size of each outline and
+    how far into a long library a symbol is, so a file can multiply none of them by nesting.
+    **Test Movie** has an allowance for each step: it used to look at every element of up to
+    10,000 instances after every change, and give every button a whole frame's allowance at
+    every move of the pointer (ideas from Agapenor's #13).
+  * **A frame with artwork left out says so.** The status bar tells you once ("Some artwork
+    on this frame is left out…"), Test Movie's Output panel says why a
+    step stopped, and the commands that write frames (PNG, SVG, sequences, sprite sheet, GIF,
+    animated PNG and WebP, video) add `"left_out": true` and a `"warning"` to their result
+    instead of passing a partial picture off as the whole one. `anicraft-cli info` and the MCP
+    `anicraft_render` caption say it too.
+  * **Shape tweens along a motion guide keep their outlines** (jayzed80, #238). A raw shape's
+    line pieces used to follow the guide one by one and cross the fill. Each piece now rides
+    with the fill it edges, also when both keyframes have as many pieces; an edge two fills
+    share goes with the lower fill. Outlines are no longer joined through a point where three
+    or more lines meet, dashed and variable-width outlines keep their pieces, and a piece
+    selected on a keyframe stays selected through the tween.
+  * **Colours:** the Eyedropper's result names the colour it picked with its opacity
+    (`#rrggbbaa`); `Rgba::to_hex_alpha` is the hex form that reads back as the same colour,
+    and `to_hex` stays six digits for the exporters (NetterSilver, #233).
+  * **Never crash:** the length of a vector with components past 1.8e19 is no longer infinite,
+    so its direction is no longer lost (NetterSilver, #142; taken only out of range, so drawing
+    costs the same); a private-use language tag such as `x-Arab` is not read as right-to-left
+    (Hagai Baram, #486).
+  * **Tests:** SVG path numbers past `f32` are refused (NetterSilver, #130); linked artwork
+    survives SVG export and re-import with its link sanitised (FredApps, #500).
+* **Reliability pass on the tests** (M8). Twelve runs of the whole suite after the review's
+  fixes (the picture cache race and the split command fuzz) found no further flaky test. Tests
+  that wait for another thread (a save, a freed port, a GPU start) now give it a minute instead
+  of two seconds before failing on a busy machine; none of them asserts a time.
+
+* **Reliability fixes from the November principal-engineer review** (M8,
+  `docs/reviews/2026-11-principal-review.md`).
+  * **Save is flushed to the disk** before the new file replaces the old one, as the
+    crash-recovery copy already was: a power cut right after a save can no longer leave an
+    empty document.
+  * **History picks and Save As Command stay with their document.** Showing another tab used
+    to keep the picked steps (and an open Save As Command) and apply them to that document's
+    history.
+  * **A document put aside keeps no pictures**, also when one was still being drawn as you
+    switched.
+* **The roadmap is now a guideline, with a parity matrix** (M8, ADR 0125). Docs only.
+  `docs/parity.md` compares AniCraft with the reference app feature by feature (done, partial,
+  missing, won't do), checked against the code and the guide. `docs/roadmap.md` replaces the
+  milestone timeline with a prioritised backlog (stable ids, sizes, what can run in parallel),
+  bugs and reliability first, and gives every open outside pull request a backlog id and a
+  state: planned, superseded, declined or held. Every pull request, ours included, gets a
+  principal-engineer review before it merges.
+
+* **Text: paths you can reshape, lines on a path, and the rest of the text-field API** (M5,
+  ADR 0107).
+  * **Edit the path of text on a path in place.** With the Subselection tool (or Properties ›
+    Path › **Edit Path**) the path a text follows shows its points: drag points and handles and
+    the text follows live, one undo step a drag; add, delete and convert points as on a shape.
+    Headless, the `path.*` point commands take the text's id.
+  * **Several lines on a path.** Line breaks now set further lines alongside the path, each on
+    its own parallel curve with its own letter spacing, anchored by the alignment; Flip moves the
+    whole block. Up to 64 lines. (Line breaks used to be drawn as spaces.)
+  * **`htmlText`** on dynamic and input fields, in the subset Flash fields took (`<b>`, `<i>`,
+    `<u>`, `<font face size color>`, `<a href>`, `<p align>`, `<br>`), read into styled runs
+    and written back; sanitised, so no tag, script or unsafe link survives as markup.
+  * **Change events**: `field.addEventListener(Event.CHANGE, …)` fires once for each edit a
+    viewer makes, and input fields have a **change event** in the Actions panel
+    (`actions.set {element, event: "change"}`).
+  * **`maxChars` and `restrict`** can be read and set by scripts; typing a refused character no
+    longer deletes the selection.
+  * **Embedded characters in the HTML export**: a dynamic field's **Embed** list
+    (`text.field {embed}`) carries those letters' outlines in the page, so script-set text keeps
+    your font in every browser. The font's licence bits (`OS/2` `fsType`) are checked first;
+    fonts that don't allow it are left out and named in the report.
+  * All of it plays the same in Test Movie and the HTML page (parity tests, including 400
+    generated HTML strings through both readers).
+
+* **An AI assistant works inside the folders you give it** (M8, ADR 0124). `anicraft-cli mcp`
+  now needs `--automation-read-root <folder>` and `--automation-write-root <folder>`, and does
+  not start without both (exit code 2, with a message that says what to add): **add the two
+  flags to your MCP client's configuration.** The assistant's commands then read files only
+  inside the read root (which may be given several times) and write only inside the write root.
+  Every file a command touches is checked as the file it really is, with `..` removed, symbolic
+  links and Windows junctions followed and, on Windows, letter case ignored; that includes files
+  a command picks itself (a plain Save, Publish's outputs, the steps of a saved command, a
+  linked video). A refusal comes before any file is touched and names the root. With
+  `--bridge`, the window applies the roots to the assistant's commands only (control protocol
+  2: a call that carries no roots may touch no file, and the bridge won't drive an older
+  AniCraft). `serve` takes the same flags, optionally. The app and the other subcommands are
+  unchanged, and the `ffmpeg` parameter is still refused over `mcp` and `serve`.
+* **Fixes from the issue tracker, second batch** (M8). Thank you to everyone who reported these.
+  * **Memory no longer grows while AniCraft is left running** (#454). The list of commands
+    was rebuilt for the menu bar on every frame, and four of its texts were made afresh and
+    never freed: about 1.5 kB a frame, 2.6 GB over a night of playback or a blinking cursor.
+    Measured: looping playback grew 220.7 to 246.5 MB in five minutes before; the texts are
+    now made once.
+  * **A selection you move no longer cuts what it is dropped on until you deselect it**
+    (#487, ADR 0122), as in Animate: a fill or stroke moved onto another stays whole and
+    selected, can be moved on or back, and joins the drawing when the selection lets go.
+    Undo takes back the move and the cut together. Scripts keep `draw.drop`; the editor uses
+    the new `draw.float`.
+  * **Modify › Document Settings opens** (#505): the stage's size, frame rate and colour in
+    a dialog, with Animate's Ctrl+J. The menu item did nothing before.
+  * **A motion guide with sharp corners is followed to its end** (#490). A zigzag drawn with
+    the Line tool is one stroke per straight run, and only the first was the path, so the
+    object stopped at the first peak or valley. Strokes that meet end to end are one path.
+  * **Shift+F5 and Shift+F6 with no frames selected act on every layer** (#438), as F5 does:
+    the frames F5 added to all layers come off all of them, and holding the key keeps going.
+  * **Japanese, Chinese, Korean, Arabic, Thai and other scripts show in the interface**
+    (#482): the Movie Explorer, the timeline, the Library and Properties drew them as empty
+    boxes with the bundled fonts. A font of your computer that has the letters is added
+    behind the interface's fonts the first time such text is shown.
+  * **A long layer name stops before the layer's eye, lock and outline buttons** (#440),
+    with an ellipsis, instead of running under them.
+  * **CMYK JPEGs import in their own colours** (#447): already right since the picture
+    decoders moved to the shared library; a test now keeps it so.
+* **Requests from artists, second batch** (M8).
+  * **Export SVG Sequence** (File › Export, `file.export_svg_sequence`, and
+    `anicraft-cli export --format svg-sequence`): one `frame_00001.svg` per frame in a folder,
+    each the same drawing Export Frame as SVG makes, for programs that read vector frames
+    (#504).
+  * **The timeline's current frame and frame rate are fields.** Click the frame number and type
+    a frame to go there (a number past the end goes to the last frame), or drag it to scrub;
+    click the frame rate to type a new one. Both are in the timeline's header, next to the
+    transport (#462, #461).
+  * **Every panel opens and closes from the keyboard**, with Animate's keys where they were
+    free: Timeline Ctrl+Alt+T, Tools Ctrl+F2, Properties Ctrl+F3, Library Ctrl+L, Output F2,
+    Colour Ctrl+Shift+F9, Swatches Ctrl+F9, History Ctrl+F10 (Actions stays F9), and **F4**
+    hides every panel and brings them back exactly where they were. Align, Layer Depth and the
+    Motion Editor take a key of your choice in the shortcut editor; the Window menu shows each
+    panel's key (#456).
+  * **With a menu open, pointing at another menu's title opens it**, as menu bars do everywhere
+    (#455).
+  * **Scroll bars are always there.** Wherever a panel or list holds more than fits, its scroll
+    bar shows at rest, in a lane of its own, 10 points wide, with a handle that is easy to see
+    and to grab; it no longer appears only when the pointer comes near (#483).
+  * **The colour picker, as Animate's is laid out.** The colour and its hex are along the top
+    and follow the swatch under the pointer, so you read a colour before you pick it; one
+    button at the top right (a colour wheel, then a grid of swatches) turns the palette into
+    the mixer and back; and the web-safe palette is in the order Animate users know, green
+    across each block and blue down it (#434, #435, #437, #432).
+  * A bitmap imported to the stage turns about the centre of its box (already so since the
+    transformation point of ADR 0111; a test now keeps it, #466).
+
+* **Fixes and hardening from the community** (M8). Thank you to everyone named here.
+  * **Double-click the Hand tool to fit the stage in the window**, as in Animate; a single click
+    still only selects the tool (#457, Wilder Ccasa).
+  * **A new oval has eight points**, one every 45°, as Animate draws it (#459, NetterSilver).
+  * **Bending an oval's edge with the Selection tool keeps its ends smooth**: the curves beside
+    the one you drag turn with it, as when a handle is dragged (#460, NetterSilver).
+  * **Animate documents**, each learned from files Animate saved (rcoenen): shape hints come
+    across (Animate writes them as `morphHintsList`, which the importer didn't read); text that
+    leaves `lineSpacing` out gets Animate's 2 px between its lines, not 0; and a dashed stroke
+    that doesn't name its gap gets Animate's 6 px, not 3.
+  * **Security: an assistant can't choose the program that makes or reads video.** Over `serve`
+    and `mcp` (the live bridge too), Export Video, Import Video and every other command refuse
+    an `ffmpeg` param: set
+    `ANICRAFT_FFMPEG` yourself. `exec` and `run` keep it. A request line over 64 MiB is answered
+    with an error instead of growing without bound (Dylan M. Taylor).
+  * **Security: XFL folders.** A reference that climbs out of the package with backslashes
+    (`..\x.xml`) is no longer read on Windows (Agapenor); only regular files are read, and never
+    more than the size cap, however large a file claims to be (Dylan M. Taylor).
+  * **Security: hostile documents stay bounded.** A file whose keyframes sit past frame 100,000
+    opens with them trimmed to the limit commands already keep (Agapenor). A library whose
+    symbols double at every level (2^32 shapes from 32 symbols) no longer hangs the stage or
+    runs out of memory: one frame, or one bounds query, visits at most a million elements and
+    draws what it reached (reported by Agapenor).
+  * **Never crash:** a scene index or SVG frame number at the top of its range is an error, not
+    an overflow; a rotation tween between huge or non-finite angles no longer hangs; `--fps` and
+    `--scale` refuse `NaN`, infinities and numbers too large instead of quietly using the
+    default (Mex, NetterSilver).
+  * **Files:** brush sets, filter presets and swatch files saved with a byte-order mark by
+    Windows editors import. A document that somehow holds a number that isn't finite still
+    saves to a file that opens again: such a number is written as 0, and a ruined transform as
+    no transform, where before it made the file unreadable (Mex, NetterSilver).
+  * **Small things put right:** a colour such as `#+1+2+3` is no longer read as a colour; a
+    script's Set Property values are clamped whenever a document loads; an object with a zero
+    x scale keeps its direction when taken apart and put back; guide headings such as "Foo",
+    "Foo", "Foo-1" get three different links (NetterSilver, Mex).
+  * **Building on Windows:** the web build and the signing script work from a folder with
+    square brackets in its name; `i18n-extract.ps1` gives back the caller's
+    `ANICRAFT_I18N_OUT`; `guide-shots.ps1` takes the document tabs picture too (Mex).
+* **From outside contributors** (M8; thank you).
+  * **Trace Bitmap and Convert to Bitmap** (by NetterSilver, #489; fixes #463). **Modify ›
+    Bitmap › Trace Bitmap…** turns a placed bitmap into filled raw shapes, one per area of
+    colour, with Animate's colour threshold, minimum area, curve fit and corner threshold. The
+    shapes are lines and quadratic curves that share their edges, so they tile without gaps and
+    merge with raw shapes they touch. **Modify › Convert to Bitmap** draws the selection into a
+    new Library bitmap and puts it in the selection's place. Both are one undo step, and
+    `modify.trace_bitmap` and `modify.convert_to_bitmap` for scripts. A trace is bounded: a
+    bitmap of up to 4096 × 4096 pixels, at most 20,000 shapes, and a picture that is all
+    speckle at a low threshold is refused in a sentence instead of using gigabytes of memory.
+    A 2048 × 2048 photo-like image traces in about 0.2 s, a 4096 × 4096 one in about 0.9 s.
+  * **Selection dots follow a gradient's detail** (by Untoldent, #404, for #295). The stipple on
+    a selected gradient fill now shows narrow bands, hard stops and a small radial centre in
+    their own contrasting colour instead of blending across them, within a fixed budget of work
+    per frame, so a screen-sized gradient costs about a fifth more than before
+    (`docs/performance.md`).
+  * **Hebrew letters draw, and `iw` means Hebrew** (by Hagai Baram, #486; ADR 0040). Builds with
+    craft-fonts embed Noto Sans Hebrew as a fallback face, so Hebrew in layer, symbol and file
+    names no longer shows as empty boxes; the legacy language code `iw` (`iw_IL`) is read as
+    `he`. The interface is not offered in Hebrew yet: right-to-left layout waits for egui, and
+    `i18n::is_rtl_code` is ready for it.
+
+* **Data-driven animation** (#416, #417, #418, ADR 0118, M6): keep the numbers behind an
+  animation in the document and let them drive it.
+  * **Data tables in the Library.** **File › Import › Import Data Table…** reads CSV, TSV or
+    JSON: the first line names the columns, cells that aren't numbers become gaps, and columns
+    with no numbers are left out (the status bar says which). A table is looked up by row
+    number, a row per frame, or by a **key column** such as an age or a time. **View Table**
+    shows every row and column. Tables are saved in the `.anicraft` file.
+  * **Bind to Data** (Modify › Data, or the Data section of a symbol instance's Properties): a
+    column drives the instance's **X**, **Y**, **Scale X**, **Scale Y**, **Rotation**, **Alpha**
+    or **the frame a graphic symbol shows**, over a span of frames. Set the frames, the rows or
+    keys the span runs between (backwards too), a scale and an offset, and **Linear** or
+    **Step** between rows; the stage follows as you change them. The stage, Test Movie and
+    every export that draws frames show the same thing.
+  * **Import Again** replaces a table's values from a revised file, and everything bound to it
+    follows with no keyframes to redo.
+  * **Bake to Keyframes** writes what the bindings show as ordinary keyframes; every frame
+    looks as it did. Use it before Lottie export, which writes keys.
+  * Headless: `data.import_table`, `data.set_table`, `data.list`, `data.get`, `data.set_cell`,
+    `data.set_key`, `data.remove`, `data.bind`, `data.unbind`, `data.bindings` and `data.bake`,
+    over the CLI and MCP; plug-ins may use all but reading a file.
+  * Not yet: bindings don't follow copy, paste or duplicate; cells aren't edited in the viewer;
+    baking inside a motion tween.
+
+* **Import Video** (#369, ADR 0116, M5): **File › Import › Import Video…** brings in MP4, MOV,
+  WebM and any other video the ffmpeg on your computer reads, for reference and rotoscoping.
+  * **Frames in the document**: the video's frames become bitmaps on a new layer from the
+    playhead, one keyframe per frame at the document's frame rate, kept together in a Library
+    folder, with the video's sound on a layer of its own in time with them. Choose a frame
+    step (2 animates on twos), the largest size, and where to start and how much to take.
+  * **Reference layer for tracing**: a locked guide layer right under the layer you are on shows
+    the video beneath what you draw as you scrub and play. The video stays a file, adds nothing to the document
+    and is never in the movie or an export. Fade it with the layer's opacity; relink a moved
+    file or remove the video in Layer Properties.
+  * **Told up front**: before anything starts, the window says how many pictures of what size
+    will come in and how much memory they take, and where a long video is cut short (2000
+    pictures or 1 GB at a time) with what to change. A progress window with **Cancel**;
+    cancelling leaves the document exactly as it was, and the whole import is one undo step.
+  * AniCraft still holds no video codec: your own ffmpeg does the decoding (the one Export
+    Video uses). Without ffmpeg, the window says how to install it.
+  * Headless: `file.import_video`, `file.video_info`, `layer.set_video`.
 
 * **Themes of your own** (#340, ADR 0117, M8): a theme is a small JSON file that names colours
   for the interface's roles, kept in `themes` in the settings folder (`data/themes` in a
@@ -79,6 +523,14 @@
   * Off by default and per tween. Tweens without it, and older files, play exactly as before.
   * Every export shows it. Headless, CLI and MCP: `timeline.set_keep_area`.
 
+* **Bitmaps and sounds kept in Animate's own data format** come across from `.fla` and XFL
+  files. Animate often keeps a library image or sound only as its own data file in `bin/`
+  (no PNG, JPEG or WAV beside it); these used to be reported as "stored in Animate's own
+  format" and left out. Lossless bitmaps now decode with their transparency, and raw 16-bit
+  sounds come across as WAV, with the frames that play them. Variants not yet seen in real
+  files (other pixel formats, uncompressed or JPEG-backed bitmaps, compressed or 8-bit sounds)
+  are still named in the report with why. The decoder (`anicraft-flamedia`) is shared with the
+  Flash 8–CS4 importer, whose media streams hold the same bytes.
 * **Layer parenting** (fixes #388, ADR 0113, M7): a layer can follow another layer, as in
   Animate, so a forearm moves with the upper arm while each keeps its own tweens.
   * **Parenting view** in the timeline: the tree button beside **Layers** (or View › Parenting
@@ -390,6 +842,7 @@
 * **Floating windows open below the menu bar**: no dialog (the Custom Ease window among them) can
   cover File, Edit and View any more.
 * **Security: safer reads and temp files.** Import to Library checks an image's size (256 MiB) before reading it, and saves, audio exports and the video soundtrack write their temporary files under unguessable names, created exclusively.
+
 * **Saved commands (command macros)** (ADR 0097, M6).
   * In the **History** panel, **Ctrl+click** steps (Shift+click a range) and choose **Save As
     Command…**: the steps come back at the end of the **Commands** menu, to run on whatever is

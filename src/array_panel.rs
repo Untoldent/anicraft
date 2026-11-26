@@ -374,8 +374,10 @@ impl State {
 
     fn create_timeline(&mut self, s: &mut Session, config: &TimelineConfig) -> anicraft_engine::Result<()> {
         let settings = self.settings.as_ref()
+            // i18n-exempt: an engine-style message, translated where it is shown
             .ok_or_else(|| anicraft_engine::EngineError::State("The Array draft is unavailable.".into()))?;
         let mode = self.timeline_mode()
+            // i18n-exempt: an engine-style message, translated where it is shown
             .ok_or_else(|| anicraft_engine::EngineError::State("Timeline Animation is available for Linear and Radial Arrays only.".into()))?;
         let mut params = settings.params(mode);
         params["duration"] = json!(config.frames);
@@ -737,7 +739,7 @@ pub(crate) fn show_timeline_modal(app: &mut App, ctx: &egui::Context) {
     let Some(mut config) = app.array_panel.timeline_config.take() else { return };
     let mut cancel = false;
     let mut create = false;
-    let id = Id::new("array_timeline");
+    let id = Id::unique("array_timeline");
     let area = egui::Area::new(id)
         .kind(egui::UiKind::Modal)
         .order(egui::Order::Foreground)
@@ -862,7 +864,7 @@ pub(crate) fn finish_for_quit(app: &mut App, apply: bool) {
 }
 
 fn text_focus_id(ctx: &egui::Context) -> Id {
-    Id::new(("array_text_focus", ctx.viewport_id()))
+    Id::unique(("array_text_focus", ctx.viewport_id()))
 }
 
 pub(crate) fn remember_text_focus(ctx: &egui::Context) {
@@ -1342,7 +1344,7 @@ fn view_options(ui: &mut Ui, state: &mut State) -> bool {
         ui.painter().rect(rect, T.rc(), fill, egui::Stroke::new(1.0, T.border), egui::StrokeKind::Inside);
         crate::icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(crate::theme::TOOL_ICON)),
             crate::icons::Icon::ArrayHandles, icon);
-        crate::a11y::control(ui, &toggle, egui::WidgetType::Button, tip, Some(state.show_gizmo));
+        crate::a11y::control(ui, &toggle, egui::Role::Button, tip, Some(state.show_gizmo));
         crate::a11y::focus_ring(ui, &toggle);
         let toggle = toggle.on_hover_text(tip);
         if toggle.clicked() {
@@ -1992,7 +1994,7 @@ mod tests {
         // The commit controls are the last section of the dock's scrollable content.
         frame(ctx, app, vec![Event::PointerMoved(pos2(1450.0, 300.0)), Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -3000.0),
-            modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel,
         }]);
         nodes(ctx, app).into_iter().find(|(_, n)| n.label() == Some(label))
             .unwrap_or_else(|| panic!("missing {label}")).1
@@ -2088,7 +2090,7 @@ mod tests {
         let from = center(&find(&mut app, "Create Timeline Animation"));
         let close = center(&find(&mut app, "Close"));
         let duration = center(&find(&mut app, "Duration (frames)"));
-        let area = egui::AreaState::load(&ctx, Id::new("array_timeline")).unwrap().rect();
+        let area = egui::AreaState::load(&ctx, Id::unique("array_timeline")).unwrap().rect();
         assert!(from.y - area.top() < 36.0, "title {from:?}, modal {area:?}");
         assert!((close.y - from.y).abs() < 3.0 && close.x > from.x, "title {from:?}, close {close:?}");
         assert!((0.0..52.0).contains(&(duration.y - from.y)), "title {from:?}, duration {duration:?}");
@@ -2303,7 +2305,7 @@ mod tests {
         let renderer = Renderer::new(&device, target_format, Default::default());
         RenderState {
             adapter, instance, device: device.clone(), queue, target_format, available_adapters: vec![],
-            renderer: Arc::new(egui::mutex::RwLock::new(renderer)), surface_config: eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY,
+            renderer: Arc::new(egui::mutex::RwLock::new(renderer)),
         }
     }
 

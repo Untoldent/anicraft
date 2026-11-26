@@ -17,12 +17,14 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
     app.menu_keys.before(&ctx);
     let underline = app.menu_keys.show_keys;
     let mut tops = Vec::with_capacity(TOP_MENUS.len());
+    // Every title in the bar and where it is, for opening on hover (#455).
+    let mut titles: Vec<(egui::Id, egui::Rect)> = Vec::with_capacity(TOP_MENUS.len() + 1);
     egui::MenuBar::new().ui(ui, |ui| {
         // Keep platform-specific spacing here if the menu row ever shares the title bar again.
         ui.add_space(platform::menu_inset());
         if platform::OS == Os::Mac {
             // The application menu, as every Mac app has (About, Settings, Quit).
-            ui.menu_button(text(Type::Body, "AniCraft").strong(), |ui| {
+            let r = ui.menu_button(text(Type::Body, "AniCraft").strong(), |ui| {
                 ui.set_min_width(220.0);
                 if ui_item(ui, tr!("About AniCraft"), "", None) {
                     app.show_about = true;
@@ -36,6 +38,7 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
                     crate::tabs::quit(app);
                 }
             });
+            titles.push((r.response.id, r.response.rect));
         }
         // Windows and Linux: no name before the menus; the window title already shows it.
         for ((top, label), key) in TOP_MENUS.into_iter().zip(&labels).zip(&keys) {
@@ -56,8 +59,10 @@ pub fn bar(app: &mut App, ui: &mut egui::Ui) {
                 ctx.accesskit_node_builder(r.response.id, |n| n.set_access_key(k));
             }
             tops.push(r.response.id);
+            titles.push((r.response.id, r.response.rect));
         }
     });
+    app.menu_keys.hover(&ctx, &titles);
     app.menu_keys.after(&ctx, tops);
 }
 
@@ -209,6 +214,24 @@ impl MenuKeys {
                 }
             }
         });
+    }
+
+    /// With one menu open, pointing at another menu's title opens that one instead (#455), as
+    /// menu bars do on every desktop. The pointer has to move onto the title: one resting there
+    /// does not take a menu back from the arrow keys. `titles`: each title's button and where it
+    /// is, this frame.
+    fn hover(&mut self, ctx: &egui::Context, titles: &[(egui::Id, egui::Rect)]) {
+        let Some(open) = titles.iter().position(|(t, _)| egui::Popup::is_id_open(ctx, Self::popup(*t))) else { return };
+        let Some(at) = ctx.input(|i| i.pointer.hover_pos().filter(|_| i.pointer.is_moving() && !i.pointer.any_down())) else { return };
+        let Some(&(title, _)) = titles.iter().enumerate().find(|(i, (_, r))| *i != open && r.contains(at)).map(|(_, t)| t) else { return };
+        // (One popup is open at a time: opening this one closes the other.)
+        egui::Popup::open_id(ctx, Self::popup(title));
+        self.stack.clear();
+        if self.engaged {
+            // The keyboard was in the menu that closed: it goes to the one that opened.
+            self.into = Some((Self::layer(title), 3));
+        }
+        ctx.request_repaint();
     }
 
     /// Alt pressed and let go with nothing else in between.
@@ -425,13 +448,17 @@ fn enabled(app: &App, id: &str) -> bool {
     match id {
         "edit.undo" => app.s.can_undo(),
         "edit.redo" => app.s.can_redo(),
-        "edit.delete" | "edit.duplicate" | "modify.convert_to_symbol" | "modify.break_apart" | "arrange.bring_to_front" | "arrange.send_to_back" => !app.s.selection.is_empty(),
+        "edit.delete" | "edit.duplicate" | "modify.convert_to_symbol" | "modify.convert_to_bitmap" | "modify.break_apart" | "arrange.bring_to_front" | "arrange.send_to_back" => !app.s.selection.is_empty(),
         // Modify › Shape (ADR 0109): what the selection has for them.
+        "modify.trace_bitmap" => crate::trace_dialog::has_bitmap(app),
         "modify.lines_to_fills" => selected_shape(app, |sh| sh.stroke.is_some()),
         "modify.expand_fill" => selected_shape(app, |sh| sh.fill.is_some()),
         "modify.soften_fill_edges" => selected_shape(app, |sh| sh.fill.as_ref().is_some_and(|f| !matches!(f, anicraft_engine::doc::Paint::Bitmap { .. }))),
         // Convert Audio to Keyframes and Auto Lip-Sync read a sound on this timeline (ADR 0114).
         "sound.to_keyframes" | "sound.lip_sync" => app.s.timeline().layers.iter().any(|l| l.has_sounds()),
+        // Data bindings (ADR 0118): one instance and a table to bind; bindings to remove or bake.
+        "data.bind" => crate::data_ui::can_bind(app),
+        "data.unbind" | "data.bake" => crate::data_ui::has_bindings(app),
         "layer.delete" => app.s.timeline().layers.len() > 1,
         "scene.delete" => app.s.doc.scenes.len() > 1,
         // Ctrl+E opens the selected instance, or goes back to the document (ADR 0045).
@@ -446,11 +473,14 @@ fn enabled(app: &App, id: &str) -> bool {
         "scene.next" | "scene.move_down" => app.s.scene + 1 < app.s.doc.scenes.len(),
         "timeline.clear_keyframe" => match app.frame_sel {
             Some(sel) => sel.has_keys(&app.s.timeline().layers),
-            None => app.s.active_layer().is_some_and(|l| l.keyframe_starting_at(app.s.frame).is_some()),
+            // With no frame selection it clears the keyframes at the playhead on every layer.
+            None => app.s.timeline().layers.iter().any(|l| l.keyframe_starting_at(app.s.frame).is_some()),
         },
         "timeline.paste_frames" => !app.s.frame_clipboard.is_empty(),
         "tween.add_hint" => app.s.active_layer().and_then(|l| l.hint_tween_at(app.s.frame)).is_some(),
         "tween.clear_hints" => app.s.active_layer().and_then(|l| l.hint_tween_at(app.s.frame).and_then(|(i, _)| l.keyframes.get(i))).is_some_and(|k| !k.hints.is_empty()),
+        // With no frame selection it removes the frame at the playhead on every layer.
+        "timeline.remove_frame" if app.frame_sel.is_none() => app.s.timeline().layers.iter().any(|l| l.end_frame() > app.s.frame),
         "timeline.remove_frame" | "timeline.create_tween" | "timeline.create_shape_tween" => app.s.active_layer().is_some_and(|l| l.keyframe_at(app.s.frame).is_some()),
         _ => true,
     }
@@ -468,6 +498,7 @@ fn checked(app: &App, id: &str) -> Option<bool> {
         "draw.object_drawing" => Some(app.s.style.object_drawing),
         // Rulers, grid and guides (ADR 0076).
         "view.rulers" => Some(app.s.aids.rulers),
+        "view.hide_edges" => Some(app.s.aids.hide_edges),
         "view.grid_show" => Some(app.s.aids.show_grid),
         "view.grid_snap" => Some(app.s.aids.snap_grid),
         "view.guides_show" => Some(app.s.aids.show_guides),
@@ -486,7 +517,9 @@ fn item(app: &mut App, ui: &mut egui::Ui, spec: &CommandSpec) {
         _ => crate::i18n::t_cmd(spec.id, spec.label).to_string(),
     };
     // Settings show whether they are on, as check items do.
-    let label = match checked(app, spec.id) {
+    let on = checked(app, spec.id);
+    let name = label.clone();
+    let label = match on {
         Some(true) => format!("✔ {label}"),
         Some(false) => format!("   {label}"),
         None => label,
@@ -495,6 +528,19 @@ fn item(app: &mut App, ui: &mut egui::Ui, spec: &CommandSpec) {
     // What this build can't do stays in its usual place, dimmed, saying why (the web build).
     let missing = platform::unavailable(spec.id);
     let r = ui.add_enabled(enabled(app, spec.id) && missing.is_none(), button);
+    // A setting is a check item to a screen reader too: its name without the tick drawn for
+    // the eye, and whether it is on (every toggling command, not one of them).
+    if let Some(on) = on {
+        use egui::accesskit::{Role, Toggled};
+        ui.ctx().accesskit_node_builder(r.id, |node| {
+            node.set_role(Role::MenuItemCheckBox);
+            node.set_label(name);
+            node.set_toggled(if on { Toggled::True } else { Toggled::False });
+            if let Some(key) = app.keymap.primary(spec.id) {
+                node.set_keyboard_shortcut(platform::shortcut_label(key));
+            }
+        });
+    }
     let r = match missing {
         Some(why) => r.on_disabled_hover_text(crate::i18n::t(why)),
         None => r,
@@ -629,19 +675,18 @@ pub(crate) fn menu_contents(app: &mut App, ui: &mut egui::Ui, top: &str, cmds: &
         "View" => {
             let canvas = app.stage_cache.canvas;
             let center = canvas.center();
+            let ppp = ui.ctx().pixels_per_point();
             if ui_item(ui, tr!("Zoom In"), "Ctrl+=", None) {
-                let z = app.view.zoom * 1.5;
-                app.zoom_about(canvas, center, z);
+                app.zoom_by(canvas, center, 1.5, ppp);
             }
             if ui_item(ui, tr!("Zoom Out"), "Ctrl+-", None) {
-                let z = app.view.zoom / 1.5;
-                app.zoom_about(canvas, center, z);
+                app.zoom_by(canvas, center, 1.0 / 1.5, ppp);
             }
             if ui_item(ui, tr!("Fit in Window"), "Ctrl+0", None) {
                 app.view.fit = true;
             }
             if ui_item(ui, "100%", "Ctrl+1", None) {
-                app.zoom_about(canvas, center, 1.0);
+                app.zoom_about(canvas, center, 1.0 / ppp, ppp);
             }
             ui.separator();
             if ui_item(ui, tr!("Onion Skin"), app.keymap.primary("view.onion").unwrap_or(""), Some(app.onion.ghosts)) {
@@ -731,18 +776,16 @@ pub(crate) fn menu_contents(app: &mut App, ui: &mut egui::Ui, top: &str, cmds: &
             // Every panel: ticked while it is in front; choosing one brings it forward, or
             // closes it when it already is.
             for p in crate::dock::Panel::ALL {
-                let key = match p {
-                    crate::dock::Panel::Actions => app.keymap.primary("view.actions").unwrap_or(""),
-                    crate::dock::Panel::MovieExplorer => app.keymap.primary("view.movie_explorer").unwrap_or(""),
-                    _ => "",
-                };
+                // Its key, as set in the shortcut editor (#456).
+                let key = app.keymap.primary(p.action()).unwrap_or("");
                 if ui_item(ui, crate::i18n::t(p.label()), key, Some(app.panel_visible(p))) {
-                    if p == crate::dock::Panel::MovieExplorer && !app.panel_visible(p) {
-                        crate::movie_explorer::open(app);
-                    } else {
-                        app.toggle_panel(p);
-                    }
+                    app.window_menu_panel(p);
                 }
+            }
+            // Every panel at once (F4, as in Animate): the stage takes the window.
+            let key = app.keymap.primary("view.hide_panels").unwrap_or("");
+            if ui_item(ui, if app.hidden_panels.is_some() { tr!("Show Panels") } else { tr!("Hide Panels") }, key, None) {
+                app.toggle_hide_panels();
             }
             // Brush presets with previews, and your own (ADR 0068).
             if ui_item(ui, tr!("Brush Library"), "", Some(app.brush_lib.open)) {

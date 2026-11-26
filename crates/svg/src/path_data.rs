@@ -2,13 +2,13 @@
 //!
 //! craft-svg reads the data: every command in absolute and relative form (M L H V C S Q T A Z),
 //! implicit repeats, packed numbers and arc flags, with the S/T reflections resolved and
-//! quadratics raised to cubics. This module only maps its segments onto [`Path`], turning
+//! quadratic segments preserved. This module only maps its segments onto [`Path`], turning
 //! elliptical arcs into cubics with [`anicraft_geom::svg::arc_to`]. Never panics; malformed,
 //! non-finite and oversized path data are errors.
 
 use anicraft_geom::svg::{MAX_PATH_CMDS, arc_to};
 use anicraft_geom::{Path, PathCmd, Vec2};
-use craft_svg::path_data::{Point, Segment, parse_path};
+use craft_svg::path_data::{Point, QuadSegment, parse_path_with_quads};
 
 fn v(p: Point) -> Vec2 {
     Vec2::new(p.x as f32, p.y as f32)
@@ -23,22 +23,26 @@ pub fn parse_path_data(d: &str) -> Result<Path, String> {
     {
         return Err("path data must start with moveto".into());
     }
-    let subpaths = parse_path(d).map_err(|e| e.to_string())?;
+    let subpaths = parse_path_with_quads(d).map_err(|e| e.to_string())?;
     let mut path = Path::new();
     for sub in subpaths {
         path.move_to(v(sub.start));
         let mut cur = sub.start;
         for seg in &sub.segs {
             match *seg {
-                Segment::Line(p) => {
+                QuadSegment::Line(p) => {
                     path.line_to(v(p));
                     cur = p;
                 }
-                Segment::Cubic(c1, c2, p) => {
+                QuadSegment::Quad(q, p) => {
+                    path.quad_to(v(q), v(p));
+                    cur = p;
+                }
+                QuadSegment::Cubic(c1, c2, p) => {
                     path.cubic_to(v(c1), v(c2), v(p));
                     cur = p;
                 }
-                Segment::Arc { rx, ry, rot, large, sweep, end } => {
+                QuadSegment::Arc { rx, ry, rot, large, sweep, end } => {
                     arc_to(&mut path, [cur.x, cur.y], rx, ry, rot, large, sweep, [end.x, end.y]);
                     cur = end;
                 }
@@ -135,6 +139,13 @@ mod tests {
         // A real icon outline (rounded square corner arcs).
         let lock = parse_path_data("M7 11V7a5 5 0 0 1 10 0v4").unwrap();
         assert_eq!(ends(&lock).last().copied(), Some(Vec2::new(17.0, 11.0)));
+    }
+
+    #[test]
+    fn numbers_overflowing_f32_are_errors() {
+        for bad in ["M0 0 L1e39 0", "M0 0 v , 3.4028236692e38 z", "M0 0 l3e38 0 3e38 0"] {
+            assert!(parse_path_data(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

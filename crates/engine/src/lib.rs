@@ -5,7 +5,9 @@
 //! JSON params, so headless and interactive behaviour cannot drift apart.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod access;
 mod anim;
+pub mod left_out;
 mod cmds_actions;
 mod cmds_bone;
 mod cmds_warp;
@@ -49,7 +51,10 @@ pub mod cmds_plugin;
 mod cmds_scene;
 pub mod cmds_sound;
 pub mod cmds_audio_keys;
+pub mod cmds_data;
+pub mod data_import;
 pub mod cmds_text;
+pub mod embed;
 mod cmds_timeline;
 mod cmds_view;
 mod cmds_width;
@@ -69,12 +74,15 @@ pub mod recovery;
 pub mod render_service;
 pub mod selection;
 pub mod snap;
+pub mod trace;
 pub mod transfer;
 pub mod params;
 pub mod plugin_export;
 pub mod player;
 pub mod publish;
 pub mod vfs;
+pub mod video;
+mod cmds_video;
 
 use anicraft_doc::{DisplayList, Document, Element, ElementId, ElementKind, Keyframe, Layer, LayerId, LayerKind, evaluate_scene};
 #[cfg(test)]
@@ -94,7 +102,7 @@ pub use anicraft_render as render;
 pub use anicraft_svg as svg;
 /// Whether a path is an Animate document (`.fla`, `.xfl`, or an XFL folder) that `file.open`
 /// imports.
-pub use cmds_file::is_animate;
+pub use cmds_file::{Import, import_package, is_animate};
 pub use cmds_array::{ArrayEaseMode, ArrayEasing, ArrayPropertyStop, CLOSED_SWEEP_LIMIT, GridPropertyDistribution, GridStagger, GridStaggerAxis, MAX_ARRAY_INSTANCES, RadialDistribution, array_timeline_default_duration};
 pub use cmds_modify::{Item as SelectedItem, transform_origins};
 
@@ -192,6 +200,7 @@ pub fn commands() -> Vec<CommandSpec> {
     v.extend(cmds_erase::specs());
     v.extend(cmds_paint::specs());
     v.extend(cmds_swatch::specs());
+    v.extend(cmds_data::specs());
     v.extend(cmds_text::specs());
     v.extend(cmds_width::specs());
     v.extend(cmds_stroke::specs());
@@ -199,6 +208,7 @@ pub fn commands() -> Vec<CommandSpec> {
     v.extend(cmds_plugin::specs());
     v.extend(cmds_sound::specs());
     v.extend(cmds_audio_keys::specs());
+    v.extend(cmds_video::specs());
     v.extend(cmds_actions::specs());
     v.extend(cmds_script::specs());
     v.extend(cmds_macro::specs());
@@ -244,7 +254,7 @@ pub use cmds_layer::LAYER_COLORS;
 const GROUP_REFUSES: &[&str] = &["timeline.", "layer.", "camera.", "bone.", "motion.", "tween.", "frames.", "sound.place", "sound.to_keyframes", "sound.lip_sync", "script.set", "script.clear"];
 
 /// Last addressable frame (0-based); about 70 minutes at 24 fps.
-pub const MAX_FRAME: u32 = 100_000;
+pub const MAX_FRAME: u32 = anicraft_doc::MAX_FRAME;
 
 /// The index of the topmost item of `dl` under `p` (stage space) that `ok` accepts (given its
 /// index). A bounding-box test rejects almost every item before any curve is flattened;
@@ -253,6 +263,10 @@ pub(crate) fn pick_index(dl: &DisplayList, p: Vec2, slop: f32, ok: impl Fn(usize
     for (i, item) in dl.items.iter().enumerate().rev() {
         let hw = item.stroke.as_ref().map_or(0.0, |s| s.reach() * item.transform.mean_scale());
         let bounds = item.path.bounds().transformed(&item.transform).inflate(hw + slop);
+        // Nothing to hit: an item with no paint (a reference video's placeholder, ADR 0116).
+        if item.fill.is_none() && item.stroke.is_none() {
+            continue;
+        }
         if !bounds.contains(p) || !ok(i, item) {
             continue;
         }
@@ -392,6 +406,11 @@ pub struct Session {
     pub frame: u32,
     /// Active layer.
     pub layer: LayerId,
+    /// The layers selected together in the layer list (Ctrl- and Shift-click, ADR 0131), the
+    /// active one among them. It counts only while it holds the active layer: anything that
+    /// makes another layer active (a new layer, a click, an undo) leaves the active layer as
+    /// the whole selection. Read it through [`Session::picked_layers`].
+    pub layer_sel: Vec<LayerId>,
     /// Selected elements at the playhead, each with its layer (ADR 0044).
     pub selection: Selection,
     /// Bumped on every document change, undo and redo (UI invalidation).
@@ -400,6 +419,10 @@ pub struct Session {
     pub state: StateId,
     saved_state: Option<StateId>,
     pub path: Option<PathBuf>,
+    /// The Animate file (`.fla`, `.xfl` or XFL folder) this untitled document was imported from
+    /// (ADR 0009). It names the document until it is saved, but is never written to: `path`
+    /// stays `None`, so Save asks for a new `.anicraft` name.
+    pub imported: Option<cmds_file::Import>,
     pub style: ToolStyle,
     /// Whether the rulers, grid and guides show and snap (ADR 0076): the editor's, not the
     /// document's.
@@ -452,6 +475,12 @@ pub struct Session {
     picture_cache: RefCell<Option<(u64, Arc<editing::StagePicture>)>>,
     /// A publish this session runs: its Cancel and frame count, which exports check (ADR 0060).
     pub job: Option<Arc<publish::Control>>,
+    /// An import the editor prepared on another thread (ADR 0116): `file.import_video` asked
+    /// for the same thing takes it instead of decoding again. Never in the document.
+    pub staged_video: Option<video::Prepared>,
+    /// A Brush stroke's outline the editor traced on another thread (ADR 0129): `draw.brush`
+    /// asked for the same stroke takes it instead of tracing again. Never in the document.
+    pub staged_stroke: Option<cmds_brush::PreparedStroke>,
     /// Files this session's publishes wrote: publishing again replaces them without asking.
     pub published: std::collections::BTreeSet<PathBuf>,
     /// The files opened and saved last, and pinned favourites (ADR 0059). They belong to the
@@ -566,6 +595,7 @@ impl Session {
             state,
             saved_state: Some(state),
             path: None,
+            imported: None,
             style: ToolStyle::default(),
             aids: ViewAids::default(),
             text_style: cmds_text::TextStyle::default(),
@@ -576,6 +606,7 @@ impl Session {
             dl_cache: RefCell::new(None),
             clipboard: cmds_modify::Clipboard::default(),
             frame_clipboard: cmds_frames::FrameClipboard::default(),
+            layer_sel: Vec::new(),
             ease_clipboard: None,
             motion_edit: None,
             rig_cmd: None,
@@ -591,6 +622,8 @@ impl Session {
             hit_area: None,
             picture_cache: RefCell::new(None),
             job: None,
+            staged_video: None,
+            staged_stroke: None,
             published: std::collections::BTreeSet::new(),
             recent: cmds_recent::RecentFiles::default(),
             brushes: brush_library::BrushLibrary::default(),
@@ -762,6 +795,9 @@ impl Session {
 
     fn execute_command(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // An agent's command names files inside its automation roots only (ADR 0124); checked
+        // first, so neither the confirmation below nor the command looks at a refused file.
+        access::check_params(id, params).map_err(EngineError::State)?;
         // Irreversible loss (unsaved work, files on disk) needs explicit consent, whoever asks.
         if let Some(c) = self.confirmation(id, params)
             && c.irreversible
@@ -1131,6 +1167,16 @@ impl Session {
         self.timeline().layers.iter().position(|l| l.id == self.layer)
     }
 
+    /// The layers selected in the layer list, top to bottom: the active layer, and those picked
+    /// with it by Ctrl- or Shift-click (ADR 0131) while they are still in this timeline.
+    pub fn picked_layers(&self) -> Vec<LayerId> {
+        if !self.layer_sel.contains(&self.layer) {
+            return vec![self.layer];
+        }
+        let here: Vec<LayerId> = self.timeline().layers.iter().map(|l| l.id).filter(|id| self.layer_sel.contains(id)).collect();
+        if here.contains(&self.layer) { here } else { vec![self.layer] }
+    }
+
     /// The current scene evaluated at the playhead, cached per `(state, scene, frame)`.
     pub fn display_list(&self) -> Arc<DisplayList> {
         let open = self.editing.last().map(|l| (l.open, l.instance, self.editing.len()));
@@ -1323,8 +1369,11 @@ impl Session {
             })
             .collect();
         let symbols: Vec<Value> = self.doc.library.iter().map(|s| json!({"id": s.id.0, "name": s.name, "kind": format!("{:?}", s.kind), "frames": s.timeline.frame_count()})).collect();
+        // The frame shown, when its artwork is not all there (ADR 0128).
+        let cut = left_out::LeftOut::default();
+        cut.note(&self.display_list());
         let sounds: Vec<Value> = self.doc.sounds.iter().map(|x| json!({"id": x.id.0, "name": x.name, "format": x.format.label(), "rate": x.rate, "channels": x.channels, "seconds": x.seconds()})).collect();
-        json!({
+        cut.noted(json!({
             "stage": {"width": self.doc.stage.width, "height": self.doc.stage.height, "fps": self.doc.stage.fps, "background": self.doc.stage.background.to_hex()},
             "frames": self.frame_count(),
             "frame": self.frame,
@@ -1332,6 +1381,8 @@ impl Session {
             "scenes": self.doc.scenes.iter().map(|s| json!({"name": s.name, "frames": s.timeline.frame_count()})).collect::<Vec<_>>(),
             "movie_frames": self.doc.frame_count(),
             "layer": self.layer.0,
+            // The layers selected in the layer list, the active one among them (ADR 0131).
+            "layer_selection": self.picked_layers().iter().map(|l| l.0).collect::<Vec<_>>(),
             "selection": self.selection.id_list(),
             "selection_layers": self.selected_layers().iter().map(|l| l.0).collect::<Vec<_>>(),
             // The symbols open for editing, outermost first (ADR 0045); `layers` are the open one's.
@@ -1341,9 +1392,13 @@ impl Session {
             "sounds": sounds,
             "revision": self.revision,
             "dirty": self.is_dirty(),
+            // The Animate file an untitled document came from, and the name Save suggests for
+            // it (ADR 0009).
+            "imported": self.imported.as_ref().map(|i| i.source.display().to_string()),
+            "save_as": self.imported.as_ref().map(|i| i.save_as.display().to_string()),
             "history": {"undo": self.history.undo_len(), "redo": self.history.redo_len(), "bytes": self.history.bytes(), "evicted": self.history.evicted},
             "state": self.state,
-        })
+        }))
     }
 }
 
@@ -1413,6 +1468,8 @@ pub fn element_label(doc: &Document, e: &Element) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod access_tests;
 
 #[cfg(test)]
 mod parenting_tests;
@@ -1441,6 +1498,8 @@ mod plugin_kinds_tests;
 mod tests_sound;
 #[cfg(test)]
 mod tests_audio_keys;
+#[cfg(test)]
+mod video_tests;
 #[cfg(test)]
 mod hint_tests;
 #[cfg(test)]
@@ -1479,6 +1538,8 @@ mod rawpoints_tests;
 mod editing_tests;
 #[cfg(test)]
 mod brush_tests;
+#[cfg(test)]
+mod ellipse_tests;
 #[cfg(test)]
 mod brush_library_tests;
 #[cfg(test)]
@@ -1519,3 +1580,5 @@ mod group_tests;
 mod swatch_tests;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod render_budget_tests;

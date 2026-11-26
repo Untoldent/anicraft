@@ -81,6 +81,7 @@ This page is generated from the editor's shortcut map, so it always matches the 
 |---|---|---|
 | Snapping › Snap to Objects | Ctrl+Shift+/, Ctrl+Shift+? | ⇧⌘/, ⇧⌘? |
 | Rulers | Ctrl+Alt+Shift+R | ⌥⇧⌘R |
+| Hide Edges | Ctrl+Shift+E | ⇧⌘E |
 | Grid › Show Grid | Ctrl+' | ⌘' |
 | Grid › Snap to Grid | Ctrl+Shift+' | ⇧⌘' |
 | Grid › Edit Grid… | Ctrl+Alt+G | ⌥⌘G |
@@ -98,6 +99,15 @@ This page is generated from the editor's shortcut map, so it always matches the 
 | Find Next | F3 | F3 |
 | Find Previous | Shift+F3 | ⇧F3 |
 | Movie Explorer | Alt+F3 | ⌥F3 |
+| Timeline Panel | Ctrl+Alt+T | ⌥⌘T |
+| Tools Panel | Ctrl+F2 | ⌘F2 |
+| Properties Panel | Ctrl+F3 | ⌘F3 |
+| Library Panel | Ctrl+L | ⌘L |
+| Output Panel | F2 | F2 |
+| Colour Panel | Ctrl+Shift+F9 | ⇧⌘F9 |
+| Swatches Panel | Ctrl+F9 | ⌘F9 |
+| History Panel | Ctrl+F10 | ⌘F10 |
+| Hide Panels / Show Panels | F4 | F4 |
 | Close Document | Ctrl+W | ⌘W |
 | Close All Documents | Ctrl+Alt+W | ⌥⌘W |
 | Next Document | Ctrl+PageDown | ⌘PageDown |
@@ -124,6 +134,7 @@ This page is generated from the editor's shortcut map, so it always matches the 
 
 | Action | Windows and Linux | macOS |
 |---|---|---|
+| Document Settings | Ctrl+J | ⌘J |
 | Shape › Add Shape Hint | Ctrl+Shift+H | ⇧⌘H |
 | Arrange › Bring to Front | Ctrl+Shift+Up | ⇧⌘↑ |
 | Arrange › Bring Forward | Ctrl+Up | ⌘↑ |
@@ -136,6 +147,7 @@ This page is generated from the editor's shortcut map, so it always matches the 
 | Transform › Rotate 90° CW | Ctrl+Shift+9 | ⇧⌘9 |
 | Transform › Rotate 90° CCW | Ctrl+Shift+7 | ⇧⌘7 |
 | Transform › Remove Transform | Ctrl+Shift+Z | ⇧⌘Z |
+| Timeline › Distribute to Layers | Ctrl+Shift+D | ⇧⌘D |
 | Align › Left | Ctrl+Alt+1 | ⌥⌘1 |
 | Align › Horizontal Center | Ctrl+Alt+2 | ⌥⌘2 |
 | Align › Right | Ctrl+Alt+3 | ⌥⌘3 |

@@ -5,6 +5,13 @@
 //! frame asks for the visible tiles as one batch (plus a one-tile margin as look-ahead), keeps
 //! finished tiles as textures, and uses older tiles as placeholders while the current ones
 //! render. Only a missing transparent tile can use a placeholder at the same location.
+//!
+//! Memory and frame time stay flat (ADR 0132). The pictures of a document state and zoom that
+//! are no longer on screen go as soon as the view is drawn again, here and in the render
+//! service. While the zoom is changing (a pinch, Ctrl+wheel) nothing new is drawn: every frame
+//! of it is a zoom level nobody will look at, so the pictures on screen are scaled until the
+//! zoom rests. With no render thread (the browser) moving around the stage draws for at most
+//! `INLINE_BUDGET` of a frame.
 
 use crate::app::{App, Drag, Tool, XfKind};
 use crate::prefs::RenderMode;
@@ -29,10 +36,15 @@ const IMMEDIATE_BUDGET_MS: f32 = 12.0;
 pub const TILE: u32 = 512;
 /// Tile textures kept on the GPU (≈ 1 MB each); least recently used ones are dropped.
 const MAX_TILE_TEXTURES: usize = 192;
+/// With no render thread (the browser): the most of one frame spent drawing tiles while
+/// moving around the stage. The rest of the view arrives over the next frames.
+const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// A finished tile on the GPU.
 struct TileTex {
     key: u64,
+    /// The picture set it is of (a document state at a zoom, ADR 0132).
+    set: u64,
     /// Stage-space rectangle `[x0, y0, x1, y1]` this tile covers.
     rect: [f32; 4],
     tex: TileImage,
@@ -64,11 +76,18 @@ pub struct Cache {
     /// `(ready, needed)` visible tiles this frame.
     pub ready: (usize, usize),
     pub canvas: Rect,
+    /// Device pixels per point when `canvas` was measured.
+    canvas_pixels_per_point: f32,
     /// The stage has been laid out once, so `canvas` is where it really was last frame.
     laid_out: bool,
     pub service: Option<RenderService>,
     /// Document state of the picture on screen (an edit makes it differ).
     pub shown_state: Option<anicraft_engine::StateId>,
+    /// Movie frame of the picture on screen (playing or scrubbing makes it differ).
+    shown_frame: Option<u32>,
+    /// The device scale the stage was laid out at last frame: while it differs from this
+    /// frame's the zoom is still changing, and no tiles are asked for.
+    last_scale: Option<f32>,
     /// The GPU stage (ADR 0019), when this build has it and Preferences ask for it.
     pub gpu: crate::gpu_stage::GpuStage,
     /// Who drew the newest visible tiles: the GPU, or the CPU and why (status bar).
@@ -83,7 +102,7 @@ pub struct Cache {
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), laid_out: false, service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None, filtered_array: Default::default(),
+        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), canvas_pixels_per_point: 1.0, laid_out: false, service: None, shown_state: None, shown_frame: None, last_scale: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None, filtered_array: Default::default(),
             #[cfg(test)]
             disable_filtered_array: false,
         }
@@ -108,6 +127,8 @@ impl Cache {
         self.array_tiles = None;
         self.filtered_array = Default::default();
         self.shown_state = None;
+        self.shown_frame = None;
+        self.last_scale = None;
         self.ready = (0, 0);
         if let Some(s) = &self.service {
             s.forget_pictures();
@@ -158,7 +179,7 @@ impl Cache {
             }
         };
         self.tick += 1;
-        self.tiles.push(TileTex { key: img.key, rect: spec.rect, tex, used: self.tick, opaque: spec.opaque(), array });
+        self.tiles.push(TileTex { key: img.key, set: img.set, rect: spec.rect, tex, used: self.tick, opaque: spec.opaque(), array });
         // Evict least recently used tiles that are not on screen.
         while self.tiles.len() > MAX_TILE_TEXTURES {
             let victim = self.tiles.iter().enumerate().filter(|(_, t)| !keep.contains(&t.key)).min_by_key(|(_, t)| t.used).map(|(i, _)| i);
@@ -255,6 +276,21 @@ fn to_v(p: Pos2) -> Vec2 {
     Vec2::new(p.x, p.y)
 }
 
+/// Says in the status bar, once each time it starts, that the frame shown is not all there: its
+/// artwork took more than a frame's allowance of work, so the rest was left out (ADR 0128). A
+/// picture with parts missing and nothing said would read as lost work. Not asked while
+/// playing, where it would cost an evaluation every frame; the frame playback stops on is.
+fn note_left_out(app: &mut App) {
+    if app.playing {
+        return;
+    }
+    let cut = app.s.display_list().left_out;
+    if cut && !app.left_out_said {
+        app.status_err(tr!("Some artwork on this frame is left out: it holds more than AniCraft draws at once. Nothing is lost. Look for symbols nested many times over."));
+    }
+    app.left_out_said = cut;
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let array_active = app.s.array_preview_active();
     #[cfg(test)]
@@ -265,6 +301,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     crate::camera_tool::on_tool_change(app);
     crate::shape_envelope::settle(app);
     crate::camera_tool::tick(app, ui.ctx(), now);
+    note_left_out(app);
+    let ppp = ui.ctx().pixels_per_point();
+    let ppp_was = std::mem::replace(&mut app.stage_cache.canvas_pixels_per_point, ppp);
     let canvas_was = std::mem::replace(&mut app.stage_cache.canvas, canvas);
     let laid_out = std::mem::replace(&mut app.stage_cache.laid_out, true);
     // While a colour picker popup is open the stage is its eyedropper (ADR 0109): a click
@@ -273,7 +312,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let resp = ui.allocate_rect(canvas, if array_active || picker.is_some() { Sense::hover() } else { Sense::click_and_drag() });
     // The drawing surface: Ctrl+F6 lands here, and screen readers hear the tool in hand.
     crate::a11y::anchor(ui, crate::a11y::Region::Stage, canvas, &resp);
-    let ppp = ui.ctx().pixels_per_point();
+    let show_edges = !app.s.aids.hide_edges;
     let size = vec2(app.s.doc.stage.width as f32, app.s.doc.stage.height as f32);
     // Still as fitted (nobody zoomed or panned since) but the canvas changed size: fit again, as
     // Fit in Window stays fitted when the window or the interface scale changes.
@@ -287,12 +326,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // Otherwise the artist chose this view, and a panel that grows or shrinks (the Timeline's
     // top edge, a dock, the rulers, the window) only covers or reveals the stage: the artwork
     // stays where it is on screen (#423). The pan is measured from the canvas centre, so it
-    // takes up the centre's move.
-    if laid_out && !app.view.fit && canvas_was != canvas && canvas_was.width() > 10.0 && canvas_was.height() > 10.0 {
-        app.view.pan += canvas_was.center() - canvas.center();
+    // takes up the centre's move, with both centres in this frame's points.
+    if laid_out && !app.view.fit && (canvas_was != canvas || ppp_was != ppp) && canvas_was.width() > 10.0 && canvas_was.height() > 10.0 {
+        app.view.pan += canvas_was.center().to_vec2() * (ppp_was / ppp) - canvas.center().to_vec2();
     }
     if app.view.fit && canvas.width() > 10.0 && canvas.height() > 10.0 {
-        app.view.zoom = ((canvas.width() - 64.0) / size.x).min((canvas.height() - 64.0) / size.y).clamp(0.05, 64.0);
+        let width = (canvas.width() - 64.0).max(1.0);
+        let height = (canvas.height() - 64.0).max(1.0);
+        // Fitting may need to go below the minimum manual zoom to show the whole stage.
+        app.view.zoom = (width / size.x).min(height / size.y).min(64.0 / ppp);
         app.view.pan = egui::Vec2::ZERO;
         app.view.fit = false;
         app.view.fitted = Some((vec2(canvas.width(), canvas.height()), app.view.zoom));
@@ -303,8 +345,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let (zoom_delta, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
         if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
             if (zoom_delta - 1.0).abs() > 1e-4 {
-                let z = app.view.zoom * zoom_delta;
-                app.zoom_about(canvas, p, z);
+                app.zoom_by(canvas, p, zoom_delta, ppp);
             } else if !array_active && app.tool == Tool::Camera && scroll.y != 0.0 {
                 // With the Camera tool the wheel zooms the camera, not the view.
                 crate::camera_tool::wheel(app, scroll.y, now);
@@ -324,18 +365,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         let c = canvas.center();
         if zin {
-            let z = app.view.zoom * 1.5;
-            app.zoom_about(canvas, c, z);
+            app.zoom_by(canvas, c, 1.5, ppp);
         }
         if zout {
-            let z = app.view.zoom / 1.5;
-            app.zoom_about(canvas, c, z);
+            app.zoom_by(canvas, c, 1.0 / 1.5, ppp);
         }
         if fit {
             app.view.fit = true;
         }
         if one {
-            app.zoom_about(canvas, c, 1.0);
+            app.zoom_about(canvas, c, 1.0 / ppp, ppp);
         }
     }
 
@@ -504,7 +543,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             && let Some(p) = pointer
         {
             let centre = sel_rect.map_or(canvas.center(), |r| r.center());
-            rotate_cursor(&ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("stage_cursor"))), p, p - centre);
+            rotate_cursor(&ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stage_cursor"))), p, p - centre);
         }
     }
     if let Some(picker) = picker {
@@ -812,14 +851,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Drag::BindMarquee { start, cur } => crate::bind_tool::drag_end(app, start, cur, shift, command),
             Drag::BindPaint { .. } => crate::bind_tool::paint_end(app),
             Drag::Pencil => crate::pathtools::commit_pencil(app, xf),
-            Drag::Brush => crate::brushtool::commit(app, xf),
+            Drag::Brush => crate::brushtool::commit(app, ui.ctx(), xf),
             Drag::Eraser => crate::erasertool::commit(app, xf),
             // Raw shapes merge where they landed, in the drag's step (ADR 0051).
             Drag::MultiMove { .. } | Drag::MultiTransform { .. } => crate::onion::drag_end(app),
             Drag::MultiMarquee { start, cur } => crate::onion::marquee(app, start, cur, shift),
             Drag::Marquee { start, cur } => {
                 // The parts of raw fills and strokes under it, cut at its edges, and the objects
-                // wholly inside it (ADR 0041).
+                // it touches (ADR 0041, #522).
                 app.run("raw.select_rect", json!({"x0": start.x, "y0": start.y, "x1": cur.x, "y1": cur.y, "add": shift}));
             }
             Drag::Shape { start, cur } => create_shape(app, start, cur),
@@ -867,7 +906,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Tool::Brush if !panning => {
                     // A click paints a dab.
                     crate::brushtool::start(app, to_v(sp), pressure, now);
-                    crate::brushtool::commit(app, xf);
+                    crate::brushtool::commit(app, ui.ctx(), xf);
                 }
                 Tool::Eraser if !panning => {
                     if app.eraser.faucet {
@@ -900,8 +939,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.run("element.pick", json!({"x": sp.x, "y": sp.y, "add": shift}));
                 }
                 Tool::Zoom => {
-                    let z = if alt { app.view.zoom / 2.0 } else { app.view.zoom * 2.0 };
-                    app.zoom_about(canvas, p, z);
+                    app.zoom_by(canvas, p, if alt { 0.5 } else { 2.0 }, ppp);
                 }
                 _ => {}
             }
@@ -1001,7 +1039,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button(tr!("Align"), |ui| {
-                for id in ["align.left", "align.hcenter", "align.right", "align.top", "align.vcenter", "align.bottom", "align.distribute_h", "align.distribute_v"] {
+                for id in ["align.left", "align.hcenter", "align.right", "align.top", "align.vcenter", "align.bottom", "align.distribute_h", "align.distribute_v", "align.space_h", "align.space_v", "align.match_width", "align.match_height", "align.match_size"] {
                     crate::menus::cmd_item(app, ui, id);
                 }
             });
@@ -1091,9 +1129,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         let array_tiles = app.stage_cache.array_tiles.filter(|bounds| Some(bounds.generation) == tile_generation);
         // Inside a symbol open in place, onion skin composes the symbol's own frames (ADR 0051).
+        // Reference videos (ADR 0116): their pictures for this frame, on the stage alone. The
+        // ones not decoded yet are on their way, and bring a repaint.
+        let reference = crate::video_import::stage_frames(app, ui.ctx(), &pic.doc, pic.frame, true);
         let tile_job = |t: &TileSpec| {
             let mut job = make_job_for(raster, state, &pic.doc, pic.frame, t.view, onion)
-                .through_camera(preview).inside(pic.front.clone()).dim_around(focus.clone());
+                .through_camera(preview).inside(pic.front.clone()).with_reference(reference.clone()).dim_around(focus.clone());
             if let Some(bounds) = array_tiles {
                 job.key = bounds.key(&job, t.rect, z.recip(), dim, &array_instances);
             }
@@ -1122,8 +1163,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             svc.prepare_preview(if array_active { &keys } else { &[] });
         }
         let missing: Vec<usize> = (0..jobs.len()).filter(|&i| !app.stage_cache.has(keys[i])).collect();
+        let set = jobs.first().map(|(_, j)| j.set);
+        // A zoom that is still changing draws nothing new: this frame's zoom level is gone by
+        // the next, so its tiles would never be looked at (and in the browser they would be
+        // drawn inside this frame). The pictures on screen are scaled until the zoom rests,
+        // one frame from now at the soonest.
+        let zooming = app.stage_cache.last_scale.is_some_and(|was| was != z);
+        app.stage_cache.last_scale = Some(z);
+        if zooming {
+            ui.ctx().request_repaint();
+        } else if let (Some(set), Some(svc)) = (set, &app.stage_cache.service) {
+            // The picture set on screen (this state at this zoom): the render service keeps it
+            // and the one before, and lets the pictures of every other go (ADR 0132). A zoom
+            // level passed through on the way is not one of them.
+            svc.show(set);
+        }
 
-        if !missing.is_empty() && provisional != Some(true)
+        if !missing.is_empty()
+            && !zooming
+            && provisional != Some(true)
             && let Some(svc) = &app.stage_cache.service
         {
             // Latency vs throughput (ADR 0006): an edit (the document changed under the picture
@@ -1140,8 +1198,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     RenderMode::Auto => provisional.is_none() && app.stage_cache.ms <= IMMEDIATE_BUDGET_MS,
                 };
             let batch: Vec<FrameJob> = missing.iter().map(|&i| jobs[i].1.clone()).collect();
+            // Moving around the picture already on screen (a pan, a zoom come to rest): with
+            // no render thread the tiles come a few a frame, nearest the centre first, so the
+            // frame stays short. An edit or another frame is one whole picture, drawn at once.
+            let moving = app.stage_cache.shown_state == Some(state) && app.stage_cache.shown_frame == Some(pic.frame);
             let started = web_time::Instant::now();
-            let results: Vec<Option<std::sync::Arc<FrameImage>>> = if immediate { svc.render_now_batch(batch).into_iter().map(Some).collect() } else { svc.request_batch(batch) };
+            let results: Vec<Option<std::sync::Arc<FrameImage>>> = if immediate {
+                svc.render_now_batch(batch).into_iter().map(Some).collect()
+            } else if moving {
+                svc.request_batch_within(batch, INLINE_BUDGET)
+            } else {
+                svc.request_batch(batch)
+            };
             let wall = started.elapsed().as_secs_f32() * 1000.0;
             let mut ms = 0.0f32;
             let mut error = None;
@@ -1190,17 +1258,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.stage_cache.ready = (ready, keys.len());
         if ready == keys.len() {
             app.stage_cache.shown_state = Some(state);
+            app.stage_cache.shown_frame = Some(pic.frame);
+            // The view is whole: tiles of other states and zooms were only standing in for
+            // it, so their textures go now instead of when 192 newer ones have pushed them out.
+            if let Some(set) = set {
+                app.stage_cache.tiles.retain(|t| t.set == set);
+            }
+        } else if !zooming && app.stage_cache.service.as_ref().is_some_and(|s| !s.has_thread()) {
+            // No render thread tells us when the rest is ready: it is drawn next frame.
+            ui.ctx().request_repaint();
         }
 
         // Look-ahead: the ring of tiles around the view (a pan reveals them instantly) and,
         // during playback, the next frames' visible tiles.
-        if let Some(svc) = &app.stage_cache.service {
+        if let Some(svc) = app.stage_cache.service.as_ref().filter(|_| !zooming) {
             let mut ahead: Vec<FrameJob> = Vec::new();
             if app.playing && !editing {
                 let n = app.s.frame_count().max(1);
                 for d in 1..=LOOKAHEAD.min(n - 1) {
                     let f = (frame + d) % n;
-                    ahead.extend(jobs.iter().map(|(t, _)| make_job_for(raster, state, &app.s.doc, start + f, t.view, None).through_camera(preview)));
+                    // With the pictures already decoded for that frame (none are asked for).
+                    let then = anicraft_engine::video::shown(&app.video, &app.s.doc, start + f, false).frames;
+                    ahead.extend(jobs.iter().map(|(t, _)| make_job_for(raster, state, &app.s.doc, start + f, t.view, None).through_camera(preview).with_reference(then.clone())));
                 }
             } else if !array_active {
                 ahead.extend(tiles_for(z, stage_px, px, 1, bg, pasteboard).into_iter().filter(|t| !jobs.iter().any(|(v, _)| v.rect == t.rect)).map(|t| tile_job(&t)));
@@ -1240,7 +1319,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
         // While a background render catches up with a drag, outline where the selection is now,
         // so the artwork never seems to lag the pointer.
-        if ready < keys.len() && !preview && matches!(app.drag, Drag::Move { .. } | Drag::SnapMove { .. } | Drag::Transform { .. } | Drag::Bend { .. } | Drag::RawPoint { .. } | Drag::RawHandle { .. }) {
+        if show_edges && ready < keys.len() && !preview && matches!(app.drag, Drag::Move { .. } | Drag::SnapMove { .. } | Drag::Transform { .. } | Drag::Bend { .. } | Drag::RawPoint { .. } | Drag::RawHandle { .. }) {
             let to_px = Affine::translate(origin.x, origin.y).mul(&Affine::scale(zoom, zoom));
             let dl = app.s.display_list();
             let stroke = Stroke::new(1.5, T.selection);
@@ -1282,7 +1361,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if preview {
         // The movie's picture: stage-space overlays don't belong on it.
         painter.text(stage_rect.left_top() + vec2(0.0, -6.0), egui::Align2::LEFT_BOTTOM, tr!("Camera view"), crate::theme::font(crate::theme::Type::Caption), T.text_dim);
-        let badge = format!("{:.0}%", st_zoom * 100.0);
+        let badge = format!("{:.0}%", st_zoom * ppp * 100.0);
         painter.text(canvas.right_bottom() + vec2(-10.0, -8.0), egui::Align2::RIGHT_BOTTOM, badge, crate::theme::font(crate::theme::Type::Data), T.text_dim);
         crate::a11y::surface(ui, &resp, &tr!("Stage · previewing through the camera · {tool} tool · frame {frame}", tool = crate::i18n::t(app.tool.label()), frame = app.s.frame + 1));
         return;
@@ -1309,7 +1388,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     crate::warp_tool::draw(app, &painter, xf);
     let sel_stroke = Stroke::new(1.0, T.selection);
     let raw = raw_ids(app);
-    if app.tool == Tool::Select && app.drag == Drag::None
+    if show_edges && app.tool == Tool::Select && app.drag == Drag::None
         && !multi
         && !preview
         && app.palette.is_none()
@@ -1328,7 +1407,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let enveloped = crate::shape_envelope::shown(app).is_some();
     // Selected raw fills and strokes (ADRs 0031, 0041) show an
     // Animate-style stipple overlay instead of a bounding box.
-    if app.tool == Tool::Select && !preview {
+    if show_edges && app.tool == Tool::Select && !preview {
         let gap = dot_gap_points(ppp);
         let to_px = Affine::translate(origin.x, origin.y)
             .mul(&Affine::scale(zoom, zoom));
@@ -1337,6 +1416,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let mut backing = egui::Mesh::default();
         let mut dots = egui::Mesh::default();
         let mut budget = MAX_DOTS;
+        let mut gradient_budget = GradientMeshBudget::default();
         let dl = app.s.display_list();
         let mut occluders = Occluders::of(&dl, &to_px, canvas, gap);
 
@@ -1396,6 +1476,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         &fills,
                         &gradient,
                         gap,
+                        &mut gradient_budget,
                     );
                 } else {
                     pattern_mesh(&mut pattern, &fills, fill_colour, gap);
@@ -1427,7 +1508,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         crate::onion::stage_badge(app, &painter, canvas);
     }
     // Every selected element, on whichever layer it is (ADR 0044).
-    for (layer, e) in app.s.selected_elements() {
+    let marked = if show_edges { app.s.selected_elements() } else { Vec::new() };
+    for (layer, e) in marked {
         let id = e.id;
         let b = app.s.element_bounds_on(layer, id);
         if b.is_empty() {
@@ -1508,6 +1590,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     crate::widthtool::draw_overlay(app, &painter, xf, pointer.filter(|p| canvas.contains(*p)));
     crate::gradient_tool::draw_overlay(app, &painter, xf, pointer.filter(|p| canvas.contains(*p) && !panning));
     crate::shape_envelope::draw_overlay(app, &painter, xf, pointer.filter(|p| canvas.contains(*p) && !panning));
+    // Strokes on their way into the document (ADR 0129), under the one in hand.
+    crate::ink::draw(app, &painter, xf);
     crate::brushtool::draw_overlay(app, &painter, xf, pointer.filter(|p| canvas.contains(*p) && !panning && !paused));
     crate::erasertool::draw_overlay(app, &painter, xf, pointer.filter(|p| canvas.contains(*p) && !panning && !paused));
     // After this frame's edits, so a drag on the path shows where it is now.
@@ -1595,7 +1679,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // zoom badge
-    let badge = format!("{:.0}%", st_zoom * 100.0);
+    let badge = format!("{:.0}%", st_zoom * ppp * 100.0);
     painter.text(canvas.right_bottom() + vec2(-10.0, -8.0), egui::Align2::RIGHT_BOTTOM, badge, crate::theme::font(crate::theme::Type::Data), T.text_dim);
     // Last, so the focus ring is drawn over the artwork.
     let selected = app.s.selection.len();
@@ -1966,6 +2050,9 @@ fn selection_backing_colour(
 
 struct SelectionGradient {
     shader: anicraft_engine::render::paint::Shader,
+    colours: [Color32; 256],
+    sharp_edges: [u8; 256],
+    spread: anicraft_engine::doc::Spread,
 }
 
 impl SelectionGradient {
@@ -1973,46 +2060,101 @@ impl SelectionGradient {
         item: &anicraft_engine::doc::DisplayItem,
         to_screen: &Affine,
     ) -> Option<Self> {
+        use anicraft_engine::doc::{Rgba, Spread};
+        use anicraft_engine::render::paint::Shader;
+
         let mut paint = item.fill.as_ref()?.clone();
-
-        if !paint.is_gradient() {
-            return None;
-        }
-
-        // Selection dots use original RGB independently of alpha.
+        // Keep the RGB even when a stop is fully transparent, including on a collapsed fill.
         for stop in paint.stops_mut()? {
             stop.color.a = 1.0;
         }
-
-        let shader = anicraft_engine::render::paint::Shader::new(
-            &paint,
-            to_screen,
-            &item.color.without_alpha(),
-            None,
-        );
-
-        Some(Self { shader })
+        let shader = Shader::new(&paint, to_screen, &item.color.without_alpha(), None);
+        let invert = |[r, g, b, _]: [f32; 4]| {
+            let c = to_color32(Rgba::new(r, g, b, 1.0));
+            crate::theme::artwork_rgb(255 - c.r(), 255 - c.g(), 255 - c.b())
+        };
+        let (colours, spread) = match &shader {
+            Shader::Linear { lut, spread, .. } | Shader::Radial { lut, spread, .. } => (lut.map(invert), *spread),
+            Shader::Solid(c) => ([invert(*c); 256], Spread::Pad),
+            _ => return None,
+        };
+        // Prefix sum lets a strip check all lookup entries in its range in constant time.
+        let mut sharp_edges = [0; 256];
+        let mut count = 0;
+        for (edge, pair) in sharp_edges.iter_mut().skip(1).zip(colours.windows(2)) {
+            count += u8::from(rgb_difference(pair[0], pair[1]) >= 8);
+            *edge = count;
+        }
+        Some(Self { shader, colours, sharp_edges, spread })
     }
 
-
+    #[cfg(test)]
     fn colour_at(&self, p: Pos2) -> Color32 {
-        let [r, g, b, _] = self.shader.at(
-            p.x.floor() as i32,
-            p.y.floor() as i32,
-        );
-
-        let rgb = anicraft_engine::doc::Rgba::new(
-            r, g, b, 1.0,
-        );
-
-        let original = to_color32(rgb);
-
-        crate::theme::artwork_rgb(
-            255 - original.r(),
-            255 - original.g(),
-            255 - original.b(),
-        )
+        self.lookup(self.position(p))
     }
+
+    #[inline]
+    fn position(&self, p: Pos2) -> f32 {
+        use anicraft_engine::render::paint::{Shader, focal_t};
+        let p = Vec2::new(p.x, p.y);
+        match &self.shader {
+            Shader::Linear { inv, start, dir, .. } => (inv.apply(p) - *start).dot(*dir),
+            Shader::Radial { inv, center, inv_radius, focal, .. } => focal_t((inv.apply(p) - *center) * *inv_radius, *focal),
+            _ => 0.0,
+        }
+    }
+
+    #[inline]
+    fn index(&self, position: f32) -> usize {
+        // The CPU renderer and GPU stage both round to the nearest of the 256 entries.
+        (self.spread.apply(position) * 255.0 + 0.5) as usize & 255
+    }
+
+    #[inline]
+    fn lookup(&self, position: f32) -> Color32 {
+        self.colours[self.index(position)]
+    }
+
+    fn crosses_sharp_edge(&self, low: f32, high: f32) -> bool {
+        use anicraft_engine::doc::Spread;
+        // Only a strip crossing a repeat seam or a reflection turn needs to check both sides.
+        (self.spread != Spread::Pad && low.floor() != high.floor())
+            || self.sharp_edges[self.index(low)] != self.sharp_edges[self.index(high)]
+    }
+
+    /// The gradient coordinate at the strip centre and a lower bound over the strip.
+    /// Both linear and focal radial coordinates are convex, so the centre's tangent is
+    /// a lower bound. This catches small radial features even if every corner misses them.
+    fn centre_and_lower_bound(&self, strip: Rect) -> (f32, f32) {
+        use anicraft_engine::render::paint::Shader;
+        let centre = strip.center();
+        let p = Vec2::new(centre.x, centre.y);
+        let (t, slope) = match &self.shader {
+            Shader::Linear { inv, start, dir, .. } => ((inv.apply(p) - *start).dot(*dir), *dir),
+            Shader::Radial { inv, center, inv_radius, focal, .. } => {
+                let u = (inv.apply(p) - *center) * *inv_radius;
+                let d = u - Vec2::new(*focal, 0.0);
+                let k = 1.0 - focal * focal;
+                let fd = focal * d.x;
+                let root = (fd * fd + k * d.dot(d)).sqrt();
+                if root <= 1e-8 {
+                    return (0.0, 0.0);
+                }
+                ((fd + root) / k, Vec2::new((focal + d.x / root) / k, d.y / root) * *inv_radius)
+            }
+            _ => return (0.0, 0.0),
+        };
+        let (Shader::Linear { inv, .. } | Shader::Radial { inv, .. }) = &self.shader else { return (t, t) };
+        let [a, b, c, d, _, _] = inv.m;
+        let x = slope.dot(Vec2::new(a, b)).abs() * strip.width();
+        let y = slope.dot(Vec2::new(c, d)).abs() * strip.height();
+        (t, t - (x + y) * 0.5)
+    }
+}
+
+#[inline]
+fn rgb_difference(a: Color32, b: Color32) -> u8 {
+    a.r().abs_diff(b.r()).max(a.g().abs_diff(b.g())).max(a.b().abs_diff(b.b()))
 }
 
 /// Animate-style selection pattern: staggered two-point dots on an
@@ -2059,66 +2201,194 @@ fn pattern_mesh(
     colour: Color32,
     gap: f32,
 ) {
-    let tile = 2.0 * gap;
-    let uv = |p: Pos2| {
-        pos2(
-            (p.x + gap * 0.5) / tile,
-            (p.y + gap * 0.5) / tile,
-        )
-    };
-
     for r in spans {
         mesh.add_rect_with_uv(
             *r,
-            Rect::from_min_max(uv(r.min), uv(r.max)),
+            Rect::from_min_max(pattern_uv(r.min, gap), pattern_uv(r.max, gap)),
             colour,
         );
     }
 }
 
+fn pattern_uv(p: Pos2, gap: f32) -> Pos2 {
+    let tile = 2.0 * gap;
+    pos2((p.x + gap * 0.5) / tile, (p.y + gap * 0.5) / tile)
+}
+
+/// Which cell of the repeating dot tile contains this device pixel, along one axis.
+fn dot_cell(pixel: i32) -> Option<i32> {
+    let step = GAP as i32;
+    let half_dot = step / 4;
+    let phase = (pixel.rem_euclid(2 * step) + half_dot) % (2 * step);
+    (phase % step < 2 * half_dot).then_some(phase / step)
+}
+
+const GRADIENT_PROBE_BUDGET: usize = 131_072;
+const GRADIENT_SPLIT_BUDGET: usize = 16_384;
+
+/// Shared by all gradient fills in the frame. Base strips remain visible after refinement runs out.
+struct GradientMeshBudget {
+    probes: usize,
+    splits: usize,
+}
+
+impl Default for GradientMeshBudget {
+    fn default() -> Self {
+        Self { probes: GRADIENT_PROBE_BUDGET, splits: GRADIENT_SPLIT_BUDGET }
+    }
+}
 
 fn gradient_pattern_mesh(
     mesh: &mut egui::Mesh,
     spans: &[Rect],
     gradient: &SelectionGradient,
     gap: f32,
+    budget: &mut GradientMeshBudget,
 ) {
-    // Subdivide each scanline into manageable strips.
-    // Vertex colours interpolate across each strip.
+    use anicraft_engine::doc::Spread;
+
     const STRIP_GAPS: f32 = 16.0;
     let strip_width = gap * STRIP_GAPS;
+    let pixel = gap / GAP;
+    let first_pixel = |edge: f32| (edge / pixel - 0.5).ceil() as i32;
+    let mut samples = Vec::new();
+    let mut dot_rows = Vec::new();
 
-    for span in spans {
+    for (span_index, span) in spans.iter().enumerate() {
+        // Reserve a share for later rows. Unused work carries forward through the fill.
+        let remaining_spans = spans.len() - span_index;
+        let mut row_budget = GradientMeshBudget {
+            probes: budget.probes.div_ceil(remaining_spans),
+            splits: budget.splits.div_ceil(remaining_spans),
+        };
+        let starting_probes = row_budget.probes;
+        let starting_splits = row_budget.splits;
+        dot_rows.clear();
+        dot_rows.extend((first_pixel(span.top())..first_pixel(span.bottom()))
+            .filter_map(|y| Some((dot_cell(y)?, (y as f32 + 0.5) * pixel))));
         let mut left = span.min.x;
-
         while left < span.max.x {
             let right = (left + strip_width).min(span.max.x);
             if right <= left {
                 break;
             }
 
-            let strip = Rect::from_min_max(
-                pos2(left, span.min.y),
-                pos2(right, span.max.y),
-            );
-
-            // Reuse the existing screen-anchored texture mapping.
-            let first_vertex = mesh.vertices.len();
-            pattern_mesh(
-                mesh,
-                std::slice::from_ref(&strip),
-                Color32::WHITE,
-                gap,
-            );
-
-            // Tint each corner using the gradient at that position.
-            // egui interpolates vertex colours across the rectangle.
-            for vertex in &mut mesh.vertices[first_vertex..] {
-                vertex.color = gradient.colour_at(vertex.pos);
+            let strip = Rect::from_x_y_ranges(left..=right, span.y_range());
+            left = right;
+            let corners = strip_corners(strip);
+            let (middle, lower) = gradient.centre_and_lower_bound(strip);
+            // A large part of a padded radial fill is often the flat colour outside its ring.
+            if gradient.spread == Spread::Pad && lower >= 1.0 {
+                gradient_quad(mesh, corners, [gradient.colours[255]; 4], gap);
+                continue;
+            }
+            let positions = corners.map(|p| gradient.position(p));
+            let colours = positions.map(|t| gradient.lookup(t));
+            let first = first_pixel(strip.left());
+            let end = first_pixel(strip.right());
+            // Each physical row contains two lit pixels per eight-pixel tile.
+            let columns = (end - first) as usize;
+            let tile = 2 * GAP as usize;
+            let max_probes = (columns / tile * 2 + (columns % tile).min(2)) * dot_rows.len();
+            if row_budget.splits == 0 || row_budget.probes < max_probes {
+                gradient_quad(mesh, corners, colours, gap);
+                continue;
+            }
+            // The upper bound of a convex gradient coordinate is at a corner. Check for a
+            // sharp lookup edge, a hidden radial minimum, or a nonlinear midpoint.
+            let low_corner = positions.into_iter().fold(middle, f32::min);
+            let upper = positions.into_iter().fold(middle, f32::max);
+            let midpoint_error = gradient.lookup(middle).to_array().into_iter()
+                .zip(colours[1].to_array().into_iter().zip(colours[2].to_array()))
+                .any(|(actual, (a, b))| actual.abs_diff(a.midpoint(b)) >= 8);
+            if !gradient.crosses_sharp_edge(lower, upper) && !midpoint_error
+                && rgb_difference(gradient.lookup(lower), gradient.lookup(low_corner)) < 8
+            {
+                gradient_quad(mesh, corners, colours, gap);
+                continue;
             }
 
-            left = right;
+            // Check only the device pixels the stipple actually covers, and only on strips
+            // likely to need it. After the shared budget is spent, use corner blending.
+            samples.clear();
+            for x in first..end {
+                let Some(cell) = dot_cell(x) else { continue };
+                for &(row, y) in &dot_rows {
+                    if row == cell {
+                        let p = pos2((x as f32 + 0.5) * pixel, y);
+                        samples.push((p, gradient.lookup(gradient.position(p))));
+                    }
+                }
+            }
+            row_budget.probes -= samples.len();
+            gradient_strip(mesh, strip, colours, gradient, gap, &samples, &mut row_budget);
         }
+        budget.probes -= starting_probes - row_budget.probes;
+        budget.splits -= starting_splits - row_budget.splits;
+    }
+}
+
+fn strip_corners(strip: Rect) -> [Pos2; 4] {
+    [strip.left_top(), strip.right_top(), strip.left_bottom(), strip.right_bottom()]
+}
+
+fn gradient_quad(mesh: &mut egui::Mesh, corners: [Pos2; 4], colours: [Color32; 4], gap: f32) {
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in corners.into_iter().zip(colours) {
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv: pattern_uv(pos, gap), color });
+    }
+    mesh.add_triangle(base, base + 1, base + 2);
+    mesh.add_triangle(base + 2, base + 1, base + 3);
+}
+
+fn gradient_strip(
+    mesh: &mut egui::Mesh,
+    strip: Rect,
+    colours: [Color32; 4],
+    gradient: &SelectionGradient,
+    gap: f32,
+    samples: &[(Pos2, Color32)],
+    budget: &mut GradientMeshBudget,
+) {
+    let (Some(&(first, _)), Some(&(last, _))) = (samples.first(), samples.last()) else { return };
+    let corners = strip_corners(strip);
+    let channels = colours.map(|c| c.to_array().map(f32::from));
+    if budget.splits == 0 || samples.iter().all(|&(p, colour)| {
+        let x = (p.x - strip.left()) / strip.width();
+        let y = (p.y - strip.top()) / strip.height();
+        // Use the same diagonal as the emitted triangles.
+        let (a, b, c, x, y) = if x + y <= 1.0 {
+            (channels[0], channels[1], channels[2], x, y)
+        } else {
+            (channels[3], channels[2], channels[1], 1.0 - x, 1.0 - y)
+        };
+        let rgb = colour.to_array();
+        (0..3).all(|i| (a[i] + x * (b[i] - a[i]) + y * (c[i] - a[i]) - f32::from(rgb[i])).abs() <= 3.0)
+    }) {
+        gradient_quad(mesh, corners, colours, gap);
+    } else if first.x < last.x {
+        // Split between sampled pixel columns. Each half has at most half the column range.
+        let middle = samples.partition_point(|(p, _)| p.x < (first.x + last.x) * 0.5);
+        let (left, right) = samples.split_at(middle);
+        if let (Some(&(a, _)), Some(&(b, _))) = (left.last(), right.first()) {
+            budget.splits -= 1;
+            let x = (a.x + b.x) * 0.5;
+            let top = gradient.lookup(gradient.position(pos2(x, strip.top())));
+            let bottom = gradient.lookup(gradient.position(pos2(x, strip.bottom())));
+            let [tl, tr, bl, br] = colours;
+            gradient_strip(mesh, Rect::from_x_y_ranges(strip.left()..=x, strip.y_range()), [tl, top, bl, bottom], gradient, gap, left, budget);
+            gradient_strip(mesh, Rect::from_x_y_ranges(x..=strip.right(), strip.y_range()), [top, tr, bottom, br], gradient, gap, right, budget);
+        }
+    } else if let Some(extra) = budget.splits.checked_sub(samples.len() - 1) {
+        // A single device-pixel column can still have different colours on its two dot rows.
+        budget.splits = extra;
+        let pixel = gap / GAP;
+        for &(p, colour) in samples {
+            let rect = strip.intersect(Rect::from_center_size(p, vec2(pixel, pixel)));
+            pattern_mesh(mesh, &[rect], colour, gap);
+        }
+    } else {
+        gradient_quad(mesh, corners, colours, gap);
     }
 }
 
@@ -2560,16 +2830,33 @@ fn exclude_overlying_artwork(fills: &mut Vec<Rect>, above: &[anicraft_engine::do
 
 /// Remove areas covered by `occluders` from a collection of rectangles.
 /// Each overlapping rectangle may produce up to four smaller rectangles.
+///
+/// Both lists are rows of runs, thousands of each for a long brush stroke, so a span is only
+/// compared with the occluders in its own rows: they are looked up by their top edge. Comparing
+/// every span with every occluder took seconds a frame on such a stroke (#519).
 fn subtract_spans(spans: &mut Vec<Rect>, occluders: &[Rect]) {
     let mut remaining = Vec::new();
     let mut pieces = Vec::new();
     let mut next = Vec::new();
+    // The occluders by top edge (their order among equals kept), and the tallest of them: one
+    // that reaches down into a span starts less than that above the span's top.
+    let mut by_top: Vec<usize> = (0..occluders.len()).collect();
+    let top_of = |i: usize| occluders.get(i).map_or(f32::INFINITY, |o| o.top());
+    by_top.sort_by(|&a, &b| top_of(a).total_cmp(&top_of(b)));
+    let tallest = occluders.iter().fold(0.0f32, |h, o| h.max(o.height()));
+    let mut rows: Vec<usize> = Vec::new();
 
     for span in spans.drain(..) {
         pieces.clear();
         pieces.push(span);
+        let from = by_top.partition_point(|&i| top_of(i) <= span.top() - tallest);
+        let to = by_top.partition_point(|&i| top_of(i) < span.bottom());
+        rows.clear();
+        rows.extend(by_top.get(from..to).unwrap_or(&[]));
+        // In the order they were given, so the pieces come out as they always did.
+        rows.sort_unstable();
 
-        for &occluder in occluders {
+        for &occluder in rows.iter().filter_map(|&i| occluders.get(i)) {
             // Skip occluders that cannot touch the original span.
             let overlap = span.intersect(occluder);
             if overlap.width() <= 0.0 || overlap.height() <= 0.0 {
@@ -2645,6 +2932,10 @@ mod pattern_tests {
     use super::*;
     use anicraft_engine::geom::{FillRule, Path};
 
+    fn gradient_pattern_mesh(mesh: &mut egui::Mesh, spans: &[Rect], gradient: &SelectionGradient, gap: f32) {
+        super::gradient_pattern_mesh(mesh, spans, gradient, gap, &mut GradientMeshBudget::default());
+    }
+
     fn area(spans: &[Rect]) -> f32 {
         spans.iter().map(|r| r.area()).sum()
     }
@@ -2707,6 +2998,34 @@ mod pattern_tests {
             smooth: true,
             warp: None,
         }
+    }
+
+    /// #519: occluders are looked up by row instead of each being tried against every span.
+    /// What is left is the same as trying them all: every point of a span is kept exactly when
+    /// no occluder covers it, whatever the occluders' heights and order.
+    #[test]
+    fn spans_lose_exactly_what_the_occluders_in_their_rows_cover() {
+        // A fixed scatter: rows of runs, and occluders one row to many rows tall, unsorted.
+        let n = |i: u32, k: u32, m: u32| (i.wrapping_mul(2_654_435_761).wrapping_add(k.wrapping_mul(40_503)) >> 7) % m;
+        let spans: Vec<Rect> = (0..300).map(|i| Rect::from_min_size(pos2(n(i, 1, 180) as f32, (n(i, 2, 50) * 4) as f32), vec2(4.0 + n(i, 3, 40) as f32, 4.0))).collect();
+        let occluders: Vec<Rect> = (0..400).map(|i| Rect::from_min_size(pos2(n(i, 4, 190) as f32 + 0.5, n(i, 5, 200) as f32 + 0.25), vec2(1.0 + n(i, 6, 25) as f32, if i % 7 == 0 { 30.0 } else { 1.0 }))).collect();
+        let mut left = spans.clone();
+        subtract_spans(&mut left, &occluders);
+        let inside = |rects: &[Rect], p: Pos2| rects.iter().any(|r| r.contains(p));
+        let mut kept = 0;
+        for y in 0..420 {
+            for x in 0..460 {
+                let p = pos2(x as f32 * 0.5 + 0.13, y as f32 * 0.5 + 0.11);
+                let want = inside(&spans, p) && !inside(&occluders, p);
+                assert_eq!(inside(&left, p), want, "at {p:?}");
+                kept += usize::from(want);
+            }
+        }
+        assert!(kept > 1000, "the scatter leaves something to compare: {kept}");
+        // Nothing to take away leaves the spans as they were.
+        let mut same = spans.clone();
+        subtract_spans(&mut same, &[]);
+        assert_eq!(same, spans);
     }
 
     /// A thin opaque foreground shape must hide the selection
@@ -3325,6 +3644,174 @@ mod pattern_tests {
         );
     }
 
+    /// A small radial-gradient centre must affect the
+    /// actual stipple mesh, not just the gradient sampler.
+    #[test]
+    fn small_radial_gradient_centre_is_preserved_in_mesh() {
+        use anicraft_engine::doc::{GradientStop, Paint, Rgba};
+        use anicraft_engine::geom::Vec2;
+
+        let mut shape = item(
+            Path::rect(0.0, 98.0, 64.0, 4.0),
+            true,
+            None,
+        );
+
+        // Black centre, white outside an 8-point radius.
+        shape.fill = Some(Paint::radial(
+            Vec2::new(32.5, 100.5),
+            8.0,
+            vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Rgba::BLACK,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Rgba::WHITE,
+                },
+            ],
+        ));
+
+        let gradient = SelectionGradient::new(
+            &shape,
+            &Affine::IDENTITY,
+        )
+        .expect("radial gradient should have a sampler");
+
+        // First prove that the sampler sees the black centre.
+        let centre = gradient.colour_at(pos2(32.0, 100.0));
+        assert!(
+            centre.r() > 200,
+            "the black centre should produce light selection dots"
+        );
+
+        // Now test the generated mesh itself.
+        let span = Rect::from_min_max(
+            pos2(0.0, 98.0),
+            pos2(64.0, 102.0),
+        );
+
+        let mut mesh = egui::Mesh::default();
+
+        gradient_pattern_mesh(
+            &mut mesh,
+            &[span],
+            &gradient,
+            GAP,
+        );
+
+        assert!(
+            mesh.vertices.iter().any(|v| {
+                (v.pos.x - 32.5).abs() <= GAP
+                    && v.color.r() > 150
+            }),
+            "the mesh missed the small radial centre"
+        );
+    }
+
+    // Read the colour of the triangle covering a lit pixel in the pattern texture.
+    fn mesh_red_at(mesh: &egui::Mesh, p: Pos2) -> u8 {
+        for indices in mesh.indices.as_chunks::<3>().0 {
+            let a = mesh.vertices[indices[0] as usize];
+            let b = mesh.vertices[indices[1] as usize];
+            let c = mesh.vertices[indices[2] as usize];
+            let cross = |u: egui::Vec2, v: egui::Vec2| u.x * v.y - u.y * v.x;
+            let area = cross(b.pos - a.pos, c.pos - a.pos);
+            let wb = cross(p - a.pos, c.pos - a.pos) / area;
+            let wc = cross(b.pos - a.pos, p - a.pos) / area;
+            let wa = 1.0 - wb - wc;
+            if [wa, wb, wc].iter().all(|w| *w >= -1e-5) {
+                return (wa * f32::from(a.color.r()) + wb * f32::from(b.color.r())
+                    + wc * f32::from(c.color.r())).round() as u8;
+            }
+        }
+        panic!("no gradient mesh at {p:?}");
+    }
+
+    #[test]
+    fn gradient_mesh_matches_artwork_when_a_band_falls_between_lookup_entries() {
+        use anicraft_engine::doc::{GradientStop, Paint, Rgba};
+
+        let mut shape = item(Path::rect(0.0, -1.0, 32.0, 2.0), true, None);
+        shape.fill = Some(Paint::linear(
+            Vec2::new(-1003.75, 0.0),
+            Vec2::new(1044.25, 0.0),
+            vec![
+                GradientStop { offset: 0.49975, color: Rgba::WHITE },
+                GradientStop { offset: 0.5, color: Rgba::new(0.0, 0.0, 0.0, 0.0) },
+                GradientStop { offset: 0.50025, color: Rgba::WHITE },
+            ],
+        ));
+
+        let gradient = SelectionGradient::new(&shape, &Affine::IDENTITY).expect("linear gradient");
+        let gap = dot_gap_points(2.0);
+        let span = Rect::from_min_max(pos2(0.0, -1.0), pos2(32.0, 1.0));
+        let mut mesh = egui::Mesh::default();
+        gradient_pattern_mesh(&mut mesh, &[span], &gradient, gap);
+
+        // Neither of the lookup entries around 0.5 sees the black band.
+        assert_eq!(mesh_red_at(&mesh, pos2(20.25, 0.25)), 0);
+        assert_eq!(mesh_red_at(&mesh, pos2(19.75, 0.25)), 0);
+        assert_eq!(mesh_red_at(&mesh, pos2(24.25, 0.25)), 0);
+    }
+
+    #[test]
+    fn gradient_mesh_preserves_a_visible_one_pixel_band() {
+        use anicraft_engine::doc::{GradientStop, Paint, Rgba};
+
+        let center = 128.0 / 255.0;
+        let start = 20.25 - center * 128.0;
+        let mut shape = item(Path::rect(0.0, -1.0, 32.0, 2.0), true, None);
+        shape.fill = Some(Paint::linear(
+            Vec2::new(start, 0.0), Vec2::new(start + 128.0, 0.0),
+            vec![
+                GradientStop { offset: center - 0.002, color: Rgba::WHITE },
+                GradientStop { offset: center, color: Rgba::new(0.0, 0.0, 0.0, 0.0) },
+                GradientStop { offset: center + 0.002, color: Rgba::WHITE },
+            ],
+        ));
+        let gradient = SelectionGradient::new(&shape, &Affine::IDENTITY).expect("linear gradient");
+        let span = Rect::from_min_max(pos2(0.0, -1.0), pos2(32.0, 1.0));
+        let mut mesh = egui::Mesh::default();
+        gradient_pattern_mesh(&mut mesh, &[span], &gradient, dot_gap_points(2.0));
+
+        assert!(mesh_red_at(&mesh, pos2(20.25, 0.25)) >= 252);
+        assert!(mesh_red_at(&mesh, pos2(19.75, 0.25)) <= 3);
+    }
+
+    #[test]
+    fn gradient_mesh_preserves_the_focus_of_a_rotated_elliptical_fill() {
+        use anicraft_engine::doc::{GradientStop, Paint, Rgba};
+
+        let mut shape = item(Path::rect(-32.0, -32.0, 64.0, 64.0), true, None);
+        let mut paint = Paint::radial(
+            Vec2::ZERO,
+            8.0,
+            vec![
+                GradientStop { offset: 0.0, color: Rgba::BLACK },
+                GradientStop { offset: 1.0, color: Rgba::WHITE },
+            ],
+        );
+        if let Paint::Radial { focal, matrix, .. } = &mut paint {
+            *focal = 0.75;
+            *matrix = Affine::scale(0.5, 2.0);
+        }
+        shape.fill = Some(paint);
+        let to_screen = Affine::translate(24.5, 21.5)
+            .mul(&Affine::rotate(std::f32::consts::FRAC_PI_2));
+        let gradient = SelectionGradient::new(&shape, &to_screen).expect("elliptical gradient");
+        let span = Rect::from_min_max(pos2(0.0, 22.0), pos2(64.0, 26.0));
+        let mut mesh = egui::Mesh::default();
+        gradient_pattern_mesh(&mut mesh, &[span], &gradient, GAP);
+
+        // Rotation puts the focus three pixels down from the ellipse centre.
+        assert!(mesh_red_at(&mesh, pos2(24.5, 24.5)) >= 252);
+        // One pixel up is 1/7 of the way from the focus to the far edge.
+        assert!(mesh_red_at(&mesh, pos2(24.5, 23.5)).abs_diff(219) <= 3);
+        assert!(mesh_red_at(&mesh, pos2(48.5, 24.5)) <= 3);
+    }
+
     /// Gradients use smooth RGB inversion, even at middle grey.
     /// Applying the solid-colour contrast fallback here creates
     /// abrupt bands and triangular interpolation artifacts.
@@ -3419,7 +3906,7 @@ mod pattern_tests {
         .expect("radial gradient should have a sampler");
 
         assert_eq!(
-            gradient.colour_at(pos2(50.0, 50.0)),
+            gradient.colour_at(pos2(50.5, 50.5)),
             Color32::WHITE,
             "black centre should have white dots",
         );
@@ -3430,7 +3917,7 @@ mod pattern_tests {
             "outside the white edge should have black dots",
         );
 
-        let middle = gradient.colour_at(pos2(65.0, 50.0));
+        let middle = gradient.colour_at(pos2(65.5, 50.5));
 
         for channel in [middle.r(), middle.g(), middle.b()] {
             assert!(
@@ -3481,13 +3968,13 @@ mod pattern_tests {
             .expect("rotated elliptical gradient should have a sampler");
 
         assert_eq!(
-            gradient.colour_at(pos2(150.0, 150.0)),
+            gradient.colour_at(pos2(150.5, 150.5)),
             Color32::WHITE,
             "the black centre should produce white dots",
         );
 
         // Thirty pixels down is still inside the long axis.
-        let along_long_axis = gradient.colour_at(pos2(150.0, 180.0));
+        let along_long_axis = gradient.colour_at(pos2(150.5, 180.5));
 
         for channel in [
             along_long_axis.r(),
@@ -3502,7 +3989,7 @@ mod pattern_tests {
 
         // Thirty pixels right is beyond the short axis.
         assert_eq!(
-            gradient.colour_at(pos2(180.0, 150.0)),
+            gradient.colour_at(pos2(180.5, 150.5)),
             Color32::BLACK,
             "outside the short axis should produce black dots",
         );
@@ -3595,6 +4082,38 @@ mod pattern_tests {
     }
 
     #[test]
+    fn complex_gradient_refinement_budget_is_shared_across_fills() {
+        use anicraft_engine::doc::{GradientStop, Paint, Rgba, Spread};
+
+        let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(3840.0, 2160.0));
+        let mut shape = item(Path::rect(-10.0, -10.0, 3860.0, 2180.0), true, None);
+        let stops = [0.0, 0.298, 0.300, 0.302, 0.304, 0.68, 0.682, 0.684, 1.0]
+            .into_iter().enumerate().map(|(i, offset)| GradientStop {
+                offset, color: if i.is_multiple_of(2) { Rgba::BLACK } else { Rgba::WHITE },
+            }).collect();
+        shape.fill = Some(Paint::Radial {
+            center: Vec2::ZERO, radius: 1.0, stops, spread: Spread::Reflect, linear_rgb: false,
+            focal: 0.55, matrix: Affine::scale(256.0, 80.0),
+        });
+        let transform = Affine::translate(1920.0, 1080.0).mul(&Affine::rotate(0.54));
+        let gradient = SelectionGradient::new(&shape, &transform).expect("elliptical gradient");
+        let mut spans = Vec::new();
+        pattern_spans(&shape.path.flatten(&Affine::IDENTITY, 0.5), shape.fill_rule, clip, &mut spans, GAP);
+        let base_quads = spans.len() * 60;
+        let mut mesh = egui::Mesh::default();
+        let mut budget = GradientMeshBudget::default();
+        super::gradient_pattern_mesh(&mut mesh, &spans, &gradient, GAP, &mut budget);
+        assert!(mesh.vertices.len() / 4 > base_quads);
+        assert!(budget.splits < GRADIENT_SPLIT_BUDGET);
+        assert!(budget.probes < GRADIENT_PROBE_BUDGET);
+
+        let first_vertices = mesh.vertices.len();
+        super::gradient_pattern_mesh(&mut mesh, &spans, &gradient, GAP, &mut budget);
+        assert!(mesh.vertices.len() / 4 <= 2 * base_quads + GRADIENT_SPLIT_BUDGET);
+        assert!(mesh.vertices[first_vertices..].iter().any(|v| v.pos.y == clip.bottom()));
+    }
+
+    #[test]
     fn translucent_gradient_selection_dots_use_interpolated_rgb() {
         use anicraft_engine::doc::{GradientStop, Paint, Rgba};
 
@@ -3629,7 +4148,6 @@ mod pattern_tests {
 
         // Red-to-blue produces purple at the midpoint.
         // Its RGB inverse should be light green.
-        // Allow a few levels for the shader's 256-entry LUT.
         assert!(
             midpoint.r().abs_diff(128) <= 4,
             "unexpected red channel: {midpoint:?}"
@@ -4358,15 +4876,17 @@ pub fn commit_text(app: &mut App) {
             let mut p = te.edit_params();
             p["x"] = json!(te.at.x);
             p["y"] = json!(te.at.y);
-            app.run("text.create", p);
+            if let Some(made) = app.run("text.create", p) {
+                app.text_note(&made);
+            }
         }
         Some(_) if te.text == te.original => {}
         Some(id) => {
             app.run("element.select", json!({"ids": [id.0]}));
             if te.text.trim().is_empty() {
                 app.run("edit.delete", json!({}));
-            } else {
-                app.run("text.edit", te.edit_params());
+            } else if let Some(edited) = app.run("text.edit", te.edit_params()) {
+                app.text_note(&edited);
             }
         }
     }
@@ -4376,7 +4896,7 @@ pub fn commit_text(app: &mut App) {
 /// its own colour, size and style (ADR 0085). Esc or a click elsewhere finishes (a click in
 /// Properties' text styles keeps it open); Enter starts a new line.
 fn text_editor(app: &mut App, ui: &mut egui::Ui, stage_origin: Pos2, zoom: f32) {
-    let focused_id = egui::Id::new("stage_text_edit_field");
+    let focused_id = egui::Id::unique("stage_text_edit_field");
     let had_focus = ui.ctx().memory(|m| m.has_focus(focused_id));
     crate::rich_edit::watch_clipboard(app, ui.ctx(), had_focus);
     let paper = crate::theme::stage_text_colour(anicraft_engine::doc::Rgba { a: 1.0, ..app.s.doc.stage.background });
@@ -4392,7 +4912,7 @@ fn text_editor(app: &mut App, ui: &mut egui::Ui, stage_origin: Pos2, zoom: f32) 
     let width = 260.0f32.max(size * 8.0).max(block_w.unwrap_or(0.0) * zoom + 8.0).min(4000.0);
     let mut done = false;
     let (runs, last) = (te.runs.clone(), te.last.clone());
-    egui::Area::new(egui::Id::new("stage_text_edit")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+    egui::Area::new(egui::Id::unique("stage_text_edit")).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
         egui::Frame::new().fill(paper).stroke(Stroke::new(1.0, T.selection)).inner_margin(4.0).show(ui, |ui| {
             let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                 let job = crate::rich_edit::layout_job(&runs, &last, buf.as_str(), zoom, wrap);
@@ -5209,6 +5729,70 @@ mod pointer_tests {
         assert_eq!((icon, arrowheads), (CursorIcon::Move, 0), "inside the box: move");
     }
 
+    /// #117: a symbol instance that is skewed still answers Free Transform on the stage. Its
+    /// box is the slanted one its artwork has, the handles are on that box's corners, and a
+    /// drag from a corner scales it, one from just outside a corner turns it, and one on an
+    /// edge skews it further: each changes the instance, and each is one undo step.
+    #[test]
+    fn free_transform_handles_work_on_a_skewed_symbol() {
+        let (mut app, ctx, at) = scene();
+        app.run("edit.select_all", json!({}));
+        app.run("edit.delete", json!({}));
+        app.run("draw.rect", json!({"x": 300, "y": 200, "w": 200, "h": 100, "fill": "#3366ff", "stroke": null, "object": true}));
+        app.run("modify.convert_to_symbol", json!({"name": "Slanted"}));
+        // Slant it: the top slides right of the bottom.
+        app.run("modify.transform", json!({"a": 1, "b": 0, "c": -0.6, "d": 1, "e": 150, "f": 0}));
+        app.tool = Tool::Transform;
+        let mut t = 2.0;
+        let mut frame = |app: &mut App, events: Vec<Event>| {
+            t += 0.05;
+            run_frame(&ctx, app, t, events);
+        };
+        frame(&mut app, Vec::new());
+        let instance = |app: &App| app.s.selected_elements().first().map(|(_, e)| e.transform).expect("the instance is selected");
+        let box_of = |app: &App| crate::xform::frame(app).expect("a selection has a box");
+        let slanted = box_of(&app);
+        let [tl, tr, br, bl] = slanted.corners();
+        assert!((tl.x - bl.x).abs() > 30.0 && (tl.y - tr.y).abs() < 1.0, "the box slants with the instance: {tl:?} {tr:?} {br:?} {bl:?}");
+        let mut drag = |app: &mut App, from: Vec2, to: Vec2| {
+            let (a, b) = (at(from.x, from.y), at(to.x, to.y));
+            frame(app, vec![Event::PointerMoved(a)]);
+            frame(app, vec![button(a, true)]);
+            for i in 1..=5 {
+                frame(app, vec![Event::PointerMoved(a + (b - a) * (i as f32 / 5.0))]);
+            }
+            frame(app, vec![button(b, false)]);
+            frame(app, Vec::new());
+        };
+        let steps = |app: &App| app.s.history().undo_len();
+        // The bottom right corner, pulled away from the box: larger, and still as slanted.
+        let (before, undo) = (instance(&app).decompose(), steps(&app));
+        let out = (br - tl).normalized() * 60.0;
+        drag(&mut app, br, br + out);
+        let after = instance(&app).decompose();
+        assert!(after.sx > before.sx * 1.1 && after.sy > before.sy * 1.1, "scaled from the corner handle: {before:?} to {after:?}");
+        assert_eq!(steps(&app), undo + 1, "one undo step");
+        let now = box_of(&app);
+        assert!(now.corners()[0].distance(tl) < 1.0, "the opposite corner stays where it was");
+        // Just outside the top right corner: a turn.
+        let (before, undo) = (instance(&app).decompose(), steps(&app));
+        let [_, tr, _, _] = now.corners();
+        let outside = tr + (tr - now.handle(0, 0)).normalized() * (14.0 / app.view.zoom);
+        drag(&mut app, outside, outside + Vec2::new(40.0, 120.0));
+        let after = instance(&app).decompose();
+        assert!((after.rotation - before.rotation).abs().to_degrees() > 5.0, "turned from outside the corner: {before:?} to {after:?}");
+        assert_eq!(steps(&app), undo + 1);
+        // The top edge between its handles, slid along itself: more slant, the bottom edge kept.
+        let now = box_of(&app);
+        let (undo, bottom) = (steps(&app), now.handle(0, 1));
+        let on_edge = now.handle(-1, -1).lerp(now.handle(0, -1), 0.5);
+        let along = (now.handle(1, -1) - now.handle(-1, -1)).normalized() * 50.0;
+        drag(&mut app, on_edge, on_edge + along);
+        let skewed = box_of(&app);
+        assert!(skewed.handle(0, -1).distance(now.handle(0, -1)) > 20.0 && skewed.handle(0, 1).distance(bottom) < 1.0, "the top edge slid, the bottom stayed");
+        assert_eq!(steps(&app), undo + 1);
+    }
+
     /// A double-click: press, release, `gap` seconds, press, release (each its own frame).
     fn double_click(gap: f64) -> App {
         let (mut app, ctx, at) = scene();
@@ -5245,5 +5829,31 @@ mod pointer_tests {
         }
         // Two separate clicks stay two clicks: the fill alone.
         assert_eq!(double_click(0.7).s.selection.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod hide_edges_tests {
+    use super::*;
+
+    #[test]
+    fn hide_edges_removes_a_selection_box_and_keeps_transform_handles() {
+        let ctx = egui::Context::default();
+        let session = anicraft_engine::Session::default();
+        let mut app = App::with_context(&ctx, session, Some(std::path::PathBuf::from("unused.png")));
+        app.s.execute("draw.rect", &serde_json::json!({"x": 160, "y": 80, "w": 100, "h": 60})).unwrap();
+        app.tool = Tool::Rect;
+        let marks = |app: &mut App| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 940.0))), ..Default::default() };
+            let mut frame = ctx.run_ui(input, |ui| show(app, ui));
+            frame.textures_delta.clear();
+            frame.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.color == T.selection)).count()
+        };
+        assert!(marks(&mut app) > 0, "a drawing tool shows the selection box before Hide Edges");
+        assert!(app.run("view.hide_edges", serde_json::json!({})).is_some());
+        assert_eq!(marks(&mut app), 0, "the box is hidden");
+        assert!(!app.s.selection.is_empty(), "the drawing is still selected");
+        app.tool = Tool::Transform;
+        assert!(marks(&mut app) > 0, "Free Transform still shows its handles");
     }
 }

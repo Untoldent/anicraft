@@ -70,7 +70,7 @@ fn undo_step_in_a_large_document_costs_only_what_changed() {
     let before = s.doc.clone();
     run(&mut s, "element.translate", json!({"dx": 1, "dy": 0}));
     let shared = before.timeline(0).layers.iter().zip(&s.doc.timeline(s.scene).layers).filter(|(a, b)| std::sync::Arc::ptr_eq(a, b)).count();
-    assert_eq!(shared, 19);
+    assert_eq!(shared, before.timeline(0).layers.len() - 1, "every layer but the edited one");
 }
 
 #[test]
@@ -299,6 +299,109 @@ fn align_and_distribute() {
     assert!((s.selection_bounds().max.x - s.doc.stage.width as f32).abs() < 1e-3);
 }
 
+/// #517: Distribute to Layers puts each selected object on a new layer of its own above its
+/// layer, named after its symbol, stacked as they were; raw shapes stay.
+#[test]
+fn distribute_to_layers_gives_each_object_its_own_layer() {
+    let mut s = Session::default();
+    let home = s.layer;
+    for (name, x) in [("Back", 10), ("Front", 200)] {
+        run(&mut s, "draw.rect", json!({"x": x, "y": 10, "w": 50, "h": 50, "stroke": null, "object": true}));
+        run(&mut s, "modify.convert_to_symbol", json!({"name": name}));
+        run(&mut s, "edit.deselect", json!({}));
+    }
+    run(&mut s, "draw.rect", json!({"x": 400, "y": 10, "w": 50, "h": 50, "stroke": null, "object": false}));
+    run(&mut s, "edit.select_all", json!({}));
+    let layers_before = s.timeline().layers.len();
+    let v = run(&mut s, "modify.distribute_to_layers", json!({}));
+    assert_eq!(v["left_raw"].as_u64(), Some(1), "{v}");
+    let tl = s.timeline();
+    assert_eq!(tl.layers.len(), layers_before + 2);
+    let names: Vec<&str> = tl.layers.iter().map(|l| l.name.as_str()).collect();
+    let at = |n: &str| names.iter().position(|x| *x == n).unwrap_or_else(|| panic!("a layer named {n}: {names:?}"));
+    let src = tl.layers.iter().position(|l| l.id == home).expect("the old layer");
+    assert!(at("Front") < at("Back") && at("Back") < src, "the front instance on the top layer, both above their old layer: {names:?}");
+    let left = tl.layer(home).and_then(|l| l.keyframe_at(0)).map(|k| k.elements.len());
+    assert_eq!(left, Some(1), "only the raw square stays");
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.timeline().layers.len(), layers_before, "one undo step");
+
+    // A layer's camera depth goes with it; a faded layer and the end of a tween are refused.
+    run(&mut s, "layer.set_depth", json!({"layer": home.0, "depth": 40}));
+    run(&mut s, "edit.select_all", json!({}));
+    let v = run(&mut s, "modify.distribute_to_layers", json!({}));
+    let first = anicraft_doc::LayerId(v["layers"][0].as_u64().unwrap_or(0));
+    assert_eq!(s.timeline().layer(first).map(|l| l.depth), Some(40.0));
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "layer.set_opacity", json!({"layer": home.0, "opacity": 50}));
+    run(&mut s, "edit.select_all", json!({}));
+    let e = s.execute("modify.distribute_to_layers", &json!({})).expect_err("a faded layer");
+    assert!(e.to_string().contains("opacity"), "{e}");
+    run(&mut s, "layer.set_opacity", json!({"layer": home.0, "opacity": 100}));
+    run(&mut s, "timeline.insert_frame", json!({"layer": home.0, "frame": 0, "count": 9}));
+    run(&mut s, "timeline.insert_keyframe", json!({"layer": home.0, "frame": 10}));
+    run(&mut s, "timeline.create_tween", json!({"layer": home.0, "frame": 0}));
+    run(&mut s, "timeline.goto", json!({"frame": 10}));
+    run(&mut s, "edit.select_all", json!({}));
+    let e = s.execute("modify.distribute_to_layers", &json!({})).expect_err("the end of a tween");
+    assert!(e.to_string().contains("tweened"), "{e}");
+}
+
+/// #566: Match Size makes every selected object the largest one's size (or the stage's),
+/// each keeping its top-left corner; Space Evenly makes the gaps between neighbours equal,
+/// leaving the outer two where they are.
+#[test]
+fn match_size_and_space_evenly() {
+    let mut s = Session::default();
+    for (x, y, w, h) in [(10, 50, 20, 40), (200, 10, 60, 10), (90, 120, 30, 30)] {
+        run(&mut s, "draw.rect", json!({"x": x, "y": y, "w": w, "h": h, "stroke": null}));
+    }
+    run(&mut s, "edit.select_all", json!({}));
+    let boxes = |s: &Session| s.selection.ids().map(|id| s.element_bounds(id)).collect::<Vec<_>>();
+    let before = boxes(&s);
+    run(&mut s, "align.match_width", json!({}));
+    let after = boxes(&s);
+    let widest = before.iter().map(|b| b.width()).fold(0.0, f32::max);
+    for (a, b) in after.iter().zip(&before) {
+        assert!((a.width() - widest).abs() < 1e-3 && (a.height() - b.height()).abs() < 1e-3, "as wide as the widest, as tall as before: {a:?}");
+        assert!((a.min - b.min).length() < 1e-3, "the left and top edges stay");
+    }
+    run(&mut s, "align.match_size", json!({"to_stage": true}));
+    let (w, h) = (s.doc.stage.width as f32, s.doc.stage.height as f32);
+    assert!(boxes(&s).iter().all(|b| (b.width() - w).abs() < 1e-2 && (b.height() - h).abs() < 1e-2), "the stage's size");
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+
+    // Space evenly: equal gaps between neighbours across, the outer two unmoved.
+    run(&mut s, "align.space_h", json!({}));
+    let mut b = boxes(&s);
+    b.sort_by(|p, q| p.min.x.total_cmp(&q.min.x));
+    let gaps: Vec<f32> = b.windows(2).map(|w| w[1].min.x - w[0].max.x).collect();
+    assert!((gaps[0] - gaps[1]).abs() < 1e-3, "{gaps:?}");
+    let mut was = before.clone();
+    was.sort_by(|p, q| p.min.x.total_cmp(&q.min.x));
+    assert!((b[0].min.x - was[0].min.x).abs() < 1e-3 && (b[2].max.x - was[2].max.x).abs() < 1e-3, "the outer two stay");
+    run(&mut s, "align.space_v", json!({}));
+    let mut b = boxes(&s);
+    b.sort_by(|p, q| p.min.y.total_cmp(&q.min.y));
+    let gaps: Vec<f32> = b.windows(2).map(|w| w[1].min.y - w[0].max.y).collect();
+    assert!((gaps[0] - gaps[1]).abs() < 1e-3, "{gaps:?}");
+    // Two objects have no gap between others to share.
+    run(&mut s, "edit.deselect", json!({}));
+    let ids: Vec<u64> = s.visible_elements().iter().take(2).map(|e| e.id.0).collect();
+    run(&mut s, "element.select", json!({"ids": ids}));
+    assert!(s.execute("align.space_h", &json!({})).is_err());
+    // One long object over two short ones: no even spacing keeps their order, so nothing moves.
+    let mut s = Session::default();
+    for (x, w) in [(0, 200), (20, 20), (80, 20)] {
+        run(&mut s, "draw.rect", json!({"x": x, "y": 0, "w": w, "h": 10, "stroke": null, "object": true}));
+    }
+    run(&mut s, "edit.select_all", json!({}));
+    let before = boxes(&s);
+    assert!(s.execute("align.space_h", &json!({})).is_err());
+    assert_eq!(boxes(&s), before);
+}
+
 /// #301, #297: a raw rectangle (one fill and one stroke per side, ADR 0042) aligns, distributes,
 /// turns and scales as one shape, so its outline stays on its fill.
 #[test]
@@ -344,7 +447,9 @@ fn a_raw_drawing_aligns_distributes_and_turns_as_one() {
     run(&mut s, "edit.select_all", json!({}));
     run(&mut s, "align.left", json!({}));
     assert!(same(&layout(&s), &shape));
-    assert!(s.selection_bounds().min.x.abs() < 1e-3, "{:?}", s.selection_bounds());
+    // Its outline goes to the stage's edge, with its stroke over it (#569).
+    let outline = s.selected_elements().iter().fold(Rect::EMPTY, |r, (l, e)| r.union(&s.element_outline_bounds_on(*l, e.id)));
+    assert!(outline.min.x.abs() < 1e-3 && s.selection_bounds().min.x < outline.min.x, "{outline:?} {:?}", s.selection_bounds());
 
     // The Properties panel's Rotation and Scale fields: about the drawing's centre, as Rotate 90°
     // does.
@@ -371,6 +476,66 @@ fn a_raw_drawing_aligns_distributes_and_turns_as_one() {
     let mut fresh = Session::default();
     raw_rect(&mut fresh);
     assert!(same(&layout(&s), &layout(&fresh)) && (s.selection_bounds().min - fresh.selection_bounds().min).length() < 0.01, "back where it was");
+}
+
+/// #568: inside a symbol, To Stage aligns to the symbol's own space: centring puts the
+/// artwork's centre on the symbol's registration point, not the middle of the document's stage.
+#[test]
+fn align_to_stage_inside_a_symbol_centres_on_its_registration_point() {
+    let mut s = Session::default();
+    run(&mut s, "draw.rect", json!({"x": 40, "y": 60, "w": 100, "h": 100, "stroke": null}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "modify.convert_to_symbol", json!({"name": "Box"}));
+    let inst = s.selection.ids().next().unwrap();
+    run(&mut s, "symbol.edit", json!({"id": inst.0}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "align.hcenter", json!({"to_stage": true}));
+    run(&mut s, "align.vcenter", json!({"to_stage": true}));
+    let c = s.selection_bounds().center();
+    assert!(c.x.abs() < 0.01 && c.y.abs() < 0.01, "centred on the registration point: {c:?}");
+    // A group opened inside the symbol is still inside it.
+    run(&mut s, "element.translate", json!({"dx": 70, "dy": 30}));
+    run(&mut s, "modify.group", json!({}));
+    let group = s.selection.ids().next().unwrap();
+    run(&mut s, "symbol.edit", json!({"id": group.0}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "align.hcenter", json!({"to_stage": true}));
+    let c = s.selection_bounds().center();
+    assert!(c.x.abs() < 0.01, "inside a group in the symbol, still its registration point: {c:?}");
+    // On the stage itself, To Stage is still the document's stage.
+    run(&mut s, "symbol.exit", json!({"all": true}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "align.hcenter", json!({"to_stage": true}));
+    let c = s.selection_bounds().center();
+    assert!((c.x - s.doc.stage.width as f32 / 2.0).abs() < 0.01, "{c:?}");
+}
+
+/// #569: align lines up where a shape's outline is, not the edge of its stroke, so a thick
+/// stroke hangs over the edge it is aligned to, and changing its width moves nothing.
+#[test]
+fn align_lines_up_outlines_not_stroke_edges() {
+    use anicraft_geom::Rect;
+    for object in [false, true] {
+        let mut s = Session::default();
+        run(&mut s, "draw.rect", json!({"x": 100, "y": 100, "w": 200, "h": 100, "fill": "#3366ff", "stroke": "#000000", "stroke_width": 16, "object": object}));
+        run(&mut s, "edit.select_all", json!({}));
+        let outline = |s: &Session| s.selected_elements().iter().fold(Rect::EMPTY, |r, (l, e)| r.union(&s.element_outline_bounds_on(*l, e.id)));
+        let covered = |s: &Session| s.selected_elements().iter().fold(Rect::EMPTY, |r, (l, e)| r.union(&s.element_bounds_on(*l, e.id)));
+        run(&mut s, "align.left", json!({"to_stage": true}));
+        run(&mut s, "align.top", json!({"to_stage": true}));
+        let (o, c) = (outline(&s), covered(&s));
+        assert!(o.min.x.abs() < 0.01 && o.min.y.abs() < 0.01, "the outline's corner is on the stage's (object: {object}): {o:?}");
+        assert!(c.min.x < o.min.x && c.min.y < o.min.y, "the stroke hangs over the edge (object: {object})");
+    }
+    // A turned outline is measured by its own points, not by its unturned box turned with it.
+    let mut s = Session::default();
+    run(&mut s, "draw.ellipse", json!({"x": 100, "y": 100, "w": 200, "h": 40, "stroke": null, "object": true}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "element.set_transform", json!({"rotation": 45}));
+    let (l, e) = s.selected_elements()[0].clone();
+    let outline = s.element_outline_bounds_on(l, e.id);
+    let boxed = s.display_list().items.iter().filter(|i| i.element == e.id).fold(Rect::EMPTY, |r, i| r.union(&i.path.bounds().transformed(&i.transform)));
+    assert!(outline.width() < boxed.width() - 1.0, "{outline:?} inside {boxed:?}");
 }
 
 #[test]
@@ -429,6 +594,35 @@ fn svg_round_trip_looks_the_same_and_imports_as_one_undo_step() {
     std::fs::write(&fake, "<html/>").unwrap();
     assert!(s.execute("file.import", &json!({"path": fake.display().to_string()})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn svg_import_matches_stage_only_when_requested_and_undoes_together() {
+    let dir = std::env::temp_dir().join(format!("anicraft-svg-stage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let svg = dir.join("badge.svg");
+    std::fs::write(&svg, r#"<svg width="40.5" height="20.25"><rect width="40.5" height="20.25"/></svg>"#).unwrap();
+    let mut s = Session::default();
+    run(&mut s, "file.new", json!({"width": 160, "height": 80, "fps": 30}));
+    let previous = s.doc.stage;
+    let name = svg.display().to_string();
+    run(&mut s, "file.import", json!({"path": name}));
+    assert_eq!(s.doc.stage, previous);
+    let centered = s.visible_elements()[0].transform.translation();
+    assert!(centered.x > 0.0 && centered.y > 0.0, "the default import still centres the file");
+    s.undo().unwrap();
+
+    let report = run(&mut s, "file.import", json!({"path": name, "match_stage": true}));
+    let stage = s.doc.stage;
+    assert_eq!(stage.width, report["width"].as_f64().unwrap().ceil() as u32);
+    assert_eq!(stage.height, report["height"].as_f64().unwrap().ceil() as u32);
+    assert_eq!(stage.fps, previous.fps);
+    let offset = s.visible_elements()[0].transform.translation();
+    assert!(offset.x.abs() < 1e-5 && offset.y.abs() < 1e-5, "the SVG starts at the new stage's origin: {offset:?}");
+    s.undo().unwrap();
+    assert_eq!(s.doc.stage, previous);
+    assert!(s.visible_elements().is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -579,9 +773,28 @@ fn save_load_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Adversarial params for every command: must return Ok or Err, never panic.
-#[test]
-fn panic_hunt_every_command() {
+/// One test per starting document, `panic_hunt_every_command::<start>`, so the test runner
+/// runs them side by side: as one test the sweep took 318 s of the 319 s the engine's tests
+/// take (docs/reviews/2026-11-principal-review.md). The names are the starting documents in
+/// the order [`panic_hunt`] lists them.
+macro_rules! panic_hunts {
+    ($($start:ident),*) => {
+        const HUNTS: &[&str] = &[$(stringify!($start)),*];
+        mod panic_hunt_every_command {
+            $(
+                #[test]
+                fn $start() {
+                    super::panic_hunt(stringify!($start));
+                }
+            )*
+        }
+    };
+}
+panic_hunts!(blank, demo, with_sound, arm, on_path, raw, rig, shaped, mixed, warped, layered, in_symbol, keyed, library, button, grouped, eased);
+
+/// Adversarial params for every command, from the starting document called `only`: must return
+/// Ok or Err, never panic. Every start gets the whole hostile list, whichever is run.
+fn panic_hunt(only: &str) {
     let mut hostile: Vec<Value> = vec![
         Value::Null,
         json!({}),
@@ -1012,7 +1225,10 @@ Exec=evil", "data_home": "relative/share", "refresh": false}),
         json!({"parent": u64::MAX, "layer": limbs.get(1), "keep": false, "sx": 0, "sy": 0}),
         json!({"parent": null, "layers": [u64::MAX, 0], "frame": 4_000_000_000u64}),
     ]);
-    for start in [Session::default(), Session::new(sample::demo()), Session::new(with_sound), arm, on_path, raw, rig, shaped, mixed, warped, layered, in_symbol, keyed, library, button, grouped, eased] {
+    // A start added here needs its name in `panic_hunts!` (the array's length says so).
+    let starts: [Session; HUNTS.len()] = [Session::default(), Session::new(sample::demo()), Session::new(with_sound), arm, on_path, raw, rig, shaped, mixed, warped, layered, in_symbol, keyed, library, button, grouped, eased];
+    let which = HUNTS.iter().position(|n| *n == only).unwrap_or_else(|| panic!("no starting document is called {only}"));
+    for start in starts.into_iter().skip(which).take(1) {
         let mut s = start;
         for spec in commands().iter().filter(|c| !skip(c.id)) {
             for p in &hostile {
@@ -1439,6 +1655,21 @@ fn copy_and_paste_frames_inserts_and_cuts_at_the_selection_edges() {
 }
 
 #[test]
+fn a_failed_cut_keeps_previously_copied_frames() {
+    let mut s = Session::default();
+    run(&mut s, "draw.rect", json!({"x": 0, "y": 0, "w": 10, "h": 10}));
+    run(&mut s, "timeline.copy_frames", json!({"frame": 0}));
+    run(&mut s, "layer.new", json!({}));
+
+    let err = s.execute("timeline.cut_frames", &json!({"frame": 0})).unwrap_err();
+    assert!(matches!(err, EngineError::State(message) if message == "cannot remove the layer's only frame"));
+
+    run(&mut s, "timeline.paste_frames", json!({"frame": 0}));
+    let pasted = s.active_layer().unwrap().keyframe_at(0).unwrap();
+    assert_eq!(pasted.elements.len(), 1);
+}
+
+#[test]
 fn pasting_several_layers_fills_the_layers_below_and_creates_missing_ones() {
     let mut s = Session::new(anicraft_doc::sample::demo());
     let layers: Vec<u64> = s.doc.timeline(s.scene).layers.iter().map(|l| l.id.0).collect();
@@ -1861,7 +2092,10 @@ fn mask_layers_reveal_hide_pick_and_move_as_a_group() {
     let bg = px(&s, 500, 500);
     assert_eq!(px(&s, 10, 10), bg, "masked away");
     assert_ne!(px(&s, 60, 60), bg, "revealed");
-    run(&mut s, "layer.toggle_lock", json!({"layer": mask.0}));
+    // A new mask is locked, as Animate leaves it (#429): its edge stays off the stage and its
+    // shapes can't be picked until it is unlocked.
+    assert_eq!(r["locked"], true);
+    assert!(s.timeline().layer(mask).is_some_and(|l| l.locked));
     assert_eq!(s.hit_test(Vec2::new(10.0, 10.0), 0.0), None);
     assert_eq!(s.hit_test(Vec2::new(60.0, 60.0), 0.0).map(|(l, _)| l), Some(art));
 
@@ -1916,6 +2150,68 @@ fn create_shape_tween_morphs_and_keeps_the_easing() {
     assert!(mid.max.x > 110.0, "{mid:?}");
     s.undo().unwrap();
     assert_eq!(s.active_layer().unwrap().keyframes[0].tween.clone().unwrap().kind, anicraft_doc::TweenKind::Classic);
+}
+
+/// The flattened outlines of `items` (stage space), as line segments.
+fn outline_segments<'a>(items: impl Iterator<Item = &'a anicraft_doc::DisplayItem>) -> Vec<(Vec2, Vec2)> {
+    let mut segs = Vec::new();
+    for it in items {
+        for pl in it.path.flatten(&it.transform, 0.05) {
+            segs.extend(pl.points.windows(2).map(|w| (w[0], w[1])));
+            if let (true, Some(&a), Some(&b)) = (pl.closed, pl.points.last(), pl.points.first()) {
+                segs.push((a, b));
+            }
+        }
+    }
+    segs
+}
+
+/// How far `p` is from the nearest of `segs`.
+fn distance_to(segs: &[(Vec2, Vec2)], p: Vec2) -> f32 {
+    segs.iter()
+        .map(|&(a, b)| {
+            let ab = b - a;
+            let t = if ab.dot(ab) > 0.0 { ((p - a).dot(ab) / ab.dot(ab)).clamp(0.0, 1.0) } else { 0.0 };
+            p.distance(a + ab * t)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+#[test]
+fn shape_tweens_carry_the_stroke_round_shapes_with_more_or_fewer_sides() {
+    // Issue #119. A stroked triangle into a stroked hexagon and back (raw shapes: Merge Drawing
+    // makes one stroke piece per side, 3 and 6 of them). In between, the stroke must follow the
+    // whole morphing fill outline: no side left bare, no line left standing off it.
+    let mut s = Session::default();
+    let polygon = |s: &mut Session, sides: u32| {
+        let inner = 60.0 * (std::f32::consts::PI / sides as f32).cos(); // on the edges: a polygon
+        run(s, "draw.star", json!({"cx": 100, "cy": 100, "outer": 60, "inner": inner, "points": sides, "fill": "#ff0000", "stroke": "#000000", "stroke_width": 2, "object": false}));
+    };
+    polygon(&mut s, 3);
+    let strokes = |s: &Session| s.active_layer().unwrap().keyframes.last().unwrap().elements.iter().filter(|e| matches!(&e.kind, ElementKind::Shape(sh) if sh.fill.is_none())).count();
+    assert_eq!(strokes(&s), 3, "one stroke piece per side");
+    run(&mut s, "timeline.goto", json!({"frame": 10}));
+    run(&mut s, "timeline.insert_blank_keyframe", json!({}));
+    polygon(&mut s, 6);
+    assert_eq!(strokes(&s), 6);
+    run(&mut s, "timeline.goto", json!({"frame": 20}));
+    run(&mut s, "timeline.insert_blank_keyframe", json!({}));
+    polygon(&mut s, 3);
+    for frame in [0, 10] {
+        run(&mut s, "timeline.create_shape_tween", json!({"frame": frame}));
+    }
+    for frame in [3, 5, 8, 13, 15, 18] {
+        let list = anicraft_doc::evaluate(&s.doc, frame);
+        let fill = outline_segments(list.items.iter().filter(|i| i.fill.is_some()));
+        let stroke = outline_segments(list.items.iter().filter(|i| i.stroke.is_some()));
+        assert!(!fill.is_empty() && !stroke.is_empty(), "frame {frame}");
+        // Every point of the fill's outline has the stroke on it, and every point of the stroke
+        // lies on the outline.
+        let bare = fill.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&stroke, p)).fold(0.0, f32::max);
+        let stray = stroke.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&fill, p)).fold(0.0, f32::max);
+        assert!(bare < 0.5, "frame {frame}: part of the outline is {bare} from the stroke");
+        assert!(stray < 0.5, "frame {frame}: a stroke is {stray} off the outline");
+    }
 }
 
 #[test]
@@ -2631,4 +2927,185 @@ fn path_extend_continues_an_open_path_from_either_end_and_closes_it() {
     assert!(s.execute("path.extend", &json!({"id": id, "d": "M100 0 L1e30 0"})).is_err(), "too large");
     assert!(s.execute("path.extend", &json!({"id": id, "d": "M100 0 L100 0 Z"})).is_err(), "a closed piece");
     assert_eq!(stage_anchors(&s, id), [(0.0, 0.0), (100.0, 0.0)]);
+}
+
+/// #454: the registry is rebuilt by every caller (the menu bar asks each frame), so nothing in a
+/// spec may be made afresh per call and kept forever. Each text of every command is the same
+/// allocation from one call to the next.
+#[test]
+fn building_the_registry_again_allocates_no_new_static_text() {
+    let (a, b) = (crate::commands(), crate::commands());
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.id, y.id);
+        for (what, p, q) in [("id", x.id, y.id), ("label", x.label, y.label), ("menu", x.menu, y.menu), ("params", x.params, y.params)] {
+            assert!(std::ptr::eq(p.as_ptr(), q.as_ptr()), "{}: its {what} is a new string on every call (leaked each frame)", x.id);
+        }
+    }
+}
+
+/// #438: F5 with no frame selection extends every layer at the playhead, so Shift+F5 there takes
+/// the frame off every layer too, and Shift+F6 clears the keyframes there on every layer
+/// (`all_layers`, as the editor sends with no frame selection). One undo step each.
+#[test]
+fn removing_frames_and_clearing_keys_on_every_layer_at_the_playhead() {
+    let mut s = Session::default();
+    let a = s.layer;
+    let b = anicraft_doc::LayerId(run(&mut s, "layer.new", json!({}))["layer"].as_u64().unwrap());
+    let c = anicraft_doc::LayerId(run(&mut s, "layer.new", json!({}))["layer"].as_u64().unwrap());
+    run(&mut s, "timeline.insert_frame", json!({"frame": 0, "count": 5, "all_layers": true}));
+    for l in [a, b, c] {
+        assert_eq!(starts(&s, l), vec![(0, 6)]);
+    }
+    // Shift+F5 three times: every layer loses the frames, not only the active one.
+    for _ in 0..3 {
+        run(&mut s, "timeline.remove_frame", json!({"frame": 2, "all_layers": true}));
+    }
+    for l in [a, b, c] {
+        assert_eq!(starts(&s, l), vec![(0, 3)], "layer {l:?}");
+    }
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(starts(&s, a), vec![(0, 4)], "each press is one undo step, on every layer");
+    assert_eq!(starts(&s, c), vec![(0, 4)]);
+    run(&mut s, "edit.redo", json!({}));
+    // Without it, as before: the one layer.
+    run(&mut s, "timeline.remove_frame", json!({"layer": a.0, "frame": 1}));
+    assert_eq!((starts(&s, a), starts(&s, b)), (vec![(0, 2)], vec![(0, 3)]));
+    run(&mut s, "edit.undo", json!({}));
+
+    // A layer that ends before the frame is left alone; one whose frames start later closes up.
+    run(&mut s, "timeline.remove_frame", json!({"layer": a.0, "frame": 2}));
+    assert_eq!(starts(&s, a), vec![(0, 2)]);
+    let r = run(&mut s, "timeline.remove_frame", json!({"frame": 2, "all_layers": true}));
+    assert_eq!(r["removed"], 2);
+    assert_eq!((starts(&s, a), starts(&s, b), starts(&s, c)), (vec![(0, 2)], vec![(0, 2)], vec![(0, 2)]));
+
+    // Shift+F6: keyframes at the playhead on two of the three layers are cleared together; the
+    // layer without one is skipped.
+    run(&mut s, "timeline.insert_frame", json!({"frame": 0, "count": 6, "all_layers": true}));
+    run(&mut s, "timeline.insert_keyframe", json!({"layers": [a.0, c.0], "frame": 4}));
+    assert_eq!(starts(&s, a), vec![(0, 4), (4, 4)]);
+    let r = run(&mut s, "timeline.clear_keyframe", json!({"frame": 4, "all_layers": true}));
+    assert_eq!(r["cleared"], 2);
+    for l in [a, b, c] {
+        assert_eq!(starts(&s, l), vec![(0, 8)]);
+    }
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!((starts(&s, a), starts(&s, c)), (vec![(0, 4), (4, 4)], vec![(0, 4), (4, 4)]));
+    assert!(s.execute("timeline.clear_keyframe", &json!({"frame": 2, "all_layers": true})).is_err(), "no keyframe starts there on any layer");
+    assert!(s.execute("timeline.remove_frame", &json!({"all_layers": "yes"})).is_err());
+
+    // The question before artwork is lost counts every layer the key acts on (ADR 0004).
+    run(&mut s, "timeline.goto", json!({"frame": 4}));
+    run(&mut s, "layer.select", json!({"layer": c.0}));
+    run(&mut s, "draw.rect", json!({"x": 0, "y": 0, "w": 10, "h": 10}));
+    run(&mut s, "layer.select", json!({"layer": b.0}));
+    assert!(s.confirmation("timeline.clear_keyframe", &json!({"frame": 4})).is_none(), "the active layer has no keyframe there");
+    assert!(s.confirmation("timeline.clear_keyframe", &json!({"frame": 4, "all_layers": true})).is_some(), "another layer's artwork would go");
+}
+
+/// #490: a guide drawn as a zigzag with the Line tool is several raw strokes (one per straight
+/// run between corners). The guided object stopped at the first sharp peak, since only the
+/// first stroke was followed. The strokes that meet end to end are one path.
+#[test]
+fn a_motion_guide_with_sharp_corners_is_followed_to_its_end() {
+    let mut s = Session::default();
+    let art = s.layer;
+    run(&mut s, "draw.ellipse", json!({"x": -10, "y": -10, "w": 20, "h": 20}));
+    run(&mut s, "timeline.goto", json!({"frame": 20}));
+    run(&mut s, "timeline.insert_keyframe", json!({}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "element.translate", json!({"dx": 400, "dy": 0}));
+    run(&mut s, "timeline.goto", json!({"frame": 0}));
+    run(&mut s, "timeline.create_tween", json!({}));
+    run(&mut s, "layer.add_motion_guide", json!({"layer": art.0}));
+    // A zigzag as the editor draws it (merge drawing): peak at (100,-100), valley at (200,0),
+    // peak at (300,-100). Drawn out of order, and one run backwards.
+    for (a, b) in [((100, -100), (200, 0)), ((0, 0), (100, -100)), ((400, 0), (300, -100)), ((200, 0), (300, -100))] {
+        run(&mut s, "draw.line", json!({"x0": a.0, "y0": a.1, "x1": b.0, "y1": b.1, "object": false}));
+    }
+    let at = |s: &Session, f| anicraft_doc::evaluate_scene(&s.doc, s.scene, f).items.iter().find(|i| i.layer == art).unwrap().transform.translation();
+    let (first, last) = (at(&s, 0), at(&s, 20));
+    assert!(first.distance(anicraft_geom::Vec2::new(0.0, 0.0)) < 1.0 && last.distance(anicraft_geom::Vec2::new(400.0, 0.0)) < 1.0, "{first:?} → {last:?}");
+    // Even speed along the whole zigzag (four runs of the same length): a quarter of the way
+    // is the first peak, half the valley, three quarters the second peak.
+    for (f, want) in [(5, (100.0, -100.0)), (10, (200.0, 0.0)), (15, (300.0, -100.0))] {
+        let p = at(&s, f);
+        assert!(p.distance(anicraft_geom::Vec2::new(want.0, want.1)) < 1.5, "frame {f}: {p:?}, not {want:?}");
+    }
+    // And it keeps moving past each corner.
+    let mut prev = at(&s, 0);
+    for f in 1..=20 {
+        let p = at(&s, f);
+        assert!(p.distance(prev) > 10.0, "it stopped at frame {f}: {prev:?} → {p:?}");
+        prev = p;
+    }
+}
+
+/// ADR 0128: a frame cut short by its allowance of work is still written, and every command
+/// that writes it says so; a whole frame's results are as they always were. (The symbols hold
+/// thousands of empty layers, so the allowance goes on looking at them and little is drawn.)
+#[test]
+fn exports_of_a_frame_too_large_to_draw_say_artwork_was_left_out() {
+    let dir = std::env::temp_dir().join(format!("anicraft-left-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut large = anicraft_doc::sample::doubling(31);
+    for sym in &mut large.library {
+        let tl = &mut std::sync::Arc::make_mut(sym).timeline;
+        for i in 0..5_000 {
+            tl.layers.push(std::sync::Arc::new(anicraft_doc::Layer::new(anicraft_doc::LayerId(9_000 + i), "empty")));
+        }
+    }
+    for (doc, cut) in [(large, true), (anicraft_doc::sample::doubling(6), false)] {
+        let mut s = Session::new(doc);
+        let at = |name: &str| dir.join(format!("{cut}-{name}")).display().to_string();
+        let results = [
+            s.info(),
+            run(&mut s, "file.export_png", json!({"path": at("f.png"), "scale": 0.1})),
+            run(&mut s, "file.export_svg", json!({"path": at("f.svg")})),
+            run(&mut s, "file.export_png_sequence", json!({"dir": at("png"), "scale": 0.1})),
+            run(&mut s, "file.export_svg_sequence", json!({"dir": at("svg")})),
+            run(&mut s, "file.export_sprite_sheet", json!({"path": at("sheet.png"), "scale": 0.1})),
+            run(&mut s, "file.export_gif", json!({"path": at("f.gif"), "scale": 0.1})),
+            run(&mut s, "file.export_apng", json!({"path": at("a.png"), "scale": 0.1})),
+        ];
+        for v in &results {
+            assert_eq!(v.get("left_out").and_then(Value::as_bool).unwrap_or(false), cut, "{v}");
+            assert_eq!(v.get("warning").is_some(), cut, "{v}");
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// P-011: two raw fills side by side, their outlines joined along the edge they share, on a
+/// shape tween that follows a motion guide. A guide places every element by its own origin, so
+/// the stroke runs used to leave the fills and cross them. Each run rides with the fill it
+/// edges, the same number of runs on both keys or not; the shared edge goes with the lower fill.
+#[test]
+fn guided_shape_tweens_keep_each_raw_outline_on_its_fill() {
+    let mut s = Session::default();
+    for (x, fill) in [(100, "#e63946"), (180, "#457b9d")] {
+        run(&mut s, "draw.rect", json!({"x": x, "y": 240, "w": 80, "h": 80, "fill": fill, "stroke": "#000000", "stroke_width": 4, "object": false}));
+    }
+    let art = s.active_layer().unwrap().id;
+    run(&mut s, "timeline.goto", json!({"frame": 20}));
+    run(&mut s, "timeline.insert_keyframe", json!({}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "element.translate", json!({"dx": 440, "dy": 0}));
+    run(&mut s, "timeline.goto", json!({"frame": 0}));
+    run(&mut s, "timeline.create_shape_tween", json!({}));
+    run(&mut s, "layer.add_motion_guide", json!({"layer": art.0}));
+    for (a, b) in [((140, 280), (400, 80)), ((400, 80), (660, 280))] {
+        run(&mut s, "draw.line", json!({"x0": a.0, "y0": a.1, "x1": b.0, "y1": b.1, "object": false}));
+    }
+    let length = |segs: &[(Vec2, Vec2)]| segs.iter().map(|(a, b)| a.distance(*b)).sum::<f32>();
+    let on_art = |list: &anicraft_doc::DisplayList| (outline_segments(list.items.iter().filter(|i| i.layer == art && i.fill.is_some())), outline_segments(list.items.iter().filter(|i| i.layer == art && i.stroke.is_some())));
+    let drawn = length(&on_art(&anicraft_doc::evaluate_scene(&s.doc, s.scene, 0)).1);
+    assert!(drawn > 500.0, "seven sides of 80: {drawn}");
+    for frame in [3, 5, 10, 15, 18] {
+        let (fill, stroke) = on_art(&anicraft_doc::evaluate_scene(&s.doc, s.scene, frame));
+        let stray = stroke.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&fill, p)).fold(0.0, f32::max);
+        assert!(stray < 0.5, "frame {frame}: a stroke is {stray} off the fills' outlines");
+        assert!((length(&stroke) - drawn).abs() < 1.0, "frame {frame}: every run is still drawn: {} of {drawn}", length(&stroke));
+    }
 }

@@ -1,6 +1,6 @@
 # Command reference
 
-Everything you can do in AniCraft is a command: the menus, the shortcuts, the command palette (**Ctrl+K**, macOS **⌘K**), `anicraft-cli` and AI assistants over MCP all run the same 382 commands, listed here by menu. The id is what scripts and [working headless](../working-headless.md) use; the parameters are what a command takes as JSON. Commands that change the document are one undo step each. Your own shortcuts (**Help › Keyboard Shortcuts**) replace the defaults shown here; see the [shortcut reference](shortcuts.md).
+Everything you can do in AniCraft is a command: the menus, the shortcuts, the command palette (**Ctrl+K**, macOS **⌘K**), `anicraft-cli` and AI assistants over MCP all run the same 408 commands, listed here by menu. The id is what scripts and [working headless](../working-headless.md) use; the parameters are what a command takes as JSON. Commands that change the document are one undo step each. Your own shortcuts (**Help › Keyboard Shortcuts**) replace the defaults shown here; see the [shortcut reference](shortcuts.md).
 
 This page is generated from the command registry, so it always matches the version of AniCraft it came with.
 
@@ -21,9 +21,9 @@ This page is generated from the command registry, so it always matches the versi
 - **Save as Template…** `file.save_as_template`
   Parameters: `{folder (the user templates folder), name, category? (default “My Templates”), confirm? (to replace a template of that name)} → {path, thumbnail}: the document as it is, kept as <folder>/<category>/<name>.anicraft with a picture of its first frame; the open document is unchanged`
 - **Export Frame as PNG…** `file.export_png` · File › Export
-  Parameters: `{path, frame? (in the current scene), scale?}`
+  Parameters: `{path, frame? (in the current scene), scale?, background? (default true: the stage colour; false: transparent)}`
 - **Import to Stage…** `file.import` · File › Import · **Ctrl+R** (macOS **⌘R**) · changes the document
-  Parameters: `{path (.svg, .png, .jpg; or a .wav, .ogg or .mp3 sound: onto a new layer at the playhead), x?, y? (top-left on the stage; default: centred), cx?, cy? (centred on that point instead), layer? (new (default) | active: a one-layer drawing goes into the active layer's keyframe at the playhead)}`
+  Parameters: `{path (.svg, .png, .jpg; or a .wav, .ogg or .mp3 sound: onto a new layer at the playhead), x?, y? (top-left on the stage; default: centred), cx?, cy? (centred on that point instead), layer? (new (default) | active: a one-layer drawing goes into the active layer's keyframe at the playhead), match_stage?: false (SVG only: set the stage to the SVG size rounded up to whole pixels, and place it at the origin unless coordinates are given)}`
 - **Export Frame as SVG…** `file.export_svg` · File › Export
   Parameters: `{path, frame? (in the current scene), confirm?}`
 - **Export Video…** `file.export_video` · File › Export
@@ -31,7 +31,9 @@ This page is generated from the command registry, so it always matches the versi
 - **Export Sprite Sheet…** `file.export_sprite_sheet` · File › Export
   Parameters: `{path (.png; the frame map goes beside it as .json), from?, to? (movie frames), scale?, columns?, padding?, background?, confirm?}`
 - **Export PNG Sequence…** `file.export_png_sequence` · File › Export
-  Parameters: `{dir, from?, to? (movie frames: every scene in order), scale?}`
+  Parameters: `{dir, from?, to? (movie frames: every scene in order), scale?, background? (default true: the stage colour; false: transparent)}`
+- **Export SVG Sequence…** `file.export_svg_sequence` · File › Export
+  Parameters: `{dir, from?, to? (movie frames: every scene in order), confirm?} → one frame_00001.svg per frame (vectors, gradients and masks kept)`
 - **Export Animated GIF…** `file.export_gif` · File › Export
   Parameters: `{path, from?, to? (movie frames: every scene in order), scale?, loop?, confirm?}`
 - **Export Animated PNG…** `file.export_apng` · File › Export
@@ -48,10 +50,14 @@ This page is generated from the command registry, so it always matches the versi
   Parameters: `{formats? ([format, …]: only these; default: the ones Publish Settings has on), confirm? (to replace files already there)}`
 - **Recover Autosaved Documents…** `file.recovery_list`
   Parameters: `{dir (the recovery folder)}`
+- **Import Data Table…** `data.import_table` · File › Import · changes the document
+  Parameters: `{path (.csv, .tsv or .json, up to 32 MB: the first record names the columns; cells that aren't numbers become gaps, and a column with no number is left out), name? (default the file's name), table? (id or name of a table to replace: its bindings stay), key? (the column rows are looked up by, e.g. an age or a time; default by row number, or the replaced table's key), format?: auto|csv|tsv|json} → {table, name, rows, columns, key, skipped, gaps, truncated, replaced, bindings, missing (columns bindings read that are gone)}`
 - **Import to Library…** `file.import_to_library` · File › Import · changes the document
   Parameters: `{path (.wav, .ogg or .mp3 sound; .png or .jpg image; .svg drawing: a graphic symbol named after the file holding its shapes), name?}`
 - **Export Audio…** `file.export_audio` · File › Export
   Parameters: `{path (.wav), from?, to? (movie frames), rate? (Hz, default 44100), bits? (16, 24 or 32 = float; default 16), confirm?}`
+- **Import Video…** `file.import_video` · File › Import · changes the document
+  Parameters: `{path (any video your ffmpeg reads: .mp4, .mov, .webm, .mkv, .avi, .gif…), mode? (frames (default): the video's frames become bitmaps on a new layer from the playhead, one keyframe each at the document's frame rate, with its sound as a stream sound on a layer of its own | reference: a locked guide layer right under the active layer (under its folder, if it is in one) that shows the video beneath what you draw, for tracing; the video stays a file and is in no export), step? (frames: one picture every 1–60 document frames; default 1), max_edge? (frames: longest edge of the pictures in pixels, 16–4096; default 1280; a smaller video is never enlarged), start? (seconds into the video to begin at), length? (frames: seconds of video to take), max_frames? (frames: most pictures to take, 1–2000), audio? (frames: default true), ffmpeg? (path; else ANICRAFT_FFMPEG, else ffmpeg on the PATH)} → {mode, layer, frames, width, height, step, truncated, sound, note}. Decoding is done by your ffmpeg (ADR 0116); at most 2000 pictures and 1 GB of decoded pixels are taken, and the rest is left out (truncated)`
 
 ## Edit
 
@@ -94,6 +100,8 @@ This page is generated from the command registry, so it always matches the versi
   Parameters: ``{on?: bool} (default: toggle) dragged points and selections, and the points the Line, Rectangle, Oval, PolyStar and Pen tools draw, snap to points, lines and fill edges (while it is off, the `snap` params of element.translate, raw.move_point and draw.snap only snap to guides, the grid and pixels, as View › Guides, Grid and Snapping say)``
 - **Rulers** `view.rulers` · **Ctrl+Alt+Shift+R** (macOS **⌥⇧⌘R**)
   Parameters: `{on?: bool} (default: toggle) rulers along the stage's top and left edges, in stage pixels from its top-left corner; drag from one to make a guide`
+- **Hide Edges** `view.hide_edges` · **Ctrl+Shift+E** (macOS **⇧⌘E**)
+  Parameters: `{on?: bool} (default: toggle) the stage selection marks: artwork, selection and active tool handles are kept`
 - **Show Grid** `view.grid_show` · View › Grid · **Ctrl+'** (macOS **⌘'**)
   Parameters: `{on?: bool} (default: toggle) the grid on the stage (never in pictures or exports)`
 - **Snap to Grid** `view.grid_snap` · View › Grid · **Ctrl+Shift+'** (macOS **⇧⌘'**)
@@ -120,13 +128,13 @@ This page is generated from the command registry, so it always matches the versi
 - **Frame** `timeline.insert_frame` · Insert › Timeline · **F5** · changes the document
   Parameters: `{layer? | layers?: [..] | all_layers?: true (every layer with frames at or after the frame, as F5 with no frame selection; the active layer when none has), frame?, count?, advance?: true (the playhead moves onto the last frame inserted, as the key does in the editor)}`
 - **Remove Frame** `timeline.remove_frame` · Insert › Timeline · **Shift+F5** (macOS **⇧F5**) · changes the document
-  Parameters: `{layer? | layers?: [..], frame?, count?}`
+  Parameters: `{layer? | layers?: [..] | all_layers?: true (every layer with frames at or after the frame, as Shift+F5 with no frame selection: the layers stay in step), frame?, count?}`
 - **Keyframe** `timeline.insert_keyframe` · Insert › Timeline · **F6** · changes the document
   Parameters: `{layer? | layers?: [..], frame?, count? (every frame of the range becomes a keyframe), advance?: true (on a keyframe the new key goes on the next frame, and the playhead moves onto it, as the key does in the editor)}`
 - **Blank Keyframe** `timeline.insert_blank_keyframe` · Insert › Timeline · **F7** · changes the document
   Parameters: `{layer? | layers?: [..], frame?, count? (every frame of the range becomes a blank keyframe; keyframes already there are kept), advance?: true (on a keyframe the blank key goes on the next frame instead of clearing it, and the playhead moves onto it)}`
 - **Clear Keyframe** `timeline.clear_keyframe` · Insert › Timeline · **Shift+F6** (macOS **⇧F6**) · changes the document
-  Parameters: `{layer? | layers?: [..], frame?, count?}`
+  Parameters: `{layer? | layers?: [..] | all_layers?: true (every layer with a keyframe there, as Shift+F6 with no frame selection), frame?, count?}`
 - **Create Motion Tween** `timeline.create_motion_tween` · changes the document
   Parameters: `{layer?, frame?} (several objects on the key become one graphic symbol; a one-frame span grows to a second)`
 - **Create Classic Tween** `timeline.create_tween` · changes the document
@@ -138,7 +146,7 @@ This page is generated from the command registry, so it always matches the versi
 - **New Layer** `layer.new` · Insert › Timeline · changes the document
   Parameters: `{name?}`
 - **New Folder** `layer.new_folder` · Insert › Timeline · changes the document
-  Parameters: `{name?}`
+  Parameters: `{name?, wrap?: bool (default: true when several layers are selected: they go into the new folder, which lands where the top one was; false: an empty folder above the active layer)}`
 - **Add Classic Motion Guide** `layer.add_motion_guide` · Insert › Timeline · changes the document
   Parameters: `{layer?}`
 - **Add Camera** `camera.add` · Insert › Timeline · changes the document
@@ -148,18 +156,18 @@ This page is generated from the command registry, so it always matches the versi
 
 ## Modify
 
-- **Document Settings** `doc.set_stage` · changes the document
+- **Document Settings** `doc.set_stage` · **Ctrl+J** (macOS **⌘J**) · changes the document
   Parameters: `{width?, height?, fps?, background?: "#rrggbb"}`
 - **Envelope** `modify.envelope` · Modify › Transform
   Parameters: `{} opens an envelope around the selected shapes and drawing objects on the active layer (ADR 0080): a mesh of 4 × 4 Bézier control points over their bounds, at rest → {points: [[x, y] × 16] (row by row from the top-left), bounds: [x, y, w, h], shapes}. Then modify.envelope_move bends them. Symbols, text, groups and bitmaps can't be bent: break them apart first`
 - **Delete Layer** `layer.delete` · Modify › Timeline · changes the document
-  Parameters: `{layer? (a folder goes with its contents)}`
+  Parameters: `{layer? | layers?: [ids] (default: every layer selected in the layer list; a folder goes with its contents)}`
 - **Move Layer Up** `layer.move_up` · Modify › Timeline · changes the document
   Parameters: `{layer?}`
 - **Move Layer Down** `layer.move_down` · Modify › Timeline · changes the document
   Parameters: `{layer?}`
 - **Mask** `layer.toggle_mask` · Modify › Timeline · changes the document
-  Parameters: `{layer?}`
+  Parameters: `{layer?} turns the layer into a mask over the layer below, or back into a normal layer. A new mask is locked: unlocked, its edge shows on the stage in the layer colour, to pick and reshape it`
 - **Layer Properties** `layer.set_properties` · Modify › Timeline · changes the document
   Parameters: `{layer?, name?, type?: normal|mask|masked|guide|guided, mask?: coverage|alpha|luminance (a mask layer's mask type), color?, outline?: bool (view as outlines), height?: 100|200|300, opacity?: 0..100 (percent), visible?, locked?, onion?} sets several at once, as one undo step; answers with the layer's properties`
 - **Remove Camera** `camera.remove` · Modify › Timeline · changes the document
@@ -198,6 +206,10 @@ This page is generated from the command registry, so it always matches the versi
   Parameters: `{} (within each layer)`
 - **Convert to Symbol…** `modify.convert_to_symbol` · **F8** · changes the document
   Parameters: `{name? (default: the next free “Symbol n”; a name the folder holds gets a number), kind?: graphic|movie_clip|button (default: graphic), folder?: Library folder id (default: the top level)} → {symbol, instance, name, layer, folder} (a selection on several layers becomes one symbol with those layers inside; the instance lands on the topmost)`
+- **Convert to Bitmap** `modify.convert_to_bitmap` · changes the document
+  Parameters: `{} the selection, as it is drawn at the playhead, becomes one bitmap in the Library (the next free “Bitmap n”), placed where the selection was, on the topmost of its layers, and selected → {bitmap, element, name, width, height}`
+- **Trace Bitmap…** `modify.trace_bitmap` · Modify › Bitmap · changes the document
+  Parameters: `{color_threshold? (1..500, default 100: neighbouring pixels whose red, green and blue differ by less, added up, are one colour), min_area? (1..1000 pixels, default 8: smaller areas join the neighbour they share the most edge with), curve_fit?: pixels|very_tight|tight|normal|smooth|very_smooth (default normal), corner_threshold?: many|normal|few (default normal)} the selected bitmaps become filled raw shapes, one per area of colour, in their place (pixels under half opacity stay empty) → {shapes, elements}`
 - **Break Apart** `modify.break_apart` · **Ctrl+B** (macOS **⌘B**) · changes the document
   Parameters: `{} the selected symbol instances become their contents, text becomes shapes, and drawing objects become raw shapes that merge with the raw shapes they touch`
 - **Group** `modify.group` · **Ctrl+G** (macOS **⌘G**) · changes the document
@@ -226,6 +238,8 @@ This page is generated from the command registry, so it always matches the versi
   Parameters: `{} puts the selected symbol instances' transformation point back at the centre (none kept: tools use the centre of the box, tweens the registration point) → {reset}`
 - **Remove Transform** `modify.remove_transform` · Modify › Transform · **Ctrl+Shift+Z** (macOS **⇧⌘Z**) · changes the document
   Parameters: `{}`
+- **Distribute to Layers** `modify.distribute_to_layers` · Modify › Timeline · **Ctrl+Shift+D** (macOS **⇧⌘D**) · changes the document
+  Parameters: `{} each selected object (symbol instance, group, drawing object, text, bitmap) on the keyframe at the playhead moves to a new layer of its own just above its layer, named after its symbol when it is an instance, for the same frames. Each new layer keeps its layer's settings (camera depth, attachment, the layer it follows). Raw shapes stay where they are; refused for a tweened keyframe or the end of a tween, an instance that goes on from the keyframe before or after, a layer below full opacity, and mask, guide and other special layers → {layers: [new layer ids], left_raw}`
 - **Left** `align.left` · Modify › Align · **Ctrl+Alt+1** (macOS **⌥⌘1**) · changes the document
   Parameters: `{to_stage?}`
 - **Horizontal Center** `align.hcenter` · Modify › Align · **Ctrl+Alt+2** (macOS **⌥⌘2**) · changes the document
@@ -242,6 +256,22 @@ This page is generated from the command registry, so it always matches the versi
   Parameters: `{}`
 - **Distribute Vertical Centers** `align.distribute_v` · Modify › Align · changes the document
   Parameters: `{}`
+- **Match Width** `align.match_width` · Modify › Align · changes the document
+  Parameters: `{to_stage?} sets each selected object's width to the widest one's (to_stage: the stage's width), keeping its height and its left edge; an object with no width (a vertical line) keeps none`
+- **Match Height** `align.match_height` · Modify › Align · changes the document
+  Parameters: `{to_stage?} sets each selected object's height to the tallest one's (to_stage: the stage's height), keeping its width and its top edge; an object with no height (a horizontal line) keeps none`
+- **Match Width and Height** `align.match_size` · Modify › Align · changes the document
+  Parameters: `{to_stage?} sets each selected object's width to the widest one's and its height to the tallest one's, which may be two different objects (to_stage: the stage's width and height), keeping its top-left corner; a side an object has no extent along stays as it is`
+- **Space Evenly Horizontally** `align.space_h` · Modify › Align · changes the document
+  Parameters: `{} moves the selected objects (three or more) so the gaps between them across are equal; the first and last (by their left edges) stay where they are. Refused when the objects overlap too much to keep their order`
+- **Space Evenly Vertically** `align.space_v` · Modify › Align · changes the document
+  Parameters: `{} moves the selected objects (three or more) so the gaps between them down are equal; the first and last (by their top edges) stay where they are. Refused when the objects overlap too much to keep their order`
+- **Bind to Data…** `data.bind` · Modify › Data · changes the document
+  Parameters: `{property: x|y|scale_x|scale_y|rotation|alpha|frame (x, y pixels; scales and alpha percent; rotation degrees; frame: the 0-based frame of its symbol a graphic instance shows), table (id or name), column, element? (a symbol instance's id; default the selected one), start? (the span's first frame, 0-based; default the first frame the instance is on), frames? (the span's length; default one frame per row, or with a key column the frames the instance is on), from?, to? (the keys the first and last frame show; default the table's first and last; to before from plays it backwards), interpolation?: linear|step, scale?, offset? (value = column × scale + offset)} one binding per property of an instance; before the span it shows the first frame's value, after it the last's → {element, property, table, column, start, frames, value}`
+- **Remove Data Bindings** `data.unbind` · Modify › Data · changes the document
+  Parameters: `{element? (default every selected instance), property? (default all of them)} → {removed}`
+- **Bake Data to Keyframes** `data.bake` · Modify › Data · changes the document
+  Parameters: `{element? (default every selected instance with bindings), property? (default all of them)} writes what the bindings show as keyframes on the instance's layer (one where the value changes; one per frame inside a classic tween) and removes the bindings: every frame looks as it did → {keys, elements, removed}`
 - **Attach Text to Path** `text.attach_path` · Modify › Text · changes the document
   Parameters: `{path?: element id of a shape (default: the other selected element, a shape), x?, y? (pick the shape at this stage point instead), offset? (px along the path; default by the text's alignment: its start, middle or end), flip?: bool} sets the selected static text along a copy of the shape's outline (its first contour); the shape stays as it is (ADR 0070)`
 - **Release Text from Path** `text.release_path` · Modify › Text · changes the document
@@ -273,9 +303,9 @@ This page is generated from the command registry, so it always matches the versi
 ## Control
 
 - **Next Frame** `timeline.next_frame` · **.**
-  Parameters: `{}`
+  Parameters: `{} (on the last frame it stays there)`
 - **Previous Frame** `timeline.prev_frame` · **,**
-  Parameters: `{}`
+  Parameters: `{} (on the first frame it stays there)`
 - **Go to First Frame** `timeline.first_frame` · **Home**
   Parameters: `{}`
 - **Go to Last Frame** `timeline.last_frame` · **End**
@@ -306,7 +336,7 @@ These commands have no menu item: the panels, the stage and the timeline use the
 - **Close Envelope** `modify.envelope_close` · changes the document
   Parameters: `{} closes the open envelope: bent raw shapes merge with the drawing they now touch (as after a move). Nothing to close is no error → {closed}`
 - **Publish Settings** `publish.settings_set` · changes the document
-  Parameters: `{profile? (a whole profile, as publish.settings_get returns it), format? (html | gif | apng | webp | video | lottie | sprite_sheet | png_sequence | png | svg | audio), enabled?, output? (relative to the document's folder; {name} is the document's name), and that format's options: title, sound, fit (html); from, to, scale, loop (gif); from, to, scale, loop (true, false or how many times it plays; 0: forever), background (apng, webp); from, to, scale, audio (video); from, to, background (lottie); from, to, scale, columns, padding, background (sprite_sheet); from, to, scale (png_sequence); frame, scale (png); frame (svg); from, to, rate, bits (audio). from/to/frame are movie frames, null for the movie's ends}`
+  Parameters: `{profile? (a whole profile, as publish.settings_get returns it), format? (html | gif | apng | webp | video | lottie | sprite_sheet | png_sequence | png | svg | audio), enabled?, output? (relative to the document's folder; {name} is the document's name), and that format's options: title, sound, fit (html); from, to, scale, loop (gif); from, to, scale, loop (true, false or how many times it plays; 0: forever), background (apng, webp); from, to, scale, audio (video); from, to, background (lottie); from, to, scale, columns, padding, background (sprite_sheet); from, to, scale, background (png_sequence); frame, scale, background (png); frame (svg); from, to, rate, bits (audio). from/to/frame are movie frames, null for the movie's ends}`
 - **Open Recent** `file.open_recent`
   Parameters: `{index? (in file.recent_list order, from 0) | path?, confirm? (needed over unsaved changes)}: opens it as file.open does; a file that is no longer there stays on the list, marked missing`
 - **Recent Files** `file.recent_list`
@@ -354,9 +384,9 @@ These commands have no menu item: the panels, the stage and the timeline use the
 - **Outline Layer** `layer.toggle_outline` · changes the document
   Parameters: `{layer?, on?: bool (default: the other way), all?: true (every layer but the camera, as the square above the layers: back to artwork when all are outlines, else all as outlines)}`
 - **Select Layer** `layer.select`
-  Parameters: `{layer: id} or {index}, select?: bool (also select all of its artwork at the playhead, as a click on the layer's name does; nothing on a locked or hidden layer)`
+  Parameters: `{layer: id} or {index}, select?: bool (also select all of its artwork at the playhead, as a click on the layer's name does; nothing on a locked or hidden layer), add?: "toggle" (Ctrl-click: the layer joins or leaves the layers selected with the active one) | "range" (Shift-click: every layer from the active one to this one) → {layer: the active layer, layers: [the selected layers, top to bottom]}`
 - **Move Layer To** `layer.move` · changes the document
-  Parameters: `{layer?, before?: layer id | after?: layer id | into?: folder id} moves a layer anywhere in the stack, as a drag in the timeline does; a folder, mask or guide moves with everything in it. before / after: it lands just above that layer, or just below it and whatever it holds, beside it (in the same folder, or under the same mask or guide: normal layers only). into: it becomes the first layer in that folder. None of them: the bottom of the stack, outside every folder`
+  Parameters: `{layer? | layers?: [ids] (default: every layer selected in the layer list; they land together, in the order they had), before?: layer id | after?: layer id | into?: folder id} moves layers anywhere in the stack, as a drag in the timeline does; a folder, mask or guide moves with everything in it. before / after: it lands just above that layer, or just below it and whatever it holds, beside it (in the same folder, or under the same mask or guide: normal layers only). into: it becomes the first layer in that folder. None of them: the bottom of the stack, outside every folder`
 - **Layer Type** `layer.set_type` · changes the document
   Parameters: `{type: normal|mask|masked|guide|guided, layer?}`
 - **Onion Skin Layer** `layer.set_onion` · changes the document
@@ -549,12 +579,14 @@ These commands have no menu item: the panels, the stage and the timeline use the
   Parameters: `{symbol | bitmap | sound: id, x?, y?} or {items: [{symbol | bitmap | sound: id}, ..], x?, y?} → {element, elements, sound?}: symbols and bitmaps centred on x, y (default: the stage centre; inside an open symbol, in its space) in the active layer's keyframe at the playhead, selected; a sound goes onto that keyframe, its span grown to fit (one sound per keyframe). One undo step`
 - **Create Array** `array.create` · changes the document
   Parameters: `{mode: linear|radial|grid, count: 1..500 (linear and radial, includes original), create_unique_symbols?: bool, dx?, dy?, start_x?, start_y? (linear), center_x?, center_y?, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate? (radial), rows?, columns?, start_x?, start_y?, spacing_x?, spacing_y?, flip_on_reverse?, property_distribution?: x|xy|y, stagger?: {accumulate?: bool, rows?: {enabled?: bool, every?: positive integer, x?: number, y?: number}, columns?: {enabled?: bool, every?: positive integer, x?: number, y?: number}} (grid), stacking?: back_to_front|front_to_back, source_values?: bool, property_stops?: [{offset: 0..1, alpha?: 0..1 (-1..1 for Advanced), color_effect?: document Colour Effect object, filters?: [{type: blur|drop_shadow|glow|bevel|gradient_glow|gradient_bevel|adjust_color, ...values}, ...], blurs?: [{blur_x: 0..255, blur_y: 0..255}, ...] (legacy alternative), scale_x?: -100..100, scale_y?: -100..100, rotation?: -100000..100000, outbound_ease?: named ease}, ...] (2..15), alpha_stops?: [{offset: 0..1, alpha: 0..1}, ...] (2..15, legacy alternative), easing?: {mode?: global|per_segment, preset?: named ease (e.g. Linear, QuadIn, BackOut, ElasticInOut), distribution?, transform?, colour_effect?, filters?}}. Filter lists match the source's supported entries in stack order. Omitted or empty lists use the source values. Legacy blurs lists follow only the Blur entries. Copies preserve source filter types, order, enabled states, Blur quality and disabled Adjust Color values. Drop Shadow, Glow, Bevel, Gradient Glow and Gradient Bevel quality and switches, including filter type settings, hold until the next authored stop without easing. Drop Shadow, Bevel, Gradient Glow and Gradient Bevel angles take the shortest arc. An omitted stops field inherits the source ramp. Authored ramps keep the source stop count and order, with a transparent pin at 0% for Gradient Glow or 50% for Gradient Bevel. Adjust Color values interpolate directly, including signed Hue in degrees. Legacy filter lists may omit all entries of Gradient Bevel or Adjust Color to keep their source values. Easing defaults to Global Linear with all four families enabled. In Per Segment mode each stop eases toward the next using outbound_ease (default Linear). If no stop supplies outbound_ease, preset supplies the legacy shared segment curve. With source_values enabled, scale, rotation and colour are authored instance values and omitted properties use the source values. Otherwise, scale and rotation are relative, colour effects compose over the source, and older calls without color_effect keep absolute alpha. Alpha is the stop effect's alpha multiplier. Radial sweep defaults to 360 degrees. Closed loop defaults to true, uses count intervals and limits sweep to one turn. Open mode uses count minus one intervals. spiral_offset changes radius down to zero and drift_x/drift_y move the centre. All three rates default to zero and are measured in pixels per turn. Grid defaults to 3 rows and 3 columns with 60 px spacing on both axes. Rows times columns must be 1..500 (includes original). Grid places registration points in row-major order, even with negative spacing. Flip on Reverse defaults to true and reflects artwork around its registration point along each occupied axis with negative spacing. Grid uses an evenly spaced base lattice. Grid property distribution defaults to xy (row-major order). With x, properties and their easing repeat across rows. With y, they repeat across columns. A one-instance sampling axis uses the start of the progression. Grid stagger rows and columns default to disabled with every=2 and stage offsets of (50, 0) and (0, 50) px respectively. Offsets add at intersections. With accumulate off, every Nth row or column gets one offset. With accumulate on, each qualifying row or column adds an offset that persists on subsequent rows or columns. The first row and first column never add an offset, including when every=1. Stagger leaves the base direction and property sampling intact. Requires exactly one selected symbol instance on the active layer. Moves the original to position 1, bakes the copies and selects them all. With create_unique_symbols (default false), each instance references a separate copy of the original definition in its Library folder. Names continue the highest numbered suffix in the same naming family. Instance properties and shared nested Library references are preserved.`
+- **Create Timeline Animation** `array.create_timeline` · changes the document
+  Parameters: `{duration: frames (at least 2), animation?: classic|hold (Linear, default classic) or motion (Radial, default motion), mode?: linear|radial (center_x, center_y, radius?, start_angle?, sweep_angle?, closed_loop?, spiral_offset?, drift_x?, drift_y?, rotate?), start_x?, start_y?, end_x?, end_y?, count?: 1..500 (Hold samples only), property_stops?, easing?}. Stops use the authored instance values from array.create with source_values enabled. Converts one Symbol exposure on the active layer at the playhead.`
 - **Move Guide** `view.guide_move` · changes the document
   Parameters: ``{index, at} moves this scene's guide `index` (as view.aids lists them) to `at`; refused while guides are locked``
 - **Delete Guide** `view.guide_delete` · changes the document
   Parameters: ``{index} removes this scene's guide `index`; refused while guides are locked``
 - **Rulers, Grid and Guides** `view.aids`
-  Parameters: `{} whether the rulers, grid and guides show and snap, the grid's and guides' settings, and this scene's guides [{axis, at}, ..]`
+  Parameters: `{} whether the rulers, grid and guides show and snap, whether selection edges are hidden, the grid's and guides' settings, and this scene's guides [{axis, at}, ..]`
 - **Combine Objects** `modify.combine` · changes the document
   Parameters: `{op: union|intersect|punch|crop} combines the selected shapes on the active layer, bottom to top as they are stacked (ADR 0073). union: one drawing object of everything (a group of the merged pieces when they have more than one colour or keep lines); intersect: the area every one covers, in the topmost's fill and stroke; punch: the topmost's area cut out of each of the others; crop: each of the others cut to the topmost's area. Punch and crop remove the topmost. A result of one fill (or one line) is a drawing object, one of several is a group of raw shapes → {op, created}`
 - **List Library** `library.items`
@@ -581,6 +613,8 @@ These commands have no menu item: the panels, the stage and the timeline use the
   Parameters: `{symbol} the selected instances show another symbol, keeping their transform, colour effect, blending, filters, looping, actions and instance name`
 - **Drop** `draw.drop` · changes the document
   Parameters: `{} the selected raw shapes cut and join the raw shapes they touch (after a move), on each layer`
+- **Float** `draw.float` · changes the document
+  Parameters: `{} the selected raw shapes stay whole, on top of the drawing, until they are deselected: then they cut and join what they lie on (as the editor leaves a moved selection, ADR 0122)`
 - **Select Connected** `element.select_connected`
   Parameters: `{x, y, add?, slop?} a raw stroke and the strokes joined to it, or a raw fill and the strokes on and in it`
 - **Transform** `modify.transform` · changes the document
@@ -592,7 +626,7 @@ These commands have no menu item: the panels, the stage and the timeline use the
 - **Pencil Stroke** `draw.freehand` · changes the document
   Parameters: `{points: [[x, y], ..], mode?: "smooth"|"straighten"|"ink", tolerance? (stage units), closed?, stroke?, stroke_width?, object?}`
 - **Move Points** `path.move_points` · changes the document
-  Parameters: `{id, points: [[cmd, slot], ..], dx, dy, smooth?: bool} (a handle moved alone at a smooth anchor turns the other one with it, keeping its length, unless smooth is false: Alt breaks the pair)`
+  Parameters: `{id (a shape, or text on a path: the path it follows, ADR 0107), points: [[cmd, slot], ..], dx, dy, smooth?: bool} (a handle moved alone at a smooth anchor turns the other one with it, keeping its length, unless smooth is false: Alt breaks the pair)`
 - **Add Anchor Point** `path.add_point` · changes the document
   Parameters: `{id, x, y, slop?}`
 - **Delete Anchor Points** `path.delete_points` · changes the document
@@ -606,7 +640,7 @@ These commands have no menu item: the panels, the stage and the timeline use the
 - **Move Point** `raw.move_point` · changes the document
   Parameters: ``{x, y, to_x, to_y, with?: [[x, y], ..], points?: [[id, cmd], ..], snap?, slop?, merge?: bool} moves the corner or end at (x, y), with every raw shape that shares it, to (to_x, to_y), snapped within `snap` to points, lines and fill edges (while Snap to Objects is on); the anchors at `with` move by as much; returns the points to pass on while a drag goes on``
 - **Select Parts** `raw.select_rect` · changes the document
-  Parameters: `{x0, y0, x1, y1, add?: bool} the marquee, on every visible, unlocked layer: the parts of raw fills and strokes under the rectangle (cut at its edges, per layer) and the objects wholly inside it`
+  Parameters: `{x0, y0, x1, y1, add?: bool} the marquee, on every visible, unlocked layer: the parts of raw fills and strokes under the rectangle (cut at its edges, per layer) and the objects it touches`
 - **Merge Shapes** `raw.merge` · changes the document
   Parameters: `{ids?: [..]} the raw shapes (default: the selection) merge again with the raw shapes they touch, in place`
 - **Selection Tool Target** `raw.hit`
@@ -715,6 +749,20 @@ These commands have no menu item: the panels, the stage and the timeline use the
   Parameters: `{path: a swatch file (.json, from swatch.export) or a GIMP palette (.gpl), replace?: bool (default false: added at the end)} → {imported, count}`
 - **Export Swatches** `swatch.export`
   Parameters: `{path} writes the document's swatches to a swatch file (JSON) → {written, swatches}`
+- **Set Data Table** `data.set_table` · changes the document
+  Parameters: ``{name, columns: [{name, values: [number | null, ..]}, ..] (in this order) | {name: [..], ..} (sorted by name) | [names] with rows: [[..], ..], key?, table? (id or name of the table to replace; default the table called `name`)} the table's values inline (null is a gap); replacing a table keeps its bindings → as data.import_table``
+- **Data Tables** `data.list`
+  Parameters: `{} → {tables: [{table, name, rows, columns: [names], key, source, folder, bindings}], bindings (how many in the document)}`
+- **Data Table Values** `data.get`
+  Parameters: `{table (id or name), from? (first row, 0-based), count? (rows, at most 10,000)} → {table, name, key, rows, from, columns: [{name, values: [number | null, ..]}]}`
+- **Set Data Cell** `data.set_cell` · changes the document
+  Parameters: `{table (id or name), column, row (0-based), value (number, or null for a gap)}: every binding that reads the cell shows the new value`
+- **Set Key Column** `data.set_key` · changes the document
+  Parameters: `{table (id or name), key (a column's name, or null: rows are looked up by row number)}: a table with a key keeps its rows in the key's ascending order`
+- **Delete Data Table** `data.remove` · changes the document
+  Parameters: `{table (id or name)} deletes the table and the bindings that read it (undoable) → {deleted, uses}`
+- **Data Bindings** `data.bindings`
+  Parameters: `{element? (default every binding in the document)} → {bindings: [{element, property, table, table_name, column, start, frames, from, to, interpolation, scale, offset, live (the table and column exist), value (at the playhead, or null)}]}`
 - **New Text** `text.create` · changes the document
   Parameters: `{text (may be empty for an input field), type?: static|dynamic|input, x?, y? (top-left; default: centred), width?, font?, size? (px), bold?, italic?, color?, letter_spacing?, shift?: normal|superscript|subscript, underline?, url? ("": none), align?: left|center|right, indent? (px, first line), left_margin?, right_margin? (px), line_spacing? (px), runs?: [{chars, …character keys}] (styles of the text's characters in order; unset keys take the style above), paragraphs?: [{…paragraph keys}] (one per line of the text)} (ADR 0085)`
 - **Edit Text** `text.edit` · changes the document
@@ -730,7 +778,7 @@ These commands have no menu item: the panels, the stage and the timeline use the
 - **Text on Path** `text.path` · changes the document
   Parameters: `{offset? (px along the path), flip?: bool (along the path backwards, on its other side), release?: bool (back to lines of text where it starts)} on the selected text on a path (ADR 0070)`
 - **Text Type** `text.field` · changes the document
-  Parameters: `{type?: static|dynamic|input, lines?: single|multiline|multiline_no_wrap|password (input only), width?, height? (the field's box, px), selectable?, border?, background?, border_color?, background_color?, max_chars? (input; 0: no limit), variable? (kept, not run)} on the selected text; dynamic and input fields are named with instance.set_name and scripted in Test Movie and the HTML export (ADR 0066)`
+  Parameters: `{type?: static|dynamic|input, lines?: single|multiline|multiline_no_wrap|password (input only), width?, height? (the field's box, px), selectable?, border?, background?, border_color?, background_color?, max_chars? (input; 0: no limit), variable? (kept, not run), embed?: characters whose glyph outlines the HTML export carries for this field's font, so text a script sets is drawn in it where the font's licence allows ("": none; ADR 0107)} on the selected text; dynamic and input fields are named with instance.set_name and scripted in Test Movie and the HTML export (ADR 0066)`
 - **Width Profile** `stroke.set_profile` · changes the document
   Parameters: `{profile: uniform|taper_both|taper_start|taper_end|bulge|pinch | [[t, left, right], ..], id? (default: the selected shapes)}`
 - **Width** `stroke.set_width_point` · changes the document
@@ -763,8 +811,12 @@ These commands have no menu item: the panels, the stage and the timeline use the
   Parameters: `{sound, name}`
 - **Analyse Sound** `sound.analyse`
   Parameters: `{what?: levels|visemes (default levels), sound_layer?, sound_frame?, from?, to?, threshold?, smoothing?, channel? (levels), hold? (visemes)} → {sound, name, layer, keyframe, from, to, fps, levels (each frame's loudness, 0–1 of the loudest) and values (gated and smoothed), or visemes (rest|open|wide|round|closed per frame)}`
+- **Video Information** `file.video_info`
+  Parameters: `{path, step?, max_edge?, start?, length?, max_frames?, ffmpeg?} what importing the video with these settings would take, before anything is decoded → {width, height, seconds, fps, audio, plan: {frames, width, height, limit, truncated, memory (bytes of decoded pixels)}}`
+- **Reference Video** `layer.set_video` · changes the document
+  Parameters: `{layer?, path? (relink: another file, or the same one where it moved), start? (the timeline frame, from 0, where the video begins), offset? (seconds into the video shown there), remove? (true: the layer keeps its artwork and loses the video), ffmpeg?} changes a layer's reference video (ADR 0116) → {layer, video}`
 - **Set Actions** `actions.set` · changes the document
-  Parameters: `{actions: [{op: stop|play|goto_and_play|goto_and_stop|next_frame|prev_frame|next_scene|prev_scene|trace|set_property, target?, frame?, scene?, message?, property?, value?}] | plugin: id, entry?, symbol?: id (a movie clip's timeline), layer?, frame?} sets what the keyframe at the frame runs; or {element, event: click|press|release|over|out, actions} sets an instance's event handler. An empty list clears it`
+  Parameters: `{actions: [{op: stop|play|goto_and_play|goto_and_stop|next_frame|prev_frame|next_scene|prev_scene|trace|set_property, target?, frame?, scene?, message?, property?, value?}] | plugin: id, entry?, symbol?: id (a movie clip's timeline), layer?, frame?} sets what the keyframe at the frame runs; or {element, event: click|press|release|over|out, actions} (or event: change on an input text field: what it does when the viewer changes its text, ADR 0107) sets an instance's event handler. An empty list clears it`
 - **Clear Actions** `actions.clear` · changes the document
   Parameters: `{symbol?, layer?, frame?} clears the keyframe's actions; {element, event?} clears an instance's handlers (one event, or all)`
 - **List Actions** `actions.list`

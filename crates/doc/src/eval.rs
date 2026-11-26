@@ -5,12 +5,84 @@ use crate::nine_slice::Slicing;
 use crate::player::PlayerState;
 use crate::{ColorTransform, Document, Element, ElementId, ElementKind, Layer, LayerId, LayerKind, MaskMode, Paint, Rgba, Shape, Stroke, SymbolId, SymbolKind, Timeline, TweenKind};
 use anicraft_geom::walk::PathWalk;
-use anicraft_geom::{Affine, FillRule, Path};
+use anicraft_geom::{Affine, FillRule, Path, Vec2};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::sync::Arc;
 
 /// Symbols nested deeper than this are not drawn (guards cyclic libraries).
 pub const MAX_SYMBOL_DEPTH: usize = 32;
+
+/// The work one evaluation (or one bounds query) may do, nested symbols and groups included
+/// (ADR 0128). The depth cap alone leaves a symbol holding two instances of the next, 32 deep,
+/// to expand 2^32 times, which no file may make AniCraft do: past the allowance the rest is
+/// left out, so a hostile or damaged document draws in part instead of hanging or running
+/// out of memory, and the result says so ([`DisplayList::left_out`]). Real scenes stay far
+/// below it (the heaviest benchmark has 50,000 shapes).
+///
+/// A unit is one element or one layer visited. A shape costs one more for every
+/// [`PATH_COMMANDS_PER_UNIT`] commands of its outline, and finding a symbol one more for every
+/// [`LIBRARY_ENTRIES_PER_UNIT`] library entries passed, so neither a huge outline nor a huge
+/// library, repeated by nesting, multiplies the work past what the allowance stands for.
+pub const MAX_EVAL_ELEMENTS: u32 = 1_000_000;
+
+/// A shape's outline costs one unit of work for each this many path commands.
+pub const PATH_COMMANDS_PER_UNIT: usize = 256;
+
+/// Finding a symbol costs one unit of work for each this many library entries looked at.
+pub const LIBRARY_ENTRIES_PER_UNIT: usize = 1024;
+
+/// An allowance of work (see [`MAX_EVAL_ELEMENTS`]) shared by everything one query visits, that
+/// remembers whether it ran out.
+pub(crate) struct Work {
+    left: Cell<u32>,
+    ran_out: Cell<bool>,
+}
+
+impl Work {
+    pub(crate) fn new(units: u32) -> Work {
+        Work { left: Cell::new(units), ran_out: Cell::new(false) }
+    }
+
+    /// Takes `units`; `false` once the allowance is spent (and from then on).
+    pub(crate) fn spend(&self, units: u32) -> bool {
+        match self.left.get().checked_sub(units) {
+            Some(left) if !self.ran_out.get() => {
+                self.left.set(left);
+                true
+            }
+            _ => {
+                self.left.set(0);
+                self.ran_out.set(true);
+                false
+            }
+        }
+    }
+
+    /// Something was left out because the allowance was spent.
+    pub(crate) fn ran_out(&self) -> bool {
+        self.ran_out.get()
+    }
+
+    /// Takes what visiting `el` costs.
+    pub(crate) fn visit(&self, el: &Element) -> bool {
+        let outline = match &el.kind {
+            ElementKind::Shape(s) => s.path.cmds.len() / PATH_COMMANDS_PER_UNIT,
+            _ => 0,
+        };
+        self.spend(u32::try_from(outline).unwrap_or(u32::MAX).saturating_add(1))
+    }
+
+    /// The library symbol `id`, paid for by how far into the library it is.
+    pub(crate) fn symbol<'d>(&self, doc: &'d Document, id: SymbolId) -> Option<&'d crate::Symbol> {
+        let at = doc.library.iter().position(|s| s.id == id);
+        let passed = at.unwrap_or(doc.library.len()) / LIBRARY_ENTRIES_PER_UNIT;
+        if passed > 0 && !self.spend(u32::try_from(passed).unwrap_or(u32::MAX)) {
+            return None;
+        }
+        at.and_then(|i| doc.library.get(i)).map(|s| &**s)
+    }
+}
 
 /// One shape to draw, fully resolved to stage space.
 #[derive(Clone, Debug)]
@@ -68,6 +140,10 @@ pub struct DisplayList {
     /// Links on text (ADR 0085): `(item, url)` for each item drawing characters that link
     /// somewhere, in item order. Sparse: most lists have none.
     pub links: Vec<(u32, Arc<str>)>,
+    /// The frame's allowance of work ([`MAX_EVAL_ELEMENTS`]) ran out, so artwork is missing
+    /// from this list: whoever shows or exports it says so instead of passing it off as the
+    /// whole frame (ADR 0128).
+    pub left_out: bool,
 }
 
 /// A group that fades as one (see [`DisplayList::groups`]).
@@ -141,6 +217,7 @@ impl DisplayList {
             self.set_clip_mode(base + i as u32, m);
         }
         self.groups.extend(other.groups.into_iter().map(|g| Group { parent: gshift(g.parent), alpha: g.alpha, blend: g.blend, filters: g.filters, clip: shift(g.clip) }));
+        self.left_out |= other.left_out;
         let ibase = self.items.len() as u32;
         self.links.extend(other.links.into_iter().map(|(i, u)| (i + ibase, u)));
         self.items.extend(other.items.into_iter().map(|mut i| {
@@ -163,7 +240,9 @@ pub fn evaluate(doc: &Document, frame: u32) -> DisplayList {
 /// applied: what the stage shows while editing (and what picking and bounds use).
 pub fn evaluate_scene(doc: &Document, scene: usize, frame: u32) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, doc.timeline(scene), frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    let work = Work::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, doc.timeline(scene), frame, &Ctx::top(Affine::IDENTITY, &work), &mut out, None);
+    out.left_out = work.ran_out();
     out
 }
 
@@ -172,7 +251,9 @@ pub fn evaluate_scene(doc: &Document, scene: usize, frame: u32) -> DisplayList {
 /// top-level ones, as a scene's are in [`evaluate_scene`].
 pub fn evaluate_timeline(doc: &Document, tl: &Timeline, frame: u32) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    let work = Work::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::top(Affine::IDENTITY, &work), &mut out, None);
+    out.left_out = work.ran_out();
     out
 }
 
@@ -182,7 +263,9 @@ pub fn evaluate_timeline(doc: &Document, tl: &Timeline, frame: u32) -> DisplayLi
 /// skin or Edit Multiple Frames composes its frames (ADR 0051).
 pub fn evaluate_timeline_at(doc: &Document, tl: &Timeline, frame: u32, xf: Affine) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::top(xf), &mut out, None);
+    let work = Work::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::top(xf, &work), &mut out, None);
+    out.left_out = work.ran_out();
     out
 }
 
@@ -192,7 +275,9 @@ pub fn evaluate_timeline_at(doc: &Document, tl: &Timeline, frame: u32, xf: Affin
 pub fn evaluate_scene_camera(doc: &Document, scene: usize, frame: u32) -> DisplayList {
     let tl = doc.timeline(scene);
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::through(tl.camera_at(frame, &doc.stage)), &mut out, None);
+    let work = Work::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::through(tl.camera_at(frame, &doc.stage), &work), &mut out, None);
+    out.left_out = work.ran_out();
     out
 }
 
@@ -201,20 +286,26 @@ pub fn evaluate_scene_camera(doc: &Document, scene: usize, frame: u32) -> Displa
 /// through the scene's camera.
 pub fn evaluate_player(doc: &Document, state: &PlayerState) -> DisplayList {
     let mut out = DisplayList::default();
+    let work = Work::new(MAX_EVAL_ELEMENTS);
     let play = Play { state, path: Vec::new() };
     let tl = doc.timeline(state.scene);
-    eval_timeline(doc, tl, state.root.frame, &Ctx::through(tl.camera_at(state.root.frame, &doc.stage)), &mut out, Some(&play));
+    eval_timeline(doc, tl, state.root.frame, &Ctx::through(tl.camera_at(state.root.frame, &doc.stage), &work), &mut out, Some(&play));
+    out.left_out = work.ran_out();
     out
 }
 
 /// A symbol's timeline at `frame`, drawn at `xf` (stage space): a button's hit area, or a movie
 /// clip's artwork, as the player sees it when `play` is given.
-pub(crate) fn evaluate_symbol(doc: &Document, tl: &Timeline, frame: u32, xf: Affine, play: Option<&Play<'_>>) -> DisplayList {
+///
+/// `work` is the caller's allowance, so a player step that looks at many instances pays for
+/// all of them from one.
+pub(crate) fn evaluate_symbol(doc: &Document, tl: &Timeline, frame: u32, xf: Affine, play: Option<&Play<'_>>, work: &Work) -> DisplayList {
     let mut out = DisplayList::default();
-    let mut cx = Ctx::top(xf);
+    let mut cx = Ctx::top(xf, work);
     cx.depth = 1;
     cx.stage = false;
     eval_timeline(doc, tl, frame, &cx, &mut out, play);
+    out.left_out = work.ran_out();
     out
 }
 
@@ -290,7 +381,10 @@ pub(crate) fn evaluate_tweened<'a>(layer: &'a Layer, frame: u32, guide: Option<&
     let morph = tween.kind == TweenKind::Shape;
     let path = guide.map(|g| (g, tween.orient));
     let runs = |els: &[Arc<Element>]| els.iter().filter(|e| raw_stroke(e).is_some()).count();
-    if morph && runs(&kf.elements) != runs(&next.elements) {
+    // Along a motion guide the runs are joined even when both keys have as many: a guide places
+    // each element by its own origin, so runs left to pair one by one would each take their own
+    // way along it and leave the fill they edge.
+    if morph && (runs(&kf.elements) != runs(&next.elements) || (path.is_some() && runs(&kf.elements) > 0)) {
         return Some((kf.start, Cow::Owned(morph_raw_strokes(kf, next, t, path))));
     }
     let pairs = if morph && !kf.hints.is_empty() { crate::hints::hint_pairs(kf, next) } else { Vec::new() };
@@ -347,38 +441,115 @@ fn raw_stroke(e: &Element) -> Option<&Stroke> {
     }
 }
 
+/// The raw fill of `els` that `path` (in `xf` space) edges: the one whose edge is within two
+/// snaps of the middle of `path`, or that contains it, or the one whose origin is nearest `xf`'s.
+/// The middle, not an end: a run ends at a corner, where the runs of the fill next door end
+/// too, so an end says nothing about whose edge the run is. An edge two fills share (their
+/// outlines joined there) goes with the lower of the two, the first in the stack.
+fn fill_of(els: &[Arc<Element>], path: &Path, xf: &Affine) -> Option<usize> {
+    let middle = |pl: anicraft_geom::Polyline| {
+        let k = pl.points.len() / 2;
+        match (pl.points.get(k.wrapping_sub(1)), pl.points.get(k)) {
+            (Some(a), Some(b)) => Some(a.lerp(*b, 0.5)),
+            (None, b) => b.copied(),
+            (a, None) => a.copied(),
+        }
+    };
+    if let Some(p) = path.flatten(xf, 0.25).into_iter().next().and_then(middle)
+        && let Some((k, _)) = els.iter().enumerate().find(|(_, e)| {
+            matches!(&e.kind, ElementKind::Shape(s) if s.merge && s.fill.is_some() && (s.path.contains(p, &e.transform, s.fill_rule) || s.path.distance_to_edge(p, &e.transform) <= 2.0 * anicraft_geom::planar::SNAP))
+        })
+    {
+        return Some(k);
+    }
+    let own = xf.translation();
+    els.iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(&e.kind, ElementKind::Shape(s) if s.merge && s.fill.is_some()))
+        .min_by(|(_, a), (_, b)| own.distance(a.transform.translation()).total_cmp(&own.distance(b.transform.translation())))
+        .map(|(k, _)| k)
+}
+
 /// Raw stroke runs joined into one outline: the indices of the runs (the first one's space is
-/// the outline's) and the joined element.
+/// the outline's), the fill they edge, and the joined element.
 struct Joined {
     members: Vec<usize>,
+    fill: Option<usize>,
     el: Element,
 }
 
+/// Whether an outline's runs are chained into whole outlines by [`joined_runs`]: a stroke with
+/// no dash pattern and no width profile. A dash pattern restarts, and a profile is measured, on
+/// each run, so those runs stay apart.
+fn chained(el: &Element) -> bool {
+    raw_stroke(el).is_some_and(|st| st.style.dash.is_none() && st.profile.is_none())
+}
+
 /// The raw stroke runs of `els` joined into one element per stroke style (and scale, rotation
-/// and skew, which the stroke's width follows, and colour effect), each in the space of its first run.
-fn joined_runs(els: &[Arc<Element>]) -> Vec<Joined> {
+/// and skew, which the stroke's width follows, and colour effect), each in the space of its first run;
+/// when `by_fill`, runs that edge different fills stay in separate outlines so each outline can
+/// follow its own fill along a motion guide.
+fn joined_runs(els: &[Arc<Element>], by_fill: bool) -> Vec<Joined> {
     let mut out: Vec<Joined> = Vec::new();
     for (i, e) in els.iter().enumerate() {
         let (Some(st), ElementKind::Shape(s)) = (raw_stroke(e), &e.kind) else { continue };
+        let fill = by_fill.then(|| fill_of(els, &s.path, &e.transform)).flatten();
         let slot = out.iter_mut().find_map(|j| {
             let ElementKind::Shape(js) = &mut j.el.kind else { return None };
             let into = j.el.transform.inverse()?.mul(&e.transform);
-            (j.el.transform.m[..4] == e.transform.m[..4] && js.stroke.as_ref() == Some(st) && j.el.color == e.color).then_some((&mut j.members, js, into))
+            (j.fill == fill && j.el.transform.m[..4] == e.transform.m[..4] && js.stroke.as_ref() == Some(st) && j.el.color == e.color).then_some((&mut j.members, js, into))
         });
         match slot {
             Some((members, js, into)) => {
                 members.push(i);
                 Arc::make_mut(&mut js.path).cmds.extend(s.path.transformed(&into).cmds);
             }
-            None => out.push(Joined { members: vec![i], el: (**e).clone() }),
+            None => out.push(Joined { members: vec![i], fill, el: (**e).clone() }),
         }
     }
     for j in &mut out {
-        if let ElementKind::Shape(s) = &mut j.el.kind {
+        // A dash pattern restarts, and a width profile is measured, on each run; chained, the
+        // pattern and widths would jump on the first frame after the key. Such runs stay apart.
+        if chained(&j.el) && let ElementKind::Shape(s) = &mut j.el.kind {
             s.path = Arc::new(anicraft_geom::morph::chain(&s.path, anicraft_geom::planar::SNAP));
         }
     }
     out
+}
+
+/// `e` with its origin moved to `origin` (in its parent's space) and its path moved back, so
+/// it looks the same.
+fn rebase(e: &mut Element, origin: anicraft_geom::Vec2) {
+    let mut moved = e.transform;
+    moved.m[4] = origin.x;
+    moved.m[5] = origin.y;
+    let (Some(inv), ElementKind::Shape(s)) = (moved.inverse(), &mut e.kind) else { return };
+    let d = inv.apply(e.transform.translation());
+    if !d.is_finite() {
+        return;
+    }
+    s.path = Arc::new(s.path.transformed(&Affine::translate(d.x, d.y)));
+    e.transform = moved;
+}
+
+/// What stands, in an in-between frame, for a run `x` joined into the outline `el`: nothing
+/// drawn (no fill, no stroke) but the run's identity over the outline, so a run selected on a
+/// key stays selected through the tween, with the outline's bounds.
+fn joined_member(x: &Element, el: &Element) -> Element {
+    let mut e = el.clone();
+    e.id = x.id;
+    e.name.clone_from(&x.name);
+    if let ElementKind::Shape(s) = &mut e.kind {
+        let pad = s.stroke.as_ref().map_or(0.0, Stroke::reach);
+        let b = s.path.bounds();
+        if (b.width() == 0.0 || b.height() == 0.0) && pad > 0.0 {
+            let r = b.inflate(pad);
+            s.path = Arc::new(Path::rect(r.min.x, r.min.y, r.width(), r.height()));
+        }
+        s.stroke = None;
+        s.fill = None;
+    }
+    e
 }
 
 /// The partner on `b` of each joined outline of `a`: one with the same stroke and colour first, then the
@@ -404,6 +575,17 @@ fn pair_joined(a: &[Joined], b: &[Joined]) -> Vec<Option<usize>> {
     out
 }
 
+/// `el` with its runs chained into whole outlines, for a morph against an outline that is
+/// chained: both ends then correspond along the whole outline, the way the fill's do. Only the
+/// in-between frames see this; the keys keep their own runs.
+fn chained_for_morph(el: &Element) -> Element {
+    let mut e = el.clone();
+    if let ElementKind::Shape(s) = &mut e.kind {
+        s.path = Arc::new(anicraft_geom::morph::chain(&s.path, anicraft_geom::planar::SNAP));
+    }
+    e
+}
+
 /// `e` shrunk to the centre of its path: where an outline without a partner grows from or
 /// shrinks to.
 fn collapsed(e: &Element) -> Element {
@@ -422,7 +604,21 @@ fn collapsed(e: &Element) -> Element {
 /// pairs in order, as in a plain shape tween.
 fn morph_raw_strokes(kf: &crate::Keyframe, next: &crate::Keyframe, t: Progress, guide: Option<(&PathWalk, bool)>) -> Vec<Arc<Element>> {
     let (a, b) = (&kf.elements, &next.elements);
-    let (runs_a, runs_b) = (joined_runs(a), joined_runs(b));
+    let (mut runs_a, mut runs_b) = (joined_runs(a, guide.is_some()), joined_runs(b, guide.is_some()));
+    if guide.is_some() {
+        // A guide places each element by its own origin, so an outline with an origin of its own
+        // would take another path than the fill it edges. Each outline takes the origin of the
+        // fill it edges, so it travels with that fill; with no fill, of the first outline.
+        for (els, runs) in [(a, &mut runs_a), (b, &mut runs_b)] {
+            let first = runs.first().map(|r| r.el.transform.translation());
+            for r in runs.iter_mut() {
+                let origin = r.fill.and_then(|k| els.get(k)).map(|e| e.transform.translation()).or(first);
+                if let Some(origin) = origin {
+                    rebase(&mut r.el, origin);
+                }
+            }
+        }
+    }
     let partner = pair_joined(&runs_a, &runs_b);
     let placed = if kf.hints.is_empty() { Vec::new() } else { crate::hints::placed_hints(kf, next) };
     // The hints placed on what `on_a` and `on_b` pick, in the spaces of `x` and `y`.
@@ -433,6 +629,18 @@ fn morph_raw_strokes(kf: &crate::Keyframe, next: &crate::Keyframe, t: Progress, 
         };
     let mut rest_b = b.iter().enumerate().filter(|(_, e)| raw_stroke(e).is_none());
     let mut out = Vec::with_capacity(a.len());
+    // Which outline of the start key draws each of its runs, worked out once: searching the
+    // outlines for every run would cost n(n+1)/2 comparisons for an outline of n runs.
+    let mut outline_of: Vec<Option<usize>> = vec![None; a.len()];
+    for (k, r) in runs_a.iter().enumerate() {
+        for &m in &r.members {
+            if let Some(slot) = outline_of.get_mut(m) {
+                *slot = Some(k);
+            }
+        }
+    }
+    // Each joined outline of the start key, tweened; it stands in for its first run.
+    let mut tweened: Vec<Option<Arc<Element>>> = vec![None; runs_a.len()];
     for (i, x) in a.iter().enumerate() {
         if raw_stroke(x).is_none() {
             let y = rest_b.next();
@@ -441,15 +649,33 @@ fn morph_raw_strokes(kf: &crate::Keyframe, next: &crate::Keyframe, t: Progress, 
             );
             continue;
         }
-        let Some((k, ra)) = runs_a.iter().enumerate().find(|(_, r)| r.members.first() == Some(&i)) else { continue };
+        let Some((k, ra)) = outline_of.get(i).copied().flatten().and_then(|k| runs_a.get(k).map(|r| (k, r))) else { continue };
+        if let Some(el) = tweened.get(k).and_then(Option::as_ref) {
+            // A later run of the outline keeps its identity, drawn by the first.
+            out.push(Arc::new(joined_member(x, el)));
+            continue;
+        }
         let el = match partner.get(k).copied().flatten().and_then(|m| runs_b.get(m)) {
             Some(rb) => {
-                interpolate(&ra.el, &rb.el, t, true, &hints(&|h| ra.members.contains(&h), &|h| rb.members.contains(&h), &ra.el, &rb.el), guide)
+                // A solid outline against a dashed or profiled one: only one of the two is
+                // chained, so a whole outline would morph against the other key's loose runs and
+                // the stroke would follow a different correspondence than the fill. Both are
+                // chained for the morph.
+                let (x, y) = if chained(&ra.el) == chained(&rb.el) {
+                    (Cow::Borrowed(&ra.el), Cow::Borrowed(&rb.el))
+                } else {
+                    (Cow::Owned(chained_for_morph(&ra.el)), Cow::Owned(chained_for_morph(&rb.el)))
+                };
+                interpolate(&x, &y, t, true, &hints(&|h| ra.members.contains(&h), &|h| rb.members.contains(&h), &x, &y), guide)
             }
             // No partner on the end keyframe: it shrinks away.
             None => interpolate(&ra.el, &collapsed(&ra.el), t, false, &[], guide),
         };
-        out.push(Arc::new(el.unwrap_or_else(|| ra.el.clone())));
+        let el = Arc::new(el.unwrap_or_else(|| ra.el.clone()));
+        if let Some(slot) = tweened.get_mut(k) {
+            *slot = Some(el.clone());
+        }
+        out.push(el);
     }
     // Outlines only on the end keyframe grow in.
     for (_, rb) in runs_b.iter().enumerate().filter(|(m, _)| !partner.contains(&Some(*m))) {
@@ -576,7 +802,10 @@ fn interpolate(a: &Element, b: &Element, pr: Progress, morph: bool, hints: &[(an
 
 /// What a timeline is evaluated inside of.
 #[derive(Clone, Copy)]
-struct Ctx {
+struct Ctx<'a> {
+    /// The evaluation's allowance of work ([`MAX_EVAL_ELEMENTS`]), shared by everything nested
+    /// in it.
+    work: &'a Work,
     /// Local → stage transform and colour effect of the enclosing instance.
     xf: Affine,
     color: ColorTransform,
@@ -603,14 +832,14 @@ struct Ctx {
     slice: Option<Slicing>,
 }
 
-impl Ctx {
-    fn top(xf: Affine) -> Ctx {
-        Ctx { xf, color: ColorTransform::IDENTITY, depth: 0, root: None, outline: None, stage: true, clip: None, masks: None, guide: false, group: None, camera: None, slice: None }
+impl<'a> Ctx<'a> {
+    fn top(xf: Affine, work: &'a Work) -> Ctx<'a> {
+        Ctx { work, xf, color: ColorTransform::IDENTITY, depth: 0, root: None, outline: None, stage: true, clip: None, masks: None, guide: false, group: None, camera: None, slice: None }
     }
 
     /// A main timeline seen through `camera`: its tint colours everything.
-    fn through(camera: Option<Camera>) -> Ctx {
-        let mut cx = Ctx::top(Affine::IDENTITY);
+    fn through(camera: Option<Camera>, work: &'a Work) -> Ctx<'a> {
+        let mut cx = Ctx::top(Affine::IDENTITY, work);
         cx.stage = false;
         if let Some(c) = camera {
             cx.color = c.color();
@@ -636,22 +865,71 @@ pub fn instance_start(layer: &Layer, frame: u32, id: ElementId, symbol: SymbolId
     start
 }
 
-/// The path a guide layer's first shape traces at `frame`, in the layer's own space.
+/// Most lines of a guide layer that are looked at when joining them into one path.
+const MAX_GUIDE_LINES: usize = 512;
+
+/// How near two line ends are to be one corner of the guide, in the layer's pixels. Lines drawn
+/// with snapping, and the pieces merge drawing cuts a line into, meet much closer than this.
+const GUIDE_JOIN: f32 = 0.75;
+
+/// The path a guide layer traces at `frame`, in the layer's own space: its first shape's line,
+/// continued through every other line on the layer that meets it end to end. A guide drawn as
+/// several strokes (a zigzag made with the Line tool is one raw stroke per straight run, #490)
+/// is one path, sharp corners and all; a closed outline is followed once round.
 pub fn guide_walk(guide: &Layer, frame: u32) -> Option<PathWalk> {
     let (_, els) = evaluate_layer_elements(guide, frame)?;
-    els.iter().find_map(|e| match &e.kind {
-        ElementKind::Shape(s) => {
-            let line = s.path.flatten(&e.transform, 0.25).into_iter().next()?;
-            let mut pts = line.points;
-            if line.closed
-                && let Some(&first) = pts.first()
-            {
-                pts.push(first);
-            }
-            PathWalk::new(&pts)
+    let mut lines = els
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ElementKind::Shape(s) => Some(s.path.flatten(&e.transform, 0.25)),
+            ElementKind::Symbol { .. } | ElementKind::Text(_) | ElementKind::Camera | ElementKind::Group { .. } => None,
+        })
+        .flatten()
+        .filter(|l| l.points.len() >= 2 && l.points.iter().all(|p| p.is_finite()))
+        .take(MAX_GUIDE_LINES);
+    let first = lines.next()?;
+    let mut pts = first.points;
+    if first.closed {
+        // Round and back to its start: nothing joins a closed outline.
+        if let Some(&start) = pts.first() {
+            pts.push(start);
         }
-        ElementKind::Symbol { .. } | ElementKind::Text(_) | ElementKind::Camera | ElementKind::Group { .. } => None,
-    })
+        return PathWalk::new(&pts);
+    }
+    let mut rest: Vec<Vec<Vec2>> = lines.filter(|l| !l.closed).map(|l| l.points).collect();
+    // Grow the path at its end, then at its start, one line at a time (each line is used once,
+    // so this ends after at most `MAX_GUIDE_LINES` joins).
+    let near = |a: Vec2, b: Vec2| a.distance(b) <= GUIDE_JOIN;
+    while let (Some(&head), Some(&tail)) = (pts.first(), pts.last()) {
+        let join = rest.iter().enumerate().find_map(|(i, l)| {
+            let (a, b) = (*l.first()?, *l.last()?);
+            // (which line, joins at the path's end, the line runs backwards)
+            if near(tail, a) {
+                Some((i, true, false))
+            } else if near(tail, b) {
+                Some((i, true, true))
+            } else if near(head, b) {
+                Some((i, false, false))
+            } else if near(head, a) {
+                Some((i, false, true))
+            } else {
+                None
+            }
+        });
+        let Some((i, at_end, backwards)) = join else { break };
+        let mut line = rest.swap_remove(i);
+        if backwards {
+            line.reverse();
+        }
+        if at_end {
+            pts.extend(line.into_iter().skip(1));
+        } else {
+            line.pop();
+            line.extend(pts);
+            pts = line;
+        }
+    }
+    PathWalk::new(&pts)
 }
 
 /// The tweened transform `tw` moved onto the guide: its origin travels from the point on the
@@ -672,7 +950,7 @@ fn follow(g: &PathWalk, orient: bool, from: &Affine, to: &Affine, t: f32, tw: Af
     if out.is_finite() { out } else { tw }
 }
 
-fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut DisplayList, play: Option<&Play<'_>>) {
+fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx<'_>, out: &mut DisplayList, play: Option<&Play<'_>>) {
     if cx.depth > MAX_SYMBOL_DEPTH {
         return;
     }
@@ -700,6 +978,11 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
     for k in 0..n {
         let index = sorted.as_ref().map_or(n - 1 - k, |o| o.get(k).copied().unwrap_or(n));
         let Some(layer) = tl.layers.get(index) else { continue };
+        // A layer looked at counts as an element does, so a timeline of empty layers, repeated
+        // by nesting, is bounded too.
+        if !cx.work.spend(1) {
+            return;
+        }
         // Guide artwork is listed (marked, for editing) but never drawn; inside mask artwork
         // it plays no part at all.
         let is_guide = layer.kind == LayerKind::Guide;
@@ -716,7 +999,7 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
         let guide = cx.guide || is_guide;
         // A layer guided by a guide layer: its tweens follow the guide's first path.
         let walk = layer.parent.and_then(|p| tl.layer(p)).filter(|g| g.kind == LayerKind::Guide).and_then(|g| guide_walk(g, frame));
-        let Some((kf_start, elements)) = evaluate_shown(layer, frame, walk.as_ref(), doc.stage.fps) else { continue };
+        let shown = evaluate_shown(layer, frame, walk.as_ref(), doc.stage.fps);
         let layer_outline = cx.outline.or(if layer.outline && cx.stage { Some(layer.color) } else { None });
         // Through a camera, each layer is placed by the camera and its own depth (an attached
         // layer stays put); a layer the camera has passed isn't drawn.
@@ -731,6 +1014,33 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
             Some(space) => layer_xf.mul(space),
             None => layer_xf,
         };
+        // A reference video (ADR 0116) goes under the layer's artwork: a placeholder with no
+        // paint, marked as guide artwork, so it is in no movie and no export. The stage alone
+        // fills it with the video's frame. Only on the timeline being looked at, never through
+        // a symbol or in mask artwork.
+        if let Some(v) = layer.video.as_deref().filter(|v| cx.depth == 0 && masks.is_none() && v.time_at(frame, doc.stage.fps).is_some()) {
+            out.items.push(DisplayItem {
+                path: Arc::new(Path::rect(0.0, 0.0, v.width as f32, v.height as f32)),
+                transform: layer_xf.mul(&v.transform),
+                fill: None,
+                stroke: None,
+                fill_rule: FillRule::NonZero,
+                color: ColorTransform::alpha(tl.layer_opacity(index)),
+                layer: layer.id,
+                element: v.id,
+                outline: None,
+                clip: None,
+                masks: None,
+                guide: true,
+                group: None,
+                image: None,
+                smooth: true,
+                warp: None,
+            });
+        }
+        let Some((kf_start, elements)) = shown else { continue };
+        // Data bindings (ADR 0118): a table's column in place of a bound instance's property.
+        let elements = doc.bound_elements(elements, frame);
         let lc = LayerCtx { layer, frame, kf_start, clip, masks, guide, outline: layer_outline, xf: layer_xf };
         // A layer below full opacity (its own, or a folder's it is in; ADR 0111) fades as one:
         // its artwork composites in a group, and the group blends at the layer's opacity, so
@@ -767,7 +1077,12 @@ struct LayerCtx<'a> {
     xf: Affine,
 }
 
-fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: &mut DisplayList, play: Option<&Play<'_>>) {
+fn eval_element(doc: &Document, cx: &Ctx<'_>, lc: &LayerCtx<'_>, el: &Element, out: &mut DisplayList, play: Option<&Play<'_>>) {
+    // Every element drawn counts, however deep, and a shape by the size of its outline: see
+    // MAX_EVAL_ELEMENTS.
+    if !cx.work.visit(el) {
+        return;
+    }
     let LayerCtx { layer, frame, kf_start, clip, masks, guide, outline: layer_outline, xf: layer_xf } = *lc;
     // In the player, a symbol instance has its own path, and maybe properties a script set.
     let child = match (&el.kind, play) {
@@ -894,7 +1209,7 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
             }
         }
         ElementKind::Symbol { symbol, loop_mode, first_frame, blend, filters, .. } => {
-            let Some(sym) = doc.symbol(*symbol) else { return };
+            let Some(sym) = cx.work.symbol(doc, *symbol) else { return };
             let len = sym.timeline.frame_count();
             let local = match (sym.kind, &child) {
                 // A graphic keeps step with this timeline: loop mode and first frame apply.
@@ -925,7 +1240,7 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
             };
             // A symbol with 9-slice guides, scaled: its shapes are sliced (ADR 0055).
             let slice = crate::nine_slice::slicing(doc, sym, &el.transform).map(|s| Slicing { post: layer_xf.mul(&s.post), ..s });
-            let inner = Ctx { xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, stage: cx.stage, clip, masks, guide, group, camera: None, slice };
+            let inner = Ctx { work: cx.work, xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, stage: cx.stage, clip, masks, guide, group, camera: None, slice };
             eval_timeline(doc, &sym.timeline, local, &inner, out, child.as_ref());
         }
     }
@@ -971,16 +1286,33 @@ fn field_items(t: &crate::TextBlock, f: &crate::TextField, live: Option<(Option<
                 if from > to || (from == to && !(a <= l.end && b > l.end)) {
                     continue;
                 }
-                let (x0, x1) = (l.x_at(from), if b > l.end { l.x_at(l.end) + t.size * 0.25 } else { l.x_at(to) });
+                // One stretch per direction the selection runs through (ADR 0130).
+                let mut spans = l.spans(from, to);
+                if b > l.end {
+                    // The line break is selected too: a little past where the line ends.
+                    let (x, tail) = (l.x_at(l.end), t.size * 0.25);
+                    match spans.last_mut() {
+                        Some(last) if !l.rtl && (last.1 - x).abs() < 1e-3 => last.1 = x + tail,
+                        _ if l.rtl => spans.push((x - tail, x)),
+                        _ => spans.push((x, x + tail)),
+                    }
+                }
                 let y = row as f32 * look.line_height;
-                let r = Path::rect(crate::FIELD_GUTTER + x0, crate::FIELD_GUTTER + y, (x1 - x0).max(0.0), look.line_height);
-                out.items.push(item(Arc::new(r), text_xf, Some(Paint::Solid(SELECTION)), None, Some(inner), None));
+                for (x0, x1) in spans {
+                    let r = Path::rect(crate::FIELD_GUTTER + x0, crate::FIELD_GUTTER + y, (x1 - x0).max(0.0), look.line_height);
+                    out.items.push(item(Arc::new(r), text_xf, Some(Paint::Solid(SELECTION)), None, Some(inner), None));
+                }
             }
         }
     }
     // The text: laid out by the player when it changed, else the authored outline (a field whose
     // text changed but couldn't be laid out shows none).
     match (state.and_then(|s| s.text.as_ref()), look) {
+        (_, Some(l)) if !l.pieces.is_empty() => {
+            for (color, piece) in l.pieces.iter() {
+                out.items.push(item(piece.clone(), text_xf, Some(Paint::Solid(*color)), None, Some(inner), None));
+            }
+        }
         (_, Some(l)) => out.items.push(item(l.outline.clone(), text_xf, Some(Paint::Solid(t.color)), None, Some(inner), None)),
         (None, None) => text_fills(t, out, |path, color| item(path, text_xf, Some(Paint::Solid(color)), None, Some(inner), None)),
         (Some(_), None) => {}
@@ -1036,7 +1368,7 @@ fn sliced_shape(s: &Shape, own: &Affine, sl: &Slicing) -> (Arc<Path>, Affine, Op
 
 #[cfg(test)]
 #[path = "eval_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "pivot_tests.rs"]

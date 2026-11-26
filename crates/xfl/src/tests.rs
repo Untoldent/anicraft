@@ -287,6 +287,26 @@ fn a_fla_archive_imports_the_same() {
 }
 
 #[test]
+fn folder_import_ignores_backslash_escapes_and_symlinks() {
+    let dir = std::env::temp_dir().join(format!("anicraft-xfl-path-{}", std::process::id()));
+    let pkg = dir.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(dir.join("secret.xml"), DOC).unwrap();
+    // A reference that climbs out with backslashes is not read (here it would be the whole document).
+    std::fs::write(pkg.join("DOMDocument.xml"), "<DOMDocument><symbols><Include href=\"x\\..\\..\\secret.xml\"/></symbols></DOMDocument>").unwrap();
+    let (doc, _) = crate::import_path(&pkg).unwrap();
+    assert_eq!(doc.library.len(), 0);
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(pkg.join("DOMDocument.xml")).unwrap();
+        std::os::unix::fs::symlink(dir.join("secret.xml"), pkg.join("DOMDocument.xml")).unwrap();
+        let e = crate::import_path(&pkg).err().map(|e| e.to_string());
+        assert!(e.is_some_and(|e| e.contains("no DOMDocument.xml")), "a symlink is not package content");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn hostile_packages_fail_cleanly() {
     let mut files = package();
     files.insert("DOMDocument.xml", "<DOMDocument><timelines><DOMTimeline><layers><DOMLayer><frames><DOMFrame index=\"99999999999\" duration=\"-4\"><elements><DOMShape><edges><Edge fillStyle1=\"1\" edges=\"!#FFFFFFFF.FF 1e30|nan 0[\"/></edges></DOMShape></elements></DOMFrame></frames></DOMLayer></layers></DOMTimeline></timelines></DOMDocument>");
@@ -358,13 +378,13 @@ fn bitmaps_come_across_when_their_image_is_png_or_jpeg() {
         ("LIBRARY/Art/photo.png".to_string(), png_2x1()),
         // A .fla may hold only the data file; a PNG or JPEG there is used as it is.
         ("bin/M 2 2.dat".to_string(), png_2x1()),
-        // Animate's own encoding is not public: reported, not guessed.
-        ("bin/M 3 3.dat".to_string(), vec![3, 5, 0, 0, 1, 2, 3]),
+        // Animate's own layout in a pixel format not yet seen: reported, not guessed.
+        ("bin/M 3 3.dat".to_string(), [3u8, 3].into_iter().chain([0u8; 24]).collect()),
     ]);
     let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
     let (doc, report) = import_with(&read).unwrap();
     assert_eq!(doc.bitmaps.iter().map(|b| (b.name.as_str(), b.width, b.height)).collect::<Vec<_>>(), [("photo.png", 2, 1), ("packed.png", 2, 1)]);
-    assert_eq!(report.skipped.get("bitmaps stored in Animate's own format"), Some(&1));
+    assert_eq!(report.names.get("bitmaps in Animate's own format AniCraft can't decode"), Some(&vec!["private.jpg: bitmap pixel format 3, which AniCraft doesn't read yet".to_string()]));
     assert_eq!(report.skipped.get("missing bitmap files"), Some(&1));
     assert_eq!(report.skipped.get("instances of missing bitmaps"), Some(&1));
     assert_eq!(report.skipped.get("bitmap fills of missing bitmaps"), Some(&1));
@@ -432,6 +452,44 @@ fn shape_hints_come_across_in_either_form() {
         let hit = it.path.cmds.iter().any(|c| matches!(*c, PathCmd::MoveTo(a) | PathCmd::CubicTo(_, _, a) if it.transform.apply(a).distance(want) < 0.05));
         assert!(hit, "{want:?} {:?}", it.path.cmds);
     }
+}
+
+#[test]
+fn shape_hints_come_across_as_animate_writes_them() {
+    // `morphHintsList` on the start keyframe, both points per record, in units of 256 twips:
+    // (0, 0) and (300, 50) px, the end as hex fixed point and decimal. The list inside
+    // `MorphShape` is not the artist's and is left alone.
+    let hint = r##"<MorphHint startPoint="0, #0" endPoint="#17.70, 3.90625" key="0"/>"##;
+    let doc = hinted_doc(&format!("<MorphShape><morphHintsList>{hint}{hint}</morphHintsList></MorphShape><morphHintsList>{hint}</morphHintsList>"), "");
+    let (d, report) = import(&HashMap::from([("DOMDocument.xml", doc)])).unwrap();
+    assert!(report.skipped.keys().all(|s| !s.contains("hint")), "{:?}", report.skipped);
+    let l = &d.timeline(0).layers[0];
+    let k = &l.keyframes[0];
+    assert_eq!(k.hints.len(), 1);
+    assert!(k.hints[0].start.distance(anicraft_geom::Vec2::new(0.0, 0.0)) < 1e-3, "{:?}", k.hints[0]);
+    assert!(k.hints[0].end.distance(anicraft_geom::Vec2::new(300.0, 50.0)) < 1e-3, "{:?}", k.hints[0]);
+    assert!(anicraft_doc::placed_on(&k.elements, k.hints[0].start).is_some());
+    assert!(anicraft_doc::placed_on(&l.keyframes[1].elements, k.hints[0].end).is_some());
+    // Either spelling gives the same hints.
+    let native = hinted_doc(r#"<shapeHints><ShapeHint startPoint="0, 0" endPoint="300, 50"/></shapeHints>"#, "");
+    let (n, _) = import(&HashMap::from([("DOMDocument.xml", native)])).unwrap();
+    assert_eq!(n.timeline(0).layers[0].keyframes[0].hints, k.hints);
+}
+
+#[test]
+fn odd_morph_hints_are_reported_not_fatal() {
+    let many: String = (0..30).map(|_| r##"<MorphHint startPoint="0, 0" endPoint="#F.A0, 0"/>"##).collect();
+    let odd = r##"<MorphHint/><MorphHint startPoint="#zz, 1"/><MorphHint startPoint="1e39, 0"/><MorphHint startPoint="#7FFFFFFF.FF, #80000000" endPoint="#F.A0, 0"/>"##;
+    let doc = hinted_doc(&format!("<morphHintsList>{odd}{many}<Other startPoint=\"0, 0\"/></morphHintsList>"), "");
+    let (d, report) = import(&HashMap::from([("DOMDocument.xml", doc)])).unwrap();
+    assert_eq!(d.timeline(0).layers[0].keyframes[0].hints.len(), 26);
+    assert!(report.skipped.contains_key("shape hints past z"), "{:?}", report.skipped);
+    assert!(report.skipped.contains_key("shape hints without a position"));
+    // No end point, and no hints on the end keyframe to take one from.
+    let doc = hinted_doc(r#"<morphHintsList><MorphHint startPoint="0, 0" endPoint="0"/></morphHintsList>"#, "");
+    let (d, report) = import(&HashMap::from([("DOMDocument.xml", doc)])).unwrap();
+    assert!(d.timeline(0).layers[0].keyframes[0].hints.is_empty());
+    assert!(report.skipped.contains_key("shape hints missing on the end keyframe"));
 }
 
 #[test]
@@ -637,6 +695,10 @@ fn stroke_caps_joints_dashes_and_dots_come_across() {
     assert_eq!(read(r#"<SolidStroke caps="square" joints="bevel" miterLimit="1e9"/>"#).0.style, StrokeStyle { cap: Cap::Square, join: Join::Bevel, miter_limit: 100.0, dash: None });
     let (dashed, _) = read(r#"<DashedStroke weight="2" dash1="8" dash2="2.5" caps="square"/>"#);
     assert_eq!(dashed.style, StrokeStyle { cap: Cap::Square, dash: Dash::dashed(8.0, 2.5), ..StrokeStyle::default() });
+    // Animate's defaults are a 6 px dash and a 6 px gap, each written only when it differs.
+    assert_eq!(read(r#"<DashedStroke weight="2"/>"#).0.style.dash, Dash::dashed(6.0, 6.0));
+    assert_eq!(read(r#"<DashedStroke weight="9" dash2="9"/>"#).0.style.dash, Dash::dashed(6.0, 9.0));
+    assert_eq!(read(r#"<DashedStroke dash1="10"/>"#).0.style.dash, Dash::dashed(10.0, 6.0));
     // No gap draws solid.
     assert_eq!(read(r#"<DashedStroke dash1="8" dash2="0"/>"#).0.style.dash, None);
     assert_eq!(read(r#"<DottedStroke weight="3" dotSpace="5"/>"#).0.style.dash, Dash::dotted(5.0));
@@ -833,4 +895,317 @@ fn grouped_instance_is_not_scaled_twice() {
     // The groups keep their own matrices for editing.
     assert_eq!(els[0].transform.m, [0.5, 0.0, 0.0, 0.5, 50.0, 50.0]);
     assert_eq!(outer.transform.m, [1.0, 0.0, 0.0, 1.0, 10.0, 20.0]);
+}
+
+#[test]
+fn folder_packages_refuse_backslash_paths_that_leave_the_package() {
+    let dir = std::env::temp_dir().join(format!("anicraft-xfl-escape-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("LIBRARY")).unwrap();
+    std::fs::write(dir.join("DOMDocument.xml"), r#"<DOMDocument><symbols><Include href="..\Ball.xml"/></symbols></DOMDocument>"#).unwrap();
+    // On Windows this lands outside LIBRARY; elsewhere it is a file named `..\Ball.xml`.
+    std::fs::write(dir.join("LIBRARY/..\\Ball.xml"), BALL).unwrap();
+    let (doc, report) = crate::import_path(&dir).unwrap();
+    assert!(doc.library.is_empty(), "the escaping path was read");
+    assert_eq!(report.skipped.get("missing library files"), Some(&1));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn folder_import_enforces_full_path_boundaries() {
+    let dir = std::env::temp_dir().join(format!("anicraft-xfl-bounds-{}", std::process::id()));
+    let outside = dir.join("outside");
+    let pkg = dir.join("pkg");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(pkg.join("LIBRARY")).unwrap();
+    std::fs::write(outside.join("Escape.xml"), BALL).unwrap();
+    std::fs::write(pkg.join("LIBRARY/Real.xml"), BALL.replace("name=\"Ball\"", "name=\"Real\"")).unwrap();
+    std::fs::write(
+        pkg.join("DOMDocument.xml"),
+        r#"<DOMDocument><symbols>
+          <Include href="../outside/Escape.xml"/>
+          <Include href="..\outside\Escape.xml"/>
+          <Include href="./Real.xml"/>
+          <Include href="C:Escape.xml"/>
+          <Include href="/Escape.xml"/>
+          <Include href="Real.xml"/>
+        </symbols></DOMDocument>"#,
+    )
+    .unwrap();
+    let (doc, report) = crate::import_path(&pkg).unwrap();
+    assert_eq!(doc.library.len(), 1, "only Real.xml inside LIBRARY is imported");
+    assert_eq!(report.skipped.get("missing library files"), Some(&5));
+
+    #[cfg(unix)]
+    {
+        let dir2 = std::env::temp_dir().join(format!("anicraft-xfl-dirsym-{}", std::process::id()));
+        let ext = dir2.join("ext");
+        let pkg2 = dir2.join("pkg");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::create_dir_all(&pkg2).unwrap();
+        std::fs::write(ext.join("Ball.xml"), BALL).unwrap();
+        std::os::unix::fs::symlink(&ext, pkg2.join("LIBRARY")).unwrap();
+        std::fs::write(pkg2.join("DOMDocument.xml"), r#"<DOMDocument><symbols><Include href="Ball.xml"/></symbols></DOMDocument>"#).unwrap();
+        let (doc2, report2) = crate::import_path(&pkg2).unwrap();
+        assert!(doc2.library.is_empty(), "intermediate directory symlink must not be traversed");
+        assert_eq!(report2.skipped.get("missing library files"), Some(&1));
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn bitmap_import_enforces_aggregate_pixel_budget() {
+    assert_eq!(crate::import::MAX_BITMAP_PIXELS, 256 * 1024 * 1024);
+    let doc_xml = r#"<DOMDocument><media>
+      <DOMBitmapItem name="a.png" href="a.png"/>
+      <DOMBitmapItem name="b.png" href="b.png"/>
+      <DOMBitmapItem name="c.png" href="c.png"/>
+    </media></DOMDocument>"#;
+    let files: HashMap<String, Vec<u8>> = HashMap::from([
+        ("DOMDocument.xml".to_string(), doc_xml.as_bytes().to_vec()),
+        ("LIBRARY/a.png".to_string(), png_2x1()),
+        ("LIBRARY/b.png".to_string(), png_2x1()),
+        ("LIBRARY/c.png".to_string(), png_2x1()),
+    ]);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = crate::import::import_with_bitmap_budget(&read, 4).unwrap();
+    assert_eq!(doc.bitmaps.len(), 2, "two 2x1 bitmaps fit in the 4-pixel budget");
+    assert_eq!(report.skipped.get("bitmaps past the import pixel budget"), Some(&1));
+}
+
+#[test]
+fn valid_long_bitmap_sequence_imports_under_budget() {
+    let count = 200usize;
+    let mut media = String::new();
+    let mut frames = String::new();
+    let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+    let img = png_2x1();
+    for i in 0..count {
+        let name = format!("seq/frame_{i:04}.png");
+        media.push_str(&format!(r#"<DOMBitmapItem name="{name}" href="{name}"/>"#));
+        frames.push_str(&format!(r#"<DOMFrame index="{i}"><elements><DOMBitmapInstance libraryItemName="{name}"/></elements></DOMFrame>"#));
+        files.insert(format!("LIBRARY/{name}"), img.clone());
+    }
+    let doc_xml = format!(
+        r#"<DOMDocument><media>{media}</media><timelines><DOMTimeline name="Scene 1"><layers><DOMLayer name="Seq"><frames>{frames}</frames></DOMLayer></layers></DOMTimeline></timelines></DOMDocument>"#
+    );
+    files.insert("DOMDocument.xml".to_string(), doc_xml.into_bytes());
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = import_with(&read).unwrap();
+    assert_eq!(doc.bitmaps.len(), count, "all {count} sequence bitmaps fit within the 256 MP budget");
+    assert_eq!(doc.timeline(0).layers[0].keyframes.len(), count);
+    assert!(!report.skipped.contains_key("bitmaps past the import pixel budget"));
+}
+
+/// A bitmap in Animate's own data layout (`anicraft_flamedia`), written from its grammar:
+/// premultiplied A,R,G,B rows in zlib chunks.
+fn animate_bitmap(width: u16, height: u16, argb: &[u8]) -> Vec<u8> {
+    let mut out = vec![3, 5];
+    for v in [width * 4, width, height] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for twips in [0i32, i32::from(width) * 20, 0, i32::from(height) * 20] {
+        out.extend_from_slice(&twips.to_le_bytes());
+    }
+    out.extend_from_slice(&[1, 1]);
+    for part in miniz_oxide::deflate::compress_to_vec_zlib(argb, 6).chunks(3) {
+        out.extend_from_slice(&(part.len() as u16).to_le_bytes());
+        out.extend_from_slice(part);
+    }
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+const OWN_MEDIA_DOC: &str = r##"<DOMDocument width="200" height="100">
+  <media>
+    <DOMBitmapItem name="Copyright/badge.png" href="Copyright/badge.png" bitmapDataHRef="M 4 4.dat" frameRight="40" frameBottom="20"/>
+    <DOMBitmapItem name="cut.png" href="cut.png" bitmapDataHRef="M 5 5.dat"/>
+    <DOMSoundItem name="Audio/blip" href="Audio/blip.wav" soundDataHRef="M 6 6.dat" format="44kHz 16bit Stereo" sampleCount="3" dataLength="12"/>
+    <DOMSoundItem name="Audio/hum" href="Audio/hum.wav" soundDataHRef="M 7 7.dat" format="22kHz 16bit Mono" sampleCount="4"/>
+    <DOMSoundItem name="Audio/eight" soundDataHRef="M 8 8.dat" format="44kHz 8bit Mono" sampleCount="4"/>
+    <DOMSoundItem name="Audio/other" soundDataHRef="M 9 9.dat" format="44kHz 16bit Mono" sampleCount="400"/>
+  </media>
+  <timelines><DOMTimeline name="Scene 1"><layers>
+    <DOMLayer name="Sound"><frames><DOMFrame index="0" duration="4" soundName="Audio/blip" soundSync="stream"/></frames></DOMLayer>
+    <DOMLayer name="Art"><frames><DOMFrame index="0" duration="4"><elements><DOMBitmapInstance libraryItemName="Copyright/badge.png"/></elements></DOMFrame></frames></DOMLayer>
+  </layers></DOMTimeline></timelines>
+</DOMDocument>"##;
+
+#[test]
+fn bitmaps_and_sounds_in_animates_own_data_layout_come_across() {
+    // Opaque red, half-transparent blue (premultiplied), clear, opaque near-black.
+    let argb = [255, 255, 0, 0, 128, 0, 0, 128, 0, 0, 0, 0, 255, 0x23, 0x1f, 0x20];
+    let badge = animate_bitmap(2, 2, &argb);
+    let pcm = |s: &[i16]| -> Vec<u8> { s.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let files: HashMap<String, Vec<u8>> = HashMap::from([
+        ("DOMDocument.xml".to_string(), OWN_MEDIA_DOC.as_bytes().to_vec()),
+        ("bin/M 4 4.dat".to_string(), badge.clone()),
+        ("bin/M 5 5.dat".to_string(), badge[..badge.len() - 3].to_vec()),
+        ("bin/M 6 6.dat".to_string(), pcm(&[0, 16_384, -16_384, 0, 32_767, -32_768])),
+        ("bin/M 7 7.dat".to_string(), pcm(&[1, 2, 3, 4])),
+        ("bin/M 8 8.dat".to_string(), vec![128, 129, 130, 131]),
+        ("bin/M 9 9.dat".to_string(), vec![1, 2, 3, 4, 5, 6, 7, 8]),
+    ]);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = import_with(&read).unwrap();
+
+    assert_eq!(doc.bitmaps.iter().map(|b| (b.name.as_str(), b.width, b.height)).collect::<Vec<_>>(), [("badge.png", 2, 2)]);
+    let px = doc.bitmaps[0].pixels().unwrap();
+    assert_eq!(px.rgba, [255, 0, 0, 255, 0, 0, 255, 128, 0, 0, 0, 0, 0x23, 0x1f, 0x20, 255], "straight alpha, A,R,G,B order");
+    let path = doc.entry_path(anicraft_doc::LibraryEntry::Item(anicraft_doc::LibraryItem::Bitmap(doc.bitmaps[0].id)));
+    assert_eq!(path, "Copyright/badge.png");
+    assert_eq!(doc.timeline(0).layers[1].keyframes[0].elements.len(), 1, "its instance is placed");
+    assert_eq!(report.names.get("bitmaps in Animate's own format AniCraft can't decode"), Some(&vec!["cut.png: the data is cut short".to_string()]));
+
+    let sounds: Vec<_> = doc.sounds.iter().map(|s| (s.name.as_str(), s.format, s.rate, s.channels, s.frames)).collect();
+    use anicraft_doc::SoundFormat::Wav;
+    assert_eq!(sounds, [("blip", Wav, 44_100, 2, 3), ("hum", Wav, 22_050, 1, 4)]);
+    let blip = doc.sounds[0].decoded().unwrap();
+    assert_eq!(blip.pcm.samples, [0.0, 0.5, -0.5, 0.0, 32_767.0 / 32_768.0, -1.0], "left, right interleaved, bit for bit");
+    assert_eq!(doc.timeline(0).layers[0].keyframes[0].sound.as_ref().map(|s| s.sound), Some(doc.sounds[0].id));
+    assert_eq!(
+        report.names.get("sounds in formats AniCraft can't decode"),
+        Some(&vec!["Audio/eight: Animate's own sound data (8-bit sound data, which AniCraft doesn't read yet)".to_string(), "Audio/other: Animate's own sound data".to_string()])
+    );
+}
+
+#[test]
+fn bitmaps_in_animates_own_data_share_one_pixel_budget() {
+    let doc = r##"<DOMDocument width="200" height="100">
+  <media>
+    <DOMBitmapItem name="cut.png" bitmapDataHRef="M 1 1.dat"/>
+    <DOMBitmapItem name="first.png" bitmapDataHRef="M 2 2.dat"/>
+    <DOMBitmapItem name="second.png" bitmapDataHRef="M 3 3.dat"/>
+    <DOMBitmapItem name="junk.png" bitmapDataHRef="M 4 4.dat"/>
+    <DOMBitmapItem name="dot.png" bitmapDataHRef="M 5 5.dat"/>
+  </media>
+</DOMDocument>"##;
+    let square = animate_bitmap(2, 2, &[255; 16]);
+    // A bitmap header whose pixels are not zlib at all: it would be reported as damaged if it
+    // were inflated.
+    let junk: Vec<u8> = square[..26].iter().copied().chain([3, 0, 1, 2, 3, 0, 0]).collect();
+    let files: HashMap<String, Vec<u8>> = HashMap::from([
+        ("DOMDocument.xml".to_string(), doc.as_bytes().to_vec()),
+        ("bin/M 1 1.dat".to_string(), square[..square.len() - 3].to_vec()),
+        ("bin/M 2 2.dat".to_string(), square.clone()),
+        ("bin/M 3 3.dat".to_string(), square.clone()),
+        ("bin/M 4 4.dat".to_string(), junk),
+        ("bin/M 5 5.dat".to_string(), animate_bitmap(1, 1, &[255, 1, 2, 3])),
+    ]);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    const OVER: &str = "bitmaps past the import pixel budget";
+    const BAD: &str = "bitmaps in Animate's own format AniCraft can't decode";
+
+    // Room for one 2 x 2 image (4 pixels) and one 1 x 1. The cut one fails and costs
+    // nothing; the second square and the junk are refused from their headers, never inflated;
+    // the dot after them still fits.
+    let (doc, report) = crate::import::import_with_bitmap_budget(&read, 5).unwrap();
+    assert_eq!(doc.bitmaps.iter().map(|b| (b.name.as_str(), b.width, b.height)).collect::<Vec<_>>(), [("first.png", 2, 2), ("dot.png", 1, 1)]);
+    assert_eq!(report.names.get(OVER), Some(&vec!["second.png: 2 × 2 px".to_string(), "junk.png: 2 × 2 px".to_string()]));
+    assert_eq!(report.skipped.get(OVER), Some(&2));
+    assert_eq!(report.names.get(BAD), Some(&vec!["cut.png: the data is cut short".to_string()]));
+
+    // With the full budget all three good ones come across, and the junk is damaged: so above,
+    // it was left out unread.
+    let (doc, report) = import_with(&read).unwrap();
+    assert_eq!(doc.bitmaps.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["first.png", "second.png", "dot.png"]);
+    assert_eq!(report.skipped.get(OVER), None);
+    assert_eq!(
+        report.names.get(BAD),
+        Some(&vec!["cut.png: the data is cut short".to_string(), "junk.png: damaged data: the pixel data doesn't inflate".to_string()])
+    );
+}
+
+#[test]
+fn a_wav_or_ogg_or_mp3_data_file_of_the_raw_pcm_length_is_read_as_that_file() {
+    // 100 frames of 8 kHz mono WAV, whose length is also a whole number of frames of the item's
+    // own 44.1 kHz stereo raw PCM, and the item's sampleCount says that many.
+    let wav = anicraft_doc::audio::wav::encode(8000, 1, &[0.25; 100], anicraft_doc::audio::wav::Bits::Int16);
+    assert_eq!(wav.len() % 4, 0);
+    let doc = format!(
+        r#"<DOMDocument width="200" height="100"><media><DOMSoundItem name="tone" soundDataHRef="M 1 1.dat" format="44kHz 16bit Stereo" sampleCount="{}"/></media></DOMDocument>"#,
+        wav.len() / 4
+    );
+    let files: HashMap<String, Vec<u8>> = HashMap::from([("DOMDocument.xml".to_string(), doc.as_bytes().to_vec()), ("bin/M 1 1.dat".to_string(), wav)]);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = import_with(&read).unwrap();
+    let sounds: Vec<_> = doc.sounds.iter().map(|s| (s.name.as_str(), s.format, s.rate, s.channels, s.frames)).collect();
+    assert_eq!(sounds, [("tone", anicraft_doc::SoundFormat::Wav, 8_000, 1, 100)], "the WAV itself, not its bytes as PCM");
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_damaged_wav_of_the_raw_pcm_length_stays_raw_pcm() {
+    // An 8 kHz mono WAV of four samples whose data chunk claims 1,000,000 bytes: its decoder
+    // would read the four (it forgives the overstated length), but the file isn't whole, so it
+    // is the item's 44.1 kHz PCM, a sample for every two bytes.
+    let mut wav = anicraft_doc::audio::wav::encode(8000, 1, &[0.25; 4], anicraft_doc::audio::wav::Bits::Int16);
+    let samples = wav.len() / 2;
+    let data_at = wav.windows(4).position(|w| w == b"data").unwrap() + 4;
+    wav[data_at..data_at + 4].copy_from_slice(&1_000_000u32.to_le_bytes());
+    assert!(anicraft_doc::Sound::from_data(anicraft_doc::SoundId(0), "w", wav.clone()).is_ok(), "the decoder forgives it");
+    let doc = format!(r#"<DOMDocument width="200" height="100"><media><DOMSoundItem name="tone" soundDataHRef="M 1 1.dat" format="44kHz 16bit Mono" sampleCount="{samples}"/></media></DOMDocument>"#);
+    let files: HashMap<String, Vec<u8>> = HashMap::from([("DOMDocument.xml".to_string(), doc.into_bytes()), ("bin/M 1 1.dat".to_string(), wav)]);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = import_with(&read).unwrap();
+    let sounds: Vec<_> = doc.sounds.iter().map(|s| (s.format, s.rate, s.channels, s.frames)).collect();
+    assert_eq!(sounds, [(anicraft_doc::SoundFormat::Wav, 44_100, 1, samples as u64)], "the item's PCM, not the cut-short WAV");
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn only_whole_containers_win_over_raw_pcm() {
+    use crate::import::complete_container;
+    use anicraft_doc::audio::Format;
+    let whole = anicraft_doc::audio::wav::encode(8000, 1, &[0.25; 4], anicraft_doc::audio::wav::Bits::Int16);
+    assert!(complete_container(&whole, Format::Wav));
+    assert!(!complete_container(&whole[..whole.len() - 1], Format::Wav), "cut short");
+    let mut no_data = whole.clone();
+    let at = no_data.windows(4).position(|w| w == b"data").unwrap();
+    no_data[at..at + 4].copy_from_slice(b"junk");
+    assert!(!complete_container(&no_data, Format::Wav), "no data chunk");
+    let mut riff_over = whole.clone();
+    riff_over[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(!complete_container(&riff_over, Format::Wav), "a RIFF size past the file");
+    // Ogg pages (header, lacing, body), the container only: whole when they run exactly to the
+    // end and the last one ends the stream.
+    let page = |flags: u8, body: &[u8]| -> Vec<u8> {
+        let mut p = b"OggS".to_vec();
+        p.extend_from_slice(&[0, flags]);
+        p.extend_from_slice(&[0; 20]);
+        p.push(1);
+        p.push(body.len() as u8);
+        p.extend_from_slice(body);
+        p
+    };
+    let stream = [page(0x02, b"head"), page(0x04, b"tail")].concat();
+    assert!(complete_container(&stream, Format::Vorbis));
+    assert!(!complete_container(&stream[..stream.len() - 1], Format::Vorbis), "cut short");
+    assert!(!complete_container(&[page(0x02, b"head"), page(0x00, b"more")].concat(), Format::Vorbis), "never ends the stream");
+    assert!(!complete_container(&[stream.clone(), b"xx".to_vec()].concat(), Format::Vorbis), "bytes after the last page");
+}
+
+#[test]
+fn raw_pcm_that_starts_like_a_sound_file_stays_raw_pcm() {
+    // Raw PCM whose first samples spell a WAV, Ogg, ID3 or MPEG frame signature: the decoders
+    // don't read it as such a file, so it is the item's PCM.
+    let heads: [&[u8]; 4] = [b"RIFF\x24\0\0\0WAVEfmt ", b"OggS\0\x02\0\0\0\0\0\0\0\0\0\0", b"ID3\x04\0\0\0\0\0\0\0\0\0\0\0\0", &[0xFF, 0xFB, 0x90, 0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+    let mut media = String::new();
+    let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+    for (n, head) in heads.iter().enumerate() {
+        assert!(anicraft_doc::audio::Format::sniff(head).is_some(), "{head:?} starts like a sound file");
+        media.push_str(&format!(r#"<DOMSoundItem name="s{n}" soundDataHRef="M {n} {n}.dat" format="44kHz 16bit Mono" sampleCount="8"/>"#));
+        files.insert(format!("bin/M {n} {n}.dat"), head.to_vec());
+    }
+    let doc = format!(r#"<DOMDocument width="200" height="100"><media>{media}</media></DOMDocument>"#);
+    files.insert("DOMDocument.xml".to_string(), doc.into_bytes());
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+    let (doc, report) = import_with(&read).unwrap();
+    assert!(report.skipped.is_empty(), "{:?}", report.names);
+    assert_eq!(doc.sounds.len(), heads.len());
+    for (sound, head) in doc.sounds.iter().zip(heads) {
+        assert_eq!((sound.format, sound.rate, sound.channels, sound.frames), (anicraft_doc::SoundFormat::Wav, 44_100, 1, 8), "{}", sound.name);
+        let want: Vec<f32> = head.as_chunks::<2>().0.iter().map(|s| f32::from(i16::from_le_bytes(*s)) / 32_768.0).collect();
+        assert_eq!(sound.decoded().unwrap().pcm.samples, want, "{}: bit for bit", sound.name);
+    }
 }

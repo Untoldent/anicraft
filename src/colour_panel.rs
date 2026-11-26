@@ -16,7 +16,7 @@ use crate::app::App;
 use crate::theme::{T, Type, text, to_color32, with_type};
 use anicraft_engine::ArrayPropertyStop;
 use anicraft_engine::doc::{ElementKind, GradientStop, MAX_FOCAL, MAX_GRADIENT_STOPS, Paint, Rgba, Spread, ramp_at};
-use egui::{Id, Key, Rect, Response, Sense, Stroke, StrokeKind, WidgetType, pos2, vec2};
+use egui::{Id, Key, Rect, Response, Sense, Stroke, StrokeKind, Role, pos2, vec2};
 use serde_json::{Value, json};
 
 /// How far (screen points) a stop dragged off the bar must go to be removed.
@@ -24,7 +24,7 @@ const TEAR_OFF: f32 = 26.0;
 /// The stop bar's width: the colour picker's swatch grid under it.
 const BAR_WIDTH: f32 = 270.0;
 
-fn focused_stop_id() -> Id { Id::new("focused_stop_handle") }
+fn focused_stop_id() -> Id { Id::unique("focused_stop_handle") }
 
 pub(crate) fn stop_has_focus(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<Id>(focused_stop_id())).is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
@@ -78,8 +78,7 @@ pub fn apply_set(app: &mut App, edit: &FillEdit, selection: bool) {
 
 /// `#rrggbb`, or `#rrggbbaa` when not opaque.
 fn hex(c: Rgba) -> String {
-    let c = c.sanitized();
-    if c.a >= 1.0 { c.to_hex() } else { format!("{}{:02x}", c.to_hex(), (c.a * 255.0).round() as u8) }
+    c.to_hex_alpha()
 }
 
 fn stops_json(stops: &[GradientStop]) -> Value {
@@ -135,7 +134,7 @@ fn paint_preview(p: &egui::Painter, r: Rect, paint: Option<&Paint>) {
 pub fn swatch(ui: &mut egui::Ui, paint: Option<&Paint>, bitmaps: &[(u64, String)]) -> (Response, Option<FillEdit>) {
     let size = ui.spacing().interact_size;
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::new(WidgetType::ColorButton));
+    resp.widget_info(|| egui::WidgetInfo::new(Role::ColorWell));
     let popup = resp.id.with("colour_popup");
     let open = egui::Popup::is_id_open(ui.ctx(), popup);
     if ui.is_rect_visible(rect) {
@@ -157,12 +156,10 @@ pub fn popup_for(ui: &egui::Ui, anchor: &Response, popup: Id, paint: Option<&Pai
     }
     let mut edit = None;
     // A click on the stage while this is open picks a colour there (the picker's eyedropper).
-    let shown = egui::Popup::menu(anchor).id(popup).close_behavior(crate::colour::close_behavior(ui.ctx())).show(|ui| {
+    egui::Popup::menu(anchor).id(popup).close_behavior(crate::colour::close_behavior(ui.ctx())).show(|ui| {
+        crate::colour::name_popup(ui, tr!("Fill colour picker"));
         edit = fill_picker(ui, popup, paint, bitmaps);
     });
-    if let Some(r) = shown {
-        crate::colour::name_popup(&r.response, tr!("Fill colour picker"));
-    }
     edit
 }
 
@@ -221,7 +218,7 @@ pub fn fill_picker(ui: &mut egui::Ui, popup: Id, paint: Option<&Paint>, bitmaps:
         }
         Some(Paint::Solid(c)) => {
             let mut px = bytes(*c);
-            crate::colour::picker(ui, popup, &mut px, true, None).then_some(FillEdit::Solid(px))
+            crate::colour::picker(ui, popup, &mut px, true, None, true).then_some(FillEdit::Solid(px))
         }
         Some(Paint::Linear { stops, spread, linear_rgb, .. }) => gradient(ui, popup, stops, *spread, *linear_rgb, None),
         Some(Paint::Radial { stops, spread, linear_rgb, focal, .. }) => gradient(ui, popup, stops, *spread, *linear_rgb, Some(*focal)),
@@ -269,7 +266,7 @@ fn gradient_swatches(ui: &mut egui::Ui, paint: Option<&Paint>) -> Option<FillEdi
                 let edge = if on { Stroke::new(2.0, T.accent) } else if resp.hovered() { Stroke::new(1.5, T.selection) } else { Stroke::new(1.0, T.border) };
                 ui.painter().rect_stroke(r, 0.0, edge, StrokeKind::Outside);
                 let name = crate::swatches_panel::describe(&sw.paint, &sw.name);
-                a11y::control(ui, &resp, WidgetType::Button, &tr!("Gradient swatch: {name}", name = name.as_str()), Some(on));
+                a11y::control(ui, &resp, Role::Button, &tr!("Gradient swatch: {name}", name = name.as_str()), Some(on));
                 if resp.on_hover_text(name).clicked() {
                     out = Some(FillEdit::Set { label: tr_noop!("Fill"), live: false, params: crate::swatches_panel::fill_params(&sw.paint) });
                 }
@@ -423,7 +420,7 @@ fn remove_stop(stops: &mut Vec<impl TrackStop>, i: usize) -> bool {
 fn stop_bar(ui: &mut egui::Ui, popup: Id, stops: &mut Vec<GradientStop>) -> Option<(&'static str, bool)> {
     stop_bar_with(ui, popup, stops, None, |ui, sel, st| {
         let mut px = bytes(st.color);
-        if crate::colour::picker(ui, popup.with(("stop", sel)), &mut px, true, None) {
+        if crate::colour::picker(ui, popup.with(("stop", sel)), &mut px, true, None, false) {
             st.color = from_bytes(px);
             true
         } else {
@@ -456,7 +453,7 @@ fn stop_bar_with<S: TrackStop>(
     let can_remove = stops.len() > 2;
     let w = if array { (ui.available_width() - 6.0).clamp(1.0, BAR_WIDTH) } else { BAR_WIDTH };
     let (strip, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click());
-    a11y::control(ui, &resp, WidgetType::Button, if array { tr!("Array: add a property stop") } else { tr!("Gradient: add a colour stop") }, None);
+    a11y::control(ui, &resp, Role::Button, if array { tr!("Array: add a property stop") } else { tr!("Gradient: add a colour stop") }, None);
     let resp = resp.on_hover_text(if array { tr!("Click to add a property stop. Drag a stop to move it, or off the track to remove it. With a stop focused, the arrow keys move it and Delete removes it.") } else { tr!("Click to add a colour stop. Drag a stop to move it, or off the bar to remove it. With a stop focused, the arrow keys move it and Delete removes it.") });
     let p = ui.painter();
     if array {
@@ -479,7 +476,7 @@ fn stop_bar_with<S: TrackStop>(
         let at = format!("{:.0}", off * 100.0);
         let alpha = format!("{:.0}", st.alpha() * 100.0);
         let accessible_name = if array { tr!("Array stop {stop} of {count} at {at}%, alpha {alpha}%", stop = i + 1, count = count, at = at, alpha = alpha) } else { tr!("Colour stop {stop} of {count} at {at}%, alpha {alpha}%", stop = i + 1, count = count, at = at, alpha = alpha) };
-        a11y::control(ui, &r, WidgetType::Button, &accessible_name, Some(i == sel));
+        a11y::control(ui, &r, Role::Button, &accessible_name, Some(i == sel));
         if r.clicked() || r.drag_started() || r.gained_focus() {
             sel = i;
         }
@@ -708,7 +705,7 @@ mod tests {
     #[test]
     fn property_track_copies_all_values_and_keeps_a_dragged_stop_through_reordering() {
         let ctx = egui::Context::default();
-        let id = Id::new("property_stop_test");
+        let id = Id::unique("property_stop_test");
         let mut stops = vec![PropertyStop::new(0, 0.0, 0.75), PropertyStop::new(1, 0.7, 1.0), PropertyStop::new(2, 1.0, 0.03)];
         stops[1].value.scale = [1.7, 0.3];
         stops[1].value.rotation = 700.0;
@@ -740,7 +737,7 @@ mod tests {
     #[test]
     fn gradient_track_keeps_colours_and_neighbour_limits_during_drag_and_tear_off() {
         let ctx = egui::Context::default();
-        let id = Id::new("gradient_stop_test");
+        let id = Id::unique("gradient_stop_test");
         let mut stops = vec![stop(0.0, 0xff0000), stop(0.4, 0x00ff00), stop(0.7, 0x0000ff), stop(1.0, 0xffffff)];
         track_frame(&ctx, id, &mut stops, vec![]);
         let at = marker(&ctx, id, 1).rect.center();
@@ -801,7 +798,7 @@ mod tests {
     fn picker_once(paint: Option<&Paint>, bitmaps: &[(u64, String)]) -> Option<FillEdit> {
         let ctx = egui::Context::default();
         let mut edit = Some(FillEdit::None(false));
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| edit = fill_picker(ui, Id::new("test_fill"), paint, bitmaps));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| edit = fill_picker(ui, Id::unique("test_fill"), paint, bitmaps));
         out.textures_delta.clear();
         edit
     }

@@ -536,7 +536,7 @@ pub(crate) fn input(app: &mut App, ui: &mut Ui, canvas: Rect, to_screen: Option<
     }
     let to_stage = to_screen.inverse()?;
     // egui hits rectangles; resolve the actual circles and segment at the original press.
-    let response = ui.interact(canvas, Id::new("array_stage_gizmo"), Sense::drag());
+    let response = ui.interact(canvas, Id::unique("array_stage_gizmo"), Sense::drag());
     if response.drag_started_by(PointerButton::Primary)
         && let Some(press) = ui.input(|i| i.pointer.press_origin())
         && let Some(grip) = overlay.hit(press)
