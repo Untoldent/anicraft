@@ -479,8 +479,18 @@ impl Session {
         Ok(())
     }
 
+    pub(super) fn require_spatial_array_frame(&self) -> Result<()> {
+        if self.active_layer().and_then(|layer| layer.keyframe_at(self.frame))
+            .is_some_and(|key| key.motion.is_some() && self.frame > key.start)
+        {
+            return Err(EngineError::State("Move the playhead to the start of the Motion Tween or outside it to create a Spatial Array.".into()));
+        }
+        Ok(())
+    }
+
     /// Start a preview from the original artwork. Reuse the instances for position-only edits.
     pub fn preview_array(&mut self, params: &Value) -> Result<()> {
+        self.require_spatial_array_frame()?;
         let shared = if let Some(mut object) = params.as_object().filter(|p| p.contains_key("create_unique_symbols")).cloned() {
             opt_bool(params, "create_unique_symbols")?;
             object.remove("create_unique_symbols");
@@ -1109,6 +1119,7 @@ fn unique_symbol_names(doc: &Document, id: SymbolId, count: u32) -> Result<Vec<S
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
+    s.require_spatial_array_frame()?;
     let create_unique = opt_bool(p, "create_unique_symbols")?.unwrap_or(false);
     let mode = opt_str(p, "mode")?.unwrap_or("linear");
     let count = if mode == "grid" {
@@ -3209,6 +3220,58 @@ mod tests {
         s.finish_array_preview(false);
         assert!(s.doc == doc && s.selection == selection && !s.in_gesture());
         assert_eq!(s.history_len(), steps);
+    }
+
+    #[test]
+    fn spatial_array_rejection_inside_a_motion_tween_preserves_earlier_frames() {
+        let params = json!({"count": 3});
+        for preview in [false, true] {
+            let mut s = radial_source();
+            s.execute("timeline.create_motion_tween", &json!({})).unwrap();
+            s.set_frame(12);
+            s.execute("element.translate", &json!({"dx": 40, "dy": 0})).unwrap();
+            let earlier_artwork = |s: &Session| {
+                anicraft_doc::evaluate_layer_elements(s.active_layer().unwrap(), 6).unwrap().1.into_owned()
+            };
+            let earlier = earlier_artwork(&s);
+            let (doc, selection, frame, state) = (s.doc.clone(), s.selection.clone(), s.frame, s.state);
+            let undo = (s.history_len(), s.can_undo(), s.can_redo());
+            let result = if preview { s.preview_array(&params) } else { s.execute("array.create", &params).map(|_| ()) };
+
+            assert_eq!(earlier_artwork(&s).len(), earlier.len(), "Array added copies before the playhead");
+            assert_eq!(earlier_artwork(&s), earlier);
+            assert!(matches!(result, Err(EngineError::State(_))));
+            assert_eq!(s.doc, doc);
+            assert_eq!(s.selection, selection);
+            assert_eq!(s.frame, frame);
+            assert_eq!(s.state, state);
+            assert_eq!((s.history_len(), s.can_undo(), s.can_redo()), undo);
+            assert!(!s.array_preview_active() && !s.in_gesture());
+        }
+    }
+
+    #[test]
+    fn a_rejected_interior_edit_leaves_the_array_preview_from_the_tween_start_intact() {
+        let mut s = radial_source();
+        s.execute("timeline.create_motion_tween", &json!({})).unwrap();
+        let base = s.doc.clone();
+        let end = s.active_layer().unwrap().keyframe_at(s.frame).unwrap().end();
+        s.preview_array(&json!({"count": 3})).unwrap();
+        assert_eq!(s.selection.len(), 3);
+
+        // Public scrubbing freezes an active preview. Exercise the guard with an open
+        // preview at the last frame still covered by the tween.
+        s.frame = end - 1;
+        let (doc, selection, state, revision) = (s.doc.clone(), s.selection.clone(), s.state, s.revision);
+        let history_len = s.history_len();
+        assert!(matches!(s.preview_array(&json!({"count": 2})), Err(EngineError::State(_))));
+        assert_eq!(s.doc, doc);
+        assert_eq!(s.selection, selection);
+        assert_eq!(s.frame, end - 1);
+        assert_eq!((s.state, s.revision, s.history_len()), (state, revision, history_len));
+        assert!(s.array_preview_active() && s.in_gesture());
+        s.finish_array_preview(false);
+        assert_eq!(s.doc, base);
     }
 
     #[test]

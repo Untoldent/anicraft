@@ -790,6 +790,10 @@ impl Session {
     /// Runs a command by id. Mutating commands are atomic: on error the document is restored.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         self.require_no_array_preview()?;
+        if id == "array.create" {
+            // Reject before command dispatch can settle a provisional edit.
+            self.require_spatial_array_frame()?;
+        }
         self.execute_command(id, params)
     }
 
