@@ -5429,7 +5429,7 @@ mod pasteboard_tests {
         let origin = pos2(raw.x.round(), raw.y.round());
         let at = |x, y| origin + vec2(x, y) * zoom;
         let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
-        let exterior = |t: &&TileTex| t.rect[2] == 0.0 && t.rect[1] == 0.0;
+        let exterior = |t: &TileTex| t.rect[2] == 0.0 && t.rect[1] == 0.0;
         let glow = json!({"type": "glow", "blur_x": 18, "blur_y": 18, "strength": 2, "quality": 3});
         let shadow = json!({"type": "drop_shadow", "blur_x": 16, "blur_y": 16, "distance": 20, "angle": 180, "quality": 3});
         for (label, filters) in [
@@ -5440,7 +5440,7 @@ mod pasteboard_tests {
             app.s.execute("element.set_filters", &json!({"filters": filters})).unwrap();
             frame(app, vec![]);
             let steps = app.s.history_len();
-            let mut old_exterior = Vec::new();
+            let mut previous_exterior = None;
             let mut frame_ms = Vec::new();
             let mut pending_frames = 0;
             for (x, y) in [(8.0, 130.0), (230.0, 285.0), (8.0, 380.0), (220.0, 220.0)] {
@@ -5457,19 +5457,20 @@ mod pasteboard_tests {
                     frame_ms.push(now.elapsed().as_secs_f64() * 1000.0);
                     pending_frames += usize::from(app.stage_cache.ready.0 < app.stage_cache.ready.1);
                 }
-                // Settle this position before the next drag so both edge crossings enter the cache.
+                // Settle each drag so we can inspect the rendered exterior tile.
                 app.prefs.render_mode = RenderMode::Immediate;
                 frame(app, vec![button(to, false)]);
                 assert!(!app.s.array_preview_active() && app.s.selection.len() == 1);
                 assert!((app.s.selection_bounds().center().x - x).abs() < 2.0, "{label}: drag did not reach {x}");
-                let tile = app.stage_cache.tiles.iter().filter(exterior).max_by_key(|t| t.used).unwrap();
+                let slot = app.stage_cache.tiles.iter().enumerate().filter(|(_, t)| exterior(t)).max_by_key(|(_, t)| t.used).unwrap().0;
+                let tile = &app.stage_cache.tiles[slot];
                 let image = app.stage_cache.service.as_ref().unwrap().cached(tile.key).unwrap();
                 assert_eq!(image.gpu, gpu, "{label}: {:?}", image.fallback);
                 if !gpu {
                     assert_eq!(image.rgba_premul.as_chunks::<4>().0.iter().any(|px| px[3] != 0), x < 10.0, "{label}: exterior tile at x={x}");
                 }
                 if x < 10.0 {
-                    old_exterior.push(tile.tex.id());
+                    previous_exterior = Some(app.stage_cache.tiles.swap_remove(slot));
                 }
             }
             assert_eq!(app.s.history_len(), steps + 4, "{label}: one Undo per drag");
@@ -5482,18 +5483,33 @@ mod pasteboard_tests {
             eprintln!("{label} ({}) Auto pointer frames p50 {:.2} ms, max {:.2} ms, tiles pending on {pending_frames}/16",
                 if gpu { "GPU" } else { "CPU" }, frame_ms[8], frame_ms[15]);
 
-            let current = app.stage_cache.tiles.iter().filter(exterior).max_by_key(|t| t.used).unwrap().tex.id();
-            assert!(old_exterior.iter().all(|id| app.stage_cache.tiles.iter().any(|tile| tile.tex.id() == *id)),
-                "{label}: both earlier crossings must still be cached to expose the old paint order");
-            let inside = app.stage_cache.tiles.iter().enumerate().filter(|(_, t)| t.rect[0] == 0.0 && t.rect[1] == 0.0).max_by_key(|(_, t)| t.used).unwrap().0;
+            // Present the previous crossing and the new position as a partial view.
+            // A settled view drops the previous textures, so keep one real tile from
+            // the immediately preceding crossing to control when its replacement arrives.
+            let current_slot = app.stage_cache.tiles.iter().position(exterior).unwrap();
+            let current = app.stage_cache.tiles.swap_remove(current_slot);
+            let previous = previous_exterior.unwrap();
+            assert_eq!(previous.rect, current.rect);
+            assert_ne!(previous.set, current.set);
+            let (old_id, current_id) = (previous.tex.id(), current.tex.id());
+            let inside = app.stage_cache.tiles.iter().position(|t| t.rect[0] == 0.0 && t.rect[1] == 0.0).unwrap();
             app.stage_cache.tiles.swap_remove(inside);
-            app.stage_cache.service.as_ref().unwrap().forget_pictures();
+            app.stage_cache.tiles.push(previous);
+
             app.prefs.render_mode = RenderMode::Background;
+            let draws = |out: &egui::FullOutput, id| {
+                out.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Mesh(m) if m.texture_id == id))
+            };
+            app.stage_cache.service.as_ref().unwrap().forget_pictures();
             let out = frame(app, vec![]);
-            assert!(app.stage_cache.ready.0 < app.stage_cache.ready.1, "test needs a pending tile");
-            let draws = |id| out.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Mesh(m) if m.texture_id == id));
-            assert!(draws(current), "{label}: the current transparent tile must be painted");
-            assert!(old_exterior.iter().all(|id| !draws(*id)), "{label}: an old exterior fragment was painted under the current tile");
+            assert!(draws(&out, old_id), "{label}: the missing exterior tile should use its placeholder");
+
+            app.stage_cache.tiles.push(current);
+            app.stage_cache.service.as_ref().unwrap().forget_pictures();
+            let out = frame(app, vec![]);
+            assert!(app.stage_cache.ready.0 < app.stage_cache.ready.1, "test needs a pending interior tile");
+            assert!(draws(&out, current_id), "{label}: the current transparent tile must be painted");
+            assert!(!draws(&out, old_id), "{label}: an old exterior fragment was painted under the current tile");
         }
     }
 
