@@ -649,7 +649,10 @@ impl PositionPreview {
     fn move_to(&mut self, s: &mut Session, params: &Value) -> bool {
         let (Some(old), Some(new), Some((layout, coords))) = (self.params.as_object(), params.as_object(), explicit_positions(params)) else { return false };
         let position_param = |key: &str| coords.contains(&key) || (key == "stagger" && matches!(layout, Layout::Grid(_)));
-        if old.len() != new.len() || old.iter().any(|(key, v)| !position_param(key) && new.get(key) != Some(v)) {
+        if old.len() != new.len()
+            || old.iter().any(|(key, v)| !position_param(key) && new.get(key) != Some(v))
+            || new.iter().any(|(key, v)| !position_param(key) && old.get(key) != Some(v))
+        {
             return false;
         }
         // A reflection changes the cached footprint. Replay once at the crossing
@@ -2968,6 +2971,30 @@ mod tests {
             assert!(s.execute("array.create", &params).is_err(), "{params}");
             assert_eq!(s.doc, base);
         }
+    }
+
+    #[test]
+    fn grid_preview_and_commit_match_replay_when_columns_replace_stagger() {
+        let mut s = radial_source();
+        let mut replay = Session::new(s.doc.clone());
+        replay.selection = s.selection.clone();
+        let mut params = json!({"mode": "grid", "rows": 2, "start_x": 120, "start_y": 100,
+            "spacing_x": 25, "spacing_y": 30, "stagger": {"rows": {"enabled": true}}});
+        s.preview_array(&params).unwrap();
+
+        params.as_object_mut().unwrap().remove("stagger");
+        params["columns"] = json!(1);
+        s.preview_array(&params).unwrap();
+        let preview = s.doc.clone();
+        let preview_count = s.selection.len();
+        s.finish_array_preview(true);
+        assert_eq!(s.doc, preview);
+
+        let (_, recorded) = s.history.steps().last().unwrap();
+        let [recorded] = recorded.unwrap() else { panic!("expected one Array command") };
+        replay.execute(&recorded.cmd, &recorded.params).unwrap();
+        assert_eq!(preview_count, replay.selection.len(), "Grid preview and replay instance counts differ");
+        assert_eq!(preview, replay.doc);
     }
 
     #[test]
