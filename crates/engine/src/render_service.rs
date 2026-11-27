@@ -990,11 +990,14 @@ impl RenderService {
     /// back into the cache afterwards.
     pub fn forget_pictures(&self) {
         {
+            // The cache is cleared while the queue is held, so the worker takes a batch either
+            // before the clear (and sees the older count, throwing the batch away) or after it
+            // (and finds the queue empty). Lock order: queue, then cache.
             let mut q = self.queue();
             q.urgent.clear();
             q.prefetch.clear();
+            self.cache().clear();
         }
-        self.cache().clear();
         *self.shared.scene.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
@@ -1054,7 +1057,7 @@ fn worker_loop(s: &Shared) {
     let mut scenes = Scenes::new();
     loop {
         // Take a whole batch: urgent first, topped up with prefetch work.
-        let jobs: Vec<FrameJob> = {
+        let (jobs, cleared): (Vec<FrameJob>, u64) = {
             let mut q = s.queue.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
                 if q.shutdown {
@@ -1074,17 +1077,18 @@ fn worker_loop(s: &Shared) {
                     for j in &batch {
                         q.busy.insert(j.key);
                     }
-                    break batch;
+                    // Read while the queue is held, as `forget_pictures` clears the cache: a
+                    // batch taken before a clear is always seen as older than it.
+                    let cleared = s.cache.lock().unwrap_or_else(PoisonError::into_inner).cleared;
+                    break (batch, cleared);
                 }
                 q = s.wake.wait(q).unwrap_or_else(PoisonError::into_inner);
             }
         };
-        let (todo, cleared): (Vec<FrameJob>, u64) = {
+        let todo: Vec<FrameJob> = {
             let cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            // Not what is cached already, nor what the cache would not keep (its set went, a
-            // superseded preview tile).
-            let cleared = cache.cleared;
-            (jobs.iter().filter(|j| cache.needs_render(cleared, j)).cloned().collect(), cleared)
+            // Use the generation captured at dequeue, even if the preview wants the key again.
+            jobs.iter().filter(|j| cache.needs_render(cleared, j)).cloned().collect()
         };
         let slot = s.raster.lock().unwrap_or_else(PoisonError::into_inner).clone();
         // Cleared meanwhile (`forget_pictures`): the tiles show a document put aside and are
@@ -1203,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_document_also_discards_its_in_flight_pictures() {
+    fn forgetting_a_document_discards_its_in_flight_preview_even_if_the_key_is_wanted_again() {
         use std::sync::mpsc;
         use std::time::Duration;
         let service = RenderService::new(DEFAULT_CACHE_BYTES, None);
@@ -1217,10 +1221,14 @@ mod tests {
         })));
         let document = Document::default();
         let view = job(&document, 0, 0).view;
-        let discarded = service.job(0, &document, 0, view, None);
+        let discarded = service.job(0, &document, 0, view, None).preview_tile(true);
+        service.prepare_preview(&[discarded.key]);
         assert!(service.request(discarded.clone()).is_none());
         wait_for_render.recv_timeout(Duration::from_secs(3)).unwrap();
         service.forget_pictures();
+        // Returning to the same preview makes its key eligible again. Only the generation
+        // check can prevent the old raster from publishing after the clear.
+        service.prepare_preview(&[discarded.key]);
         release.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while service.busy() && Instant::now() < deadline {
@@ -1228,6 +1236,10 @@ mod tests {
         }
         assert!(!service.busy());
         assert!(service.cached(discarded.key).is_none());
+
+        release.send(()).unwrap();
+        assert!(service.request(discarded.clone()).is_none());
+        assert!(service.wait_for(discarded.key, 3_000).is_some());
     }
 
     #[test]
