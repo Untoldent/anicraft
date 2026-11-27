@@ -25,6 +25,8 @@ use egui::{Color32, CursorIcon, Key, Modifiers, Pos2, Rect, Sense, Stroke, Strok
 use serde_json::json;
 
 mod filtered_array;
+#[cfg(test)]
+mod playback_tile_tests;
 
 /// Frames rendered ahead of the playhead during playback.
 const LOOKAHEAD: u32 = 12;
@@ -43,6 +45,7 @@ const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 /// A finished tile on the GPU.
 struct TileTex {
     key: u64,
+    frame: u32,
     /// The picture set it is of (a document state at a zoom, ADR 0132).
     set: u64,
     /// Stage-space rectangle `[x0, y0, x1, y1]` this tile covers.
@@ -51,6 +54,30 @@ struct TileTex {
     used: u64,
     opaque: bool,
     array: bool,
+}
+
+#[derive(PartialEq)]
+struct PlaybackView {
+    state: anicraft_engine::StateId,
+    scene: usize,
+    raster: u64,
+    scale: f32,
+    viewport: [f32; 4],
+    camera: bool,
+    pasteboard: bool,
+    grid_under: bool,
+}
+
+struct Playback {
+    view: PlaybackView,
+    /// The frame still being filled while the playhead advances.
+    pending: Option<u32>,
+    presented: Option<PresentedFrame>,
+}
+
+struct PresentedFrame {
+    frame: u32,
+    keys: Vec<u64>,
 }
 
 /// A tile's texture: uploaded from the CPU's bytes, or drawn there by the GPU stage (ADR 0029).
@@ -85,6 +112,7 @@ pub struct Cache {
     pub shown_state: Option<anicraft_engine::StateId>,
     /// Movie frame of the picture on screen (playing or scrubbing makes it differ).
     shown_frame: Option<u32>,
+    playback: Option<Playback>,
     /// The device scale the stage was laid out at last frame: while it differs from this
     /// frame's the zoom is still changing, and no tiles are asked for.
     last_scale: Option<f32>,
@@ -102,7 +130,7 @@ pub struct Cache {
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), canvas_pixels_per_point: 1.0, laid_out: false, service: None, shown_state: None, shown_frame: None, last_scale: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None, filtered_array: Default::default(),
+        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), canvas_pixels_per_point: 1.0, laid_out: false, service: None, shown_state: None, shown_frame: None, playback: None, last_scale: None, gpu: Default::default(), drawn_by: None, pattern: None, array_tiles: None, filtered_array: Default::default(),
             #[cfg(test)]
             disable_filtered_array: false,
         }
@@ -128,6 +156,7 @@ impl Cache {
         self.filtered_array = Default::default();
         self.shown_state = None;
         self.shown_frame = None;
+        self.playback = None;
         self.last_scale = None;
         self.ready = (0, 0);
         if let Some(s) = &self.service {
@@ -179,7 +208,7 @@ impl Cache {
             }
         };
         self.tick += 1;
-        self.tiles.push(TileTex { key: img.key, set: img.set, rect: spec.rect, tex, used: self.tick, opaque: spec.opaque(), array });
+        self.tiles.push(TileTex { key: img.key, frame: img.frame, set: img.set, rect: spec.rect, tex, used: self.tick, opaque: spec.opaque(), array });
         // Evict least recently used tiles that are not on screen.
         while self.tiles.len() > MAX_TILE_TEXTURES {
             let victim = self.tiles.iter().enumerate().filter(|(_, t)| !keep.contains(&t.key)).min_by_key(|(_, t)| t.used).map(|(i, _)| i);
@@ -1132,15 +1161,40 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // Reference videos (ADR 0116): their pictures for this frame, on the stage alone. The
         // ones not decoded yet are on their way, and bring a repaint.
         let reference = crate::video_import::stage_frames(app, ui.ctx(), &pic.doc, pic.frame, true);
+        let job_for_frame = |t: &TileSpec, frame, reference| {
+            make_job_for(raster, state, &pic.doc, frame, t.view, onion)
+                .through_camera(preview).inside(pic.front.clone()).with_reference(reference).dim_around(focus.clone())
+        };
         let tile_job = |t: &TileSpec| {
-            let mut job = make_job_for(raster, state, &pic.doc, pic.frame, t.view, onion)
-                .through_camera(preview).inside(pic.front.clone()).with_reference(reference.clone()).dim_around(focus.clone());
+            let mut job = job_for_frame(t, pic.frame, reference.clone());
             if let Some(bounds) = array_tiles {
                 job.key = bounds.key(&job, t.rect, z.recip(), dim, &array_instances);
             }
             job.preview_tile(array_active)
         };
-        let jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = tile_job(&t); (t, j) }).collect();
+        let mut jobs: Vec<(TileSpec, FrameJob)> = visible.into_iter().map(|t| { let j = tile_job(&t); (t, j) }).collect();
+        let playing = app.playing && !array_active;
+        let mut playback = (!array_active && onion.is_none()).then(|| {
+            let view = PlaybackView { state, scene: app.s.scene, raster, scale: z, viewport: px, camera: preview, pasteboard, grid_under };
+            app.stage_cache.playback.take().filter(|p| p.view == view)
+                .unwrap_or(Playback { view, pending: None, presented: None })
+        });
+        let mut target_frame = pic.frame;
+        if playing && let Some(pending) = playback.as_ref().and_then(|p| p.pending).filter(|f| *f != pic.frame) {
+            // Give the previous request time to finish even if the clock has moved on. A
+            // complete playhead frame from look-ahead can still take priority immediately.
+            let playhead_ready = jobs.iter().all(|(_, job)| {
+                app.stage_cache.tiles.iter().any(|tile| tile.key == job.key)
+                    || app.stage_cache.service.as_ref().and_then(|svc| svc.cached(job.key)).is_some_and(|img| img.error.is_none())
+            });
+            if !playhead_ready {
+                target_frame = pending;
+                let reference = anicraft_engine::video::shown(&app.video, &pic.doc, pending, false).frames;
+                for (spec, job) in &mut jobs {
+                    *job = job_for_frame(spec, pending, reference.clone());
+                }
+            }
+        }
         let allow_filtered = app.prefs.render_mode == RenderMode::Auto && !app.playing
             && matches!(app.array_panel.gizmo_geometry(), Some(crate::array_gizmo::Geometry::Linear(_)));
         #[cfg(test)]
@@ -1179,6 +1233,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             svc.show(set);
         }
 
+        let mut render_failed = false;
         if !missing.is_empty()
             && !zooming
             && provisional != Some(true)
@@ -1201,7 +1256,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             // Moving around the picture already on screen (a pan, a zoom come to rest): with
             // no render thread the tiles come a few a frame, nearest the centre first, so the
             // frame stays short. An edit or another frame is one whole picture, drawn at once.
-            let moving = app.stage_cache.shown_state == Some(state) && app.stage_cache.shown_frame == Some(pic.frame);
+            let moving = app.stage_cache.shown_state == Some(state) && app.stage_cache.shown_frame == Some(target_frame);
             let started = web_time::Instant::now();
             let results: Vec<Option<std::sync::Arc<FrameImage>>> = if immediate {
                 svc.render_now_batch(batch).into_iter().map(Some).collect()
@@ -1236,13 +1291,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             if let Some(e) = error {
                 app.status_err(crate::i18n::t_dyn(&e).into_owned());
+                render_failed = true;
             }
         }
         let ready = keys.iter().filter(|k| app.stage_cache.tiles.iter().any(|t| t.key == **k)).count();
         // A current transparent tile cannot hide older pixels underneath it. Use at most
         // one same-rectangle placeholder, and only until the current tile is ready.
         let mut placeholders = Vec::new();
-        if ready < keys.len() {
+        if !playing && ready < keys.len() {
             for (spec, job) in &jobs {
                 if (array_active || !spec.opaque())
                     && !app.stage_cache.tiles.iter().any(|t| t.key == job.key)
@@ -1258,7 +1314,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.stage_cache.ready = (ready, keys.len());
         if ready == keys.len() {
             app.stage_cache.shown_state = Some(state);
-            app.stage_cache.shown_frame = Some(pic.frame);
+            app.stage_cache.shown_frame = Some(target_frame);
             // The view is whole: tiles of other states and zooms were only standing in for
             // it, so their textures go now instead of when 192 newer ones have pushed them out.
             if let Some(set) = set {
@@ -1294,7 +1350,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let r = Rect::from_min_max(st_screen(Vec2::new(t.rect[0], t.rect[1])), st_screen(Vec2::new(t.rect[2], t.rect[3])));
             painter.image(t.tex.id(), r, uv, Color32::WHITE);
         };
-        if ready < keys.len() && provisional.is_some() {
+        let whole = !keys.is_empty() && ready == keys.len();
+        if playing {
+            let presented = if whole {
+                Some((target_frame, keys.as_slice()))
+            } else {
+                playback.as_ref().and_then(|p| p.presented.as_ref()).filter(|prior| {
+                    // Reference frames can finish decoding independently of the document state.
+                    let reference = anicraft_engine::video::shown(&app.video, &pic.doc, prior.frame, false).frames;
+                    prior.keys.len() == keys.len()
+                        && jobs.iter().zip(&prior.keys).all(|((spec, _), key)| job_for_frame(spec, prior.frame, reference.clone()).key == *key)
+                        && prior.keys.iter().all(|key| app.stage_cache.tiles.iter().any(|t| t.key == *key && t.frame == prior.frame))
+                }).map(|p| (p.frame, p.keys.as_slice()))
+            };
+            if let Some((frame, paint_keys)) = presented {
+                for t in app.stage_cache.tiles.iter().filter(|t| t.frame == frame && paint_keys.contains(&t.key)) {
+                    paint_tile(&painter, t);
+                }
+            }
+        } else if ready < keys.len() && provisional.is_some() {
             app.stage_cache.filtered_array.paint(&painter.with_clip_rect(vis), state, &array_instances, st_screen);
         } else {
             if ready < keys.len() && !array_active && bg.is_some_and(|color| color.a >= 1.0) {
@@ -1316,7 +1390,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 paint_tile(&painter, t);
             }
         }
-
         // While a background render catches up with a drag, outline where the selection is now,
         // so the artwork never seems to lag the pointer.
         if show_edges && ready < keys.len() && !preview && matches!(app.drag, Drag::Move { .. } | Drag::SnapMove { .. } | Drag::Transform { .. } | Drag::Bend { .. } | Drag::RawPoint { .. } | Drag::RawHandle { .. }) {
@@ -1330,6 +1403,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
         }
+        if let Some(playback) = &mut playback {
+            playback.pending = (playing && !whole && !render_failed && !zooming).then_some(target_frame);
+            if whole {
+                playback.presented = Some(PresentedFrame { frame: target_frame, keys });
+            }
+        }
+        app.stage_cache.playback = playback;
     }
     painter.rect_stroke(stage_rect, 0.0, Stroke::new(1.0, T.stage_edge), StrokeKind::Outside);
     // The grid over the artwork, and the guides (ADR 0076): the stage's, not the camera's.
