@@ -794,6 +794,11 @@ impl MotionTween {
         MotionTween { target, tracks: Vec::new(), path: None, path_timing: None, exact_path_affine: false, orient: false, pins: Vec::new(), keep_area: false }
     }
 
+    /// Whether the saved tween contains explicit path timing or opts into exact affine evaluation.
+    pub fn has_extended_path_options(&self) -> bool {
+        self.path_timing.is_some() || self.exact_path_affine
+    }
+
     /// Opt in to preserving the source matrix on position-only paths and on paths
     /// that can rotate it directly. Ordinary Motion Tweens use the legacy evaluator.
     pub fn preserve_path_affine(&mut self) {
