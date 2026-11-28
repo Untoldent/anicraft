@@ -63,7 +63,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119
 ## This repository
 <!-- craft-agents:end -->
 
-AniCraft is an open-source, native, clean-room 2D animation studio in Rust only (egui/eframe UI). The product name is written **AniCraft**; machine names are lowercase (`anicraft-*`). The design is in `docs/`: ADRs in `docs/adr/`, UI guidelines, the backlog and status in `docs/roadmap.md` (a guideline, not a timeline: ADR 0125), and parity in `docs/parity.md`.
+AniCraft is an open-source, native, clean-room 2D animation studio in Rust only (egui/eframe UI). The product name is written **AniCraft**; machine names are lowercase (`anicraft-*`). The design is in `docs/`: ADRs in `docs/adr/`, UI guidelines, the backlog and status in `docs/roadmap.md` (a guideline, not a timeline: ADR 0125), and parity in `docs/parity.md`. Its **Headless** column ([RFC-0052](https://github.com/storytold/craft-contrib/blob/main/rfcs/0052-headless-reach.md)) says what the CLI and MCP server reach: empty is `unknown`; `no (<reach>)`/`partial (<reach>)` with `window`, `os` or `engine-gap` (a `partial` row's notes say which part works); `yes` only for a row that cites a registry command id, never otherwise. Keep the count line under the summary in step.
 
 ## Workspace map
 

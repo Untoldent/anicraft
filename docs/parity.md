@@ -23,6 +23,9 @@ AniCraft is an independent, open-source project, and is not affiliated with or e
   replaces a feature.
 * **Keeping it.** A PR that changes a feature's status changes its row here, in the same PR. A
   row that turns **done** loses its backlog id.
+* **Headless.** The Headless column and the count under the summary follow
+  [RFC-0052](https://github.com/storytold/craft-contrib/blob/main/rfcs/0052-headless-reach.md). A row is `yes`
+  only when it cites a command id from the registry.
 
 ## Summary
 
@@ -54,10 +57,13 @@ AniCraft is an independent, open-source project, and is not affiliated with or e
 The counts are of the rows below, so they weigh a small feature like a large one. The backlog,
 not this table, says what matters most.
 
+**Headless ([RFC-0052](https://github.com/storytold/craft-contrib/blob/main/rfcs/0052-headless-reach.md)): 0 yes, 0 no (window 0, os 0, engine-gap 0), 0 partial, 348 unknown.**
+The **Headless** column at the end of each table says whether `anicraft-cli` and its MCP server (`anicraft-cli mcp`) can do the feature without the desktop window. An empty cell is `unknown`, the starting value. A row can be `yes` only when it cites a command id from the registry the CLI and the MCP server load (see the [command reference](guide/reference/commands.md)); no row is marked `yes` yet (a few rows already cite ids, such as `align.match_width`, and can be checked first), and `yes` is never written without one. A checked row that isn't reachable says `no (<reach>)` or `partial (<reach>)`, where the reach is `window` (needs the desktop window, a dialog or the pointer), `os` (needs an OS or online service the engine doesn't wrap) or `engine-gap` (could be a command, isn't one yet). A `partial` row's notes also say which part a headless client can do. Update the counts here when you mark rows.
+
 ## Workspace and panels
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Dockable panels: drag a tab to dock, stack, float, resize, fold | **done** | [ADR 0075](adr/0075-dockable-panels-and-workspaces.md), [ADR 0087](adr/0087-dockable-panels-second-slice.md); [workspace](guide/workspace.md). |
 | Docks collapsed to icon strips with flyouts | **done** | [ADR 0075](adr/0075-dockable-panels-and-workspaces.md). |
 | Workspace presets, saved workspaces, reset | **done** | Essentials, Animator, Designer and your own. |
@@ -95,8 +101,8 @@ not this table, says what matters most.
 
 ## Tools
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Selection | **partial** | Raw shapes, objects, marquee, bend an edge, move a corner ([ADR 0041](adr/0041-selection-tool-on-raw-drawings.md), [ADR 0044](adr/0044-selection-across-layers.md)). A marquee takes the instances and objects it touches, and View › Hide Edges hides the selection's marks ([ADR 0134](adr/0134-outside-parity-batch-zoom-outlines-and-egui-0-37.md)). Missing: a preference for the marquee to take only what it surrounds; the first-use hint about fills and outlines (P-017). |
 | Subselection | **done** | [ADR 0042](adr/0042-subselection-and-merging-everywhere.md), [ADR 0045](adr/0045-raw-points-and-raw-shapes-inside-symbols.md). |
 | Free Transform | **partial** | Scale, skew, rotate, the transformation point, a box that turns with the object ([ADR 0111](adr/0111-the-transformation-point-a-turning-box-and-layer-opacity.md)), Envelope ([ADR 0080](adr/0080-drawing-parity-leftovers.md)). Missing: Distort. Open bug: rotation on Windows and FreeBSD ([#479](https://github.com/storytold/anicraft/issues/479)), not reproduced on Windows 10 (P-005). |
@@ -134,8 +140,8 @@ not this table, says what matters most.
 
 ## Drawing model
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Merge drawing: raw strokes and fills that cut and join | **done** | [ADR 0031](adr/0031-merge-drawing.md), [ADR 0041](adr/0041-selection-tool-on-raw-drawings.md), [ADR 0042](adr/0042-subselection-and-merging-everywhere.md), [ADR 0045](adr/0045-raw-points-and-raw-shapes-inside-symbols.md); [drawing](guide/drawing.md). Open bug: a hairline between merged curved fills ([#182](https://github.com/storytold/anicraft/issues/182), P-013). |
 | Object drawing | **done** | Edit inside by double-click. Editing without opening is missing ([#181](https://github.com/storytold/anicraft/issues/181)). |
 | Groups, nested, edited in place | **done** | [ADR 0073](adr/0073-groups-combine-objects-and-selection-modifiers.md). |
@@ -162,8 +168,8 @@ not this table, says what matters most.
 
 ## Colour
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Stroke and fill colours, swap, black and white, none | **done** | |
 | Colour picker: swatches, mixer, hex, alpha | **done** | [#432](https://github.com/storytold/anicraft/issues/432) to [#437](https://github.com/storytold/anicraft/issues/437). |
 | Live preview on the artwork while pointing at a swatch | **missing** | P-025 ([#436](https://github.com/storytold/anicraft/issues/436)). |
@@ -180,8 +186,8 @@ not this table, says what matters most.
 
 ## Text
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Static text: font, size, colour, bold, italic, alignment, spacing, wrap width | **done** | [ADR 0012](adr/0012-text.md); [text](guide/text.md). |
 | Several styles in one block | **done** | [ADR 0085](adr/0085-per-character-and-paragraph-styles.md). |
 | Typing in the block on the stage, shown in its real font | **missing** | P-019 ([#303](https://github.com/storytold/anicraft/issues/303)). |
@@ -205,8 +211,8 @@ not this table, says what matters most.
 
 ## Symbols and Library
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Graphic, movie clip and button symbols | **done** | [symbols](guide/symbols-and-library.md). |
 | Convert to Symbol, with name, type, folder | **done** | Missing: the registration point grid in the dialog (P-021). |
 | New Symbol (empty, Ctrl+F8) | **missing** | P-021. |
@@ -230,8 +236,8 @@ not this table, says what matters most.
 
 ## Timeline
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Frames, keyframes, blank keyframes: insert, remove, clear | **done** | [timeline](guide/timeline.md). |
 | Frame selection, drag to move, cut, copy and paste frames | **done** | A click on the ruler leaves no frames selected, so F5 acts on every layer ([#195](https://github.com/storytold/anicraft/issues/195), [ADR 0131](adr/0131-layer-selection-the-ruler-and-new-masks.md)). |
 | Span length by dragging | **done** | [ADR 0083](adr/0083-motion-editor-and-timeline-retiming.md). |
@@ -262,8 +268,8 @@ not this table, says what matters most.
 
 ## Tweens and the Motion Editor
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Classic tweens: position, scale, rotation, skew, colour, filters | **done** | [tweens](guide/tweens.md). |
 | Classic tween options: rotate direction and turns, orient to path, sync, snap, scale | **partial** | Orient and extra turns†. Missing: Sync and Snap as switches (P-041). |
 | Classic ease presets and the custom ease editor | **done** | [ADR 0081](adr/0081-ease-presets-and-custom-eases.md). |
@@ -285,8 +291,8 @@ not this table, says what matters most.
 
 ## Bones and rigging
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Armatures of symbol instances | **done** | [ADR 0043](adr/0043-bones-and-inverse-kinematics.md); [bones](guide/masks-guides-camera-bones.md). |
 | Armatures inside a shape, with the Bind tool | **done** | [ADR 0071](adr/0071-shape-armatures.md). |
 | Poses keyed and tweened, with easing | **done** | |
@@ -303,8 +309,8 @@ not this table, says what matters most.
 
 ## Camera
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Camera layer: pan, zoom, rotate | **done** | [ADR 0027](adr/0027-camera-layer.md). |
 | Camera tweens | **done** | Classic and motion. |
 | Camera colour effects: tint, brightness, advanced | **done** | [ADR 0082](adr/0082-camera-depth-attaching-and-colour.md). |
@@ -314,8 +320,8 @@ not this table, says what matters most.
 
 ## Layers
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Normal layers: add, delete, rename, reorder by drag, show, lock, outline | **done** | [#54](https://github.com/storytold/anicraft/issues/54), [#59](https://github.com/storytold/anicraft/issues/59) and [#61](https://github.com/storytold/anicraft/issues/61) can close. |
 | Layer folders | **done** | |
 | Mask and masked layers | **done** | A new mask is locked, as in the reference app, so its edge in the layer colour shows only while it is unlocked for editing ([#429](https://github.com/storytold/anicraft/issues/429), [ADR 0131](adr/0131-layer-selection-the-ruler-and-new-masks.md)). |
@@ -333,8 +339,8 @@ not this table, says what matters most.
 
 ## Filters and blends
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Drop shadow, blur, glow, bevel, gradient glow, gradient bevel, adjust colour | **done** | [ADR 0025](adr/0025-bevel-and-gradient-filters.md). [#278](https://github.com/storytold/anicraft/issues/278) can close. |
 | Filter list: reorder, switch off, copy and paste, presets | **done** | [ADR 0091](adr/0091-filter-presets-order-on-off-and-tweens.md). |
 | Filters tweened, and as curves in the Motion Editor | **done** | [ADR 0092](adr/0092-surviving-gpu-failures-and-motion-editor-filter-tracks.md), [ADR 0099](adr/0099-filter-colour-and-stepped-tracks-built-in-presets-and-filters-on-text.md). |
@@ -346,8 +352,8 @@ not this table, says what matters most.
 
 ## Sound
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Import WAV, MP3, Ogg Vorbis | **done** | [ADR 0020](adr/0020-audio.md); [images and sound](guide/images-and-sound.md). |
 | Import AIFF, compressed WAV, FLAC, AAC | **missing** | P-037. |
 | Sound on a keyframe; waveform on the timeline | **done** | |
@@ -368,8 +374,8 @@ not this table, says what matters most.
 
 ## Video
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Import video as reference frames or a reference layer | **done** | [ADR 0116](adr/0116-importing-video-through-the-users-ffmpeg.md), through the user's own ffmpeg. [#369](https://github.com/storytold/anicraft/issues/369) can close for video. |
 | Video embedded on the timeline, scrubbed with the playhead | **partial** | The frames come in as bitmaps; the video's sound does not come with a reference layer (P-045). |
 | Video with an alpha channel | **missing** | P-045. |
@@ -381,8 +387,8 @@ not this table, says what matters most.
 
 ## Interactivity and scripting
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Actions panel with a script editor, problems shown by line | **done** | [ADR 0024](adr/0024-frame-scripts-and-test-movie.md); [interactivity](guide/interactivity.md). |
 | Actions without writing code (a wizard) | **done** | The Actions panel's list of actions. |
 | Frame scripts: timeline control, events, properties, variables, functions, loops | **done** | [ADR 0052](adr/0052-actionscript-small-logic.md): a subset of ActionScript 3.0 that runs whole or not at all. |
@@ -404,8 +410,8 @@ not this table, says what matters most.
 
 ## Publishing and export
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Publish Settings, profiles, Publish | **done** | [ADR 0060](adr/0060-publish-settings-and-publish.md); [exporting](guide/exporting-and-publish.md). |
 | HTML canvas page | **done** | [ADR 0028](adr/0028-html-canvas-export.md): one self-contained page. Gaps: 9-slice, bent bitmaps, stream sounds after a go-to (P-035). |
 | HTML page options: responsive scaling, centre, loop, preloader, hosted libraries, separate assets | **partial** | One inline page. Missing: responsive scaling choices, a preloader, assets as separate files, a template (P-035). |
@@ -432,8 +438,8 @@ not this table, says what matters most.
 
 ## Import formats
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | `.fla` (zipped, CS5 and later) and XFL folders | **partial** | [ADR 0009](adr/0009-xfl-import.md), [ADR 0054](adr/0054-fla-packages-and-a-hardened-zip-reader.md); [opening Animate files](guide/opening-animate-files.md). Missing: motion tweens (P-023), armatures, camera, parenting, sound in and out points (P-043). A stroke of a kind AniCraft doesn't know is drawn solid; a fill of an unknown kind, and the rest of an outline run after a command it can't read, are left out (the runs after it are drawn); each is counted in the report ([ADR 0133](adr/0133-an-animate-shape-is-never-cut-down-quietly.md)). Open reports, cause not confirmed: [#498](https://github.com/storytold/anicraft/issues/498), [#347](https://github.com/storytold/anicraft/issues/347) (P-006). |
 | Binary `.fla` (Flash 8 to CS4) | **partial** | [ADR 0120](adr/0120-legacy-fla-compound-binary-import.md); [opening Animate files](guide/opening-animate-files.md). Scenes, layers and folders, keyframes, shapes with gradients and dashed and dotted strokes, groups, symbol instances, classic and shape tweens, text, bitmaps, sounds on frames, frame scripts (kept, not run) and library folders ([#163](https://github.com/storytold/anicraft/issues/163); outside PRs [#478](https://github.com/storytold/anicraft/issues/478) and [#481](https://github.com/storytold/anicraft/issues/481)). Missing: filters, movie clip component settings, bitmap fills, sound in and out points; Flash MX 2004 and earlier (P-039; [#289](https://github.com/storytold/anicraft/issues/289)). |
 | Saving `.fla` or XFL | **missing** | AniCraft saves `.anicraft`. Not planned before import is complete (P-043). |
@@ -454,8 +460,8 @@ not this table, says what matters most.
 
 ## Assets and sharing
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Templates: built in and your own | **done** | [ADR 0065](adr/0065-templates-svg-into-the-library-and-drops-on-the-timeline.md). |
 | Save an animation or a rig as a reusable asset | **partial** | Copy between documents and templates do it; there is no asset file with a rig in it (P-042). |
 | Stock assets from the vendor | **won't do** | A service. |
@@ -470,8 +476,8 @@ not this table, says what matters most.
 
 ## Accessibility
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | The app by keyboard: every control reachable, no trap | **done** | [ADR 0022](adr/0022-accessibility.md); [docs/accessibility.md](accessibility.md). |
 | The app with a screen reader | **partial** | Names and roles through AccessKit, checked by test. Missing: passes by hand with Narrator, VoiceOver and Orca (P-015). |
 | High contrast and interface scaling | **done** | A light high-contrast palette is missing. |
@@ -482,8 +488,8 @@ not this table, says what matters most.
 
 ## Preferences and shortcuts
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Preferences dialog | **done** | [preferences](guide/preferences-shortcuts-accessibility.md). |
 | Keyboard shortcut editor, with the reference app's keys by default | **done** | Saving a set of keys as a file to share: ?. |
 | Interface themes | **done** | Dark, light, high contrast, and your own ([ADR 0117](adr/0117-user-themes-from-a-folder.md)). |
@@ -496,8 +502,8 @@ not this table, says what matters most.
 
 ## Automation
 
-| Feature | Status | Notes |
-|---|---|---|
+| Feature | Status | Notes | Headless |
+|---|---|---|---|
 | Scripting the app (the reference app's JavaScript API) | **partial** | Every command runs from the CLI, JSON-lines `serve`, MCP and the live control port ([ADR 0104](adr/0104-live-control-port.md), [ADR 0124](adr/0124-automation-roots.md)); the reference app's own script files don't run (see below). |
 | Running the reference app's script files (`.jsfl`) | **won't do** | Its API is the app's object model. Plug-ins and saved commands are our route. |
 | Commands menu: save steps from History, run them again | **done** | [ADR 0097](adr/0097-command-macros.md); [saved commands](guide/saved-commands.md). |
