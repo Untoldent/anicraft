@@ -26,6 +26,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Weak};
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Version of the `<id>.json` description.
@@ -360,6 +361,26 @@ impl SessionLock {
 enum Job {
     Write { doc: Box<Document>, meta: Box<RecoveryMeta>, tag: u64 },
     Clear { tag: u64 },
+    Checkpoint { doc: Box<Document>, original: Option<PathBuf>, done: Sender<Result<WriteStats>> },
+}
+
+/// An immutable recovery copy the window can flush even if its painter fails outside the app.
+/// It uses the same writer and session as the normal autosave, so the writes cannot race.
+pub struct Checkpoint {
+    tx: Weak<Sender<Job>>,
+    doc: Box<Document>,
+    original: Option<PathBuf>,
+}
+
+impl Checkpoint {
+    /// Wait for this snapshot's write, including any I/O error, before releasing the process.
+    pub fn flush(self) -> Result<WriteStats> {
+        let (done, result) = std::sync::mpsc::channel();
+        self.tx.upgrade().ok_or_else(|| EngineError::State("the recovery writer stopped".into()))?
+            .send(Job::Checkpoint { doc: self.doc, original: self.original, done })
+            .map_err(|_| EngineError::State("the recovery writer stopped".into()))?;
+        result.recv().map_err(|_| EngineError::State("the recovery write did not finish".into()))?
+    }
 }
 
 /// What the background writer finished.
@@ -376,7 +397,7 @@ pub enum Outcome {
 /// [`Autosaver::finish`] decides whether a session ended cleanly.
 pub struct Autosaver {
     lock: Option<SessionLock>,
-    tx: Option<Sender<Job>>,
+    tx: Option<Arc<Sender<Job>>>,
     done: Receiver<Outcome>,
     thread: Option<std::thread::JoinHandle<()>>,
     next_tag: u64,
@@ -389,7 +410,7 @@ impl Autosaver {
         let dir = lock.dir.clone();
         let id = lock.id.clone();
         let thread = std::thread::Builder::new().name("anicraft-autosave".into()).spawn(move || worker(&dir, &id, &rx, &done_tx))?;
-        Ok(Autosaver { lock: Some(lock), tx: Some(tx), done, thread: Some(thread), next_tag: 0 })
+        Ok(Autosaver { lock: Some(lock), tx: Some(Arc::new(tx)), done, thread: Some(thread), next_tag: 0 })
     }
 
     pub fn id(&self) -> &str {
@@ -413,6 +434,14 @@ impl Autosaver {
     pub fn write(&mut self, doc: Document, original: Option<&Path>) -> u64 {
         let meta = RecoveryMeta::describe(self.id(), &doc, original);
         self.send(|tag| Job::Write { doc: Box::new(doc), meta: Box::new(meta), tag })
+    }
+
+    pub fn checkpoint(&self, doc: &Document, original: Option<&Path>) -> Option<Checkpoint> {
+        Some(Checkpoint {
+            tx: Arc::downgrade(self.tx.as_ref()?),
+            doc: Box::new(doc.clone()),
+            original: original.map(Path::to_path_buf),
+        })
     }
 
     /// Queues removal of this session's recovery copy (after a save, or when the work is gone).
@@ -472,8 +501,9 @@ impl Drop for Autosaver {
 
 fn worker(dir: &Path, id: &str, rx: &Receiver<Job>, done: &Sender<Outcome>) {
     while let Ok(mut job) = rx.recv() {
-        // Only the newest waiting job matters.
-        while let Ok(newer) = rx.try_recv() {
+        // Only the newest ordinary job matters. A checkpoint must be acknowledged, even
+        // when a later write or clear is already queued.
+        while !matches!(job, Job::Checkpoint { .. }) && let Ok(newer) = rx.try_recv() {
             job = newer;
         }
         let outcome = match job {
@@ -485,6 +515,11 @@ fn worker(dir: &Path, id: &str, rx: &Receiver<Job>, done: &Sender<Outcome>) {
                 Ok(_) => Outcome::Cleared { tag },
                 Err(e) => Outcome::Failed { tag, error: e.to_string() },
             },
+            Job::Checkpoint { doc, original, done } => {
+                let meta = RecoveryMeta::describe(id, &doc, original.as_deref());
+                let _ = done.send(write(dir, id, &doc, &meta));
+                continue;
+            }
         };
         if done.send(outcome).is_err() {
             return;
@@ -501,6 +536,26 @@ mod tests {
         let d = std::env::temp_dir().join(format!("anicraft-recovery-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn painter_checkpoint_flushes_the_latest_edits_through_the_recovery_writer() {
+        let dir = tmp("painter-checkpoint");
+        let mut saver = Autosaver::start(SessionLock::acquire(&dir).unwrap()).unwrap();
+        let id = saver.id().to_owned();
+        let before = Document::default();
+        let latest = sample::demo();
+        saver.write(before, None);
+        saver.checkpoint(&latest, None).unwrap().flush().unwrap();
+        assert_eq!(format::load(&document_path(&dir, &id)).unwrap(), latest);
+        // The checkpoint uses the writer's ordinary safeguards and reports a refusal without
+        // replacing the good copy.
+        assert!(saver.checkpoint(&sample::demo(), Some(&document_path(&dir, &id))).unwrap().flush().is_err());
+        assert_eq!(format::load(&document_path(&dir, &id)).unwrap(), latest);
+        let abandoned = saver.checkpoint(&latest, None).unwrap();
+        saver.finish(Some((latest.clone(), None)));
+        assert!(abandoned.flush().is_err());
+        assert_eq!(load(&dir, &id).unwrap().0, latest);
     }
 
     #[test]

@@ -276,6 +276,13 @@ pub fn finish_all(app: &mut App, clean: bool) {
     }
 }
 
+/// Parked documents followed by the active one, which should be opened last on restart.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn graphics_sessions(app: &App) -> impl Iterator<Item = (&Session, &DocSaver)> {
+    app.tabs.slots.iter().filter_map(|slot| slot.parked.as_ref()).map(|p| (&p.s, &p.saver))
+        .chain(std::iter::once((&app.s, &app.recovery.doc)))
+}
+
 /// Why another document can't be shown right now, if it can't: something is open that belongs
 /// to this one and has to be finished first.
 fn busy(app: &App) -> Option<&'static str> {

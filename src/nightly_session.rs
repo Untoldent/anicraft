@@ -1,6 +1,6 @@
 //! App-private Nightly session health, not telemetry or a Launcher protocol.
 //! A live owner holds a separate persistent lease; secondary launches never rewrite its record.
-//! Dropping the guard does not clear the marker. Only the app's controlled return path does.
+//! Dropping the guard leaves the marker intact. Controlled shutdown and GPU handoff finish it.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -48,13 +48,13 @@ fn atomic_write_no_follow(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// The owner's session, shared by the app's exit hook (macOS) and the code after the event loop.
+/// The owner's session, shared by the app's exit hook (macOS), GPU handoff and event-loop return.
 /// On macOS every quit ends the process inside AppKit's terminate, after eframe's `on_exit` and
 /// before `eframe::run_native` could return, so the exit hook finishes it there; the return path
 /// still runs for a start that created no window.
 pub type Shared = Arc<Mutex<Option<Session>>>;
 
-/// The controlled return ([`Session::finish`]) by whichever path comes first; later calls do nothing.
+/// Finish the controlled exit ([`Session::finish`]) once; later calls do nothing.
 pub fn finish_once(shared: &Shared, unclean_notice_shown: bool) {
     let watch = shared.lock().unwrap_or_else(PoisonError::into_inner).take();
     if let Some(watch) = watch

@@ -4815,6 +4815,8 @@ impl eframe::App for App {
     /// A clean exit (saved, or the user chose Don't Save) removes this session's recovery
     /// copy; otherwise the work is written once more and offered at the next start.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::gpu_watch::finished_window();
         // The Test Movie window's place, for next time (ADR 0062).
         crate::test_movie::remember_place(self);
         // And the floating panels' windows (ADR 0075).
@@ -4838,6 +4840,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if frame.wgpu_render_state().is_some() {
+            crate::gpu_watch::check_device();
+        }
         // Stage work on the window's device is submitted only while this frame runs (ADR 0105).
         let _in_frame = crate::gpu_stage::in_frame(ui.ctx());
         #[cfg(not(target_arch = "wasm32"))]
@@ -4857,6 +4863,10 @@ impl eframe::App for App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         crate::plugin_export_ui::start_browse(self, frame, ui.ctx());
+        #[cfg(not(target_arch = "wasm32"))]
+        if frame.wgpu_render_state().is_some() {
+            crate::gpu_watch::prepare_paint(self);
+        }
         #[cfg(target_arch = "wasm32")]
         let _ = frame;
     }

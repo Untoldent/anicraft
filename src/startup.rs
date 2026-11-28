@@ -101,6 +101,33 @@ pub fn plan(forced: Option<WindowBackend>, chosen: WindowBackend, platform: &[(W
     out
 }
 
+/// After device loss, try explicit alternatives before automatic selection can pick the
+/// failed API again. The stage also runs on the CPU for this replacement.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn recovery_plan(failed: WindowBackend, platform: &[(WindowBackend, bool)], supported: &[WindowBackend], last: &[String]) -> Vec<Attempt> {
+    let mut candidates = platform.to_vec();
+    for &backend in supported.iter().filter(|&&b| b != WindowBackend::Auto) {
+        if !candidates.iter().any(|&(b, _)| b == backend) {
+            candidates.push((backend, false));
+        }
+    }
+    let mut attempts = plan(None, WindowBackend::Auto, &candidates, last);
+    attempts.sort_by_key(|a| {
+        if a.backend == failed {
+            4
+        } else if a.backend == WindowBackend::Auto {
+            3
+        } else if last.contains(&a.label()) {
+            2
+        } else if a.backend == WindowBackend::OpenGl {
+            0
+        } else {
+            1
+        }
+    });
+    attempts
+}
+
 /// Starts the record of a mid-session loss counts for: that many starts try another way first,
 /// then the fastest way gets its chance again (the driver may have been updated, or the load
 /// that brought it down gone).
@@ -227,7 +254,7 @@ struct Log {
 static LOG: Mutex<Option<Log>> = Mutex::new(None);
 static FRAMES: AtomicU32 = AtomicU32::new(0);
 /// The attempt the window runs on now (for the record a mid-session loss leaves).
-static CURRENT: Mutex<Option<String>> = Mutex::new(None);
+static CURRENT: Mutex<Option<(Attempt, WindowBackend)>> = Mutex::new(None);
 /// The window closed to open again another way (ADR 0092), with the document to open then.
 static REOPEN: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
 
@@ -237,6 +264,14 @@ static REOPEN: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
 /// starts), the previous start's last of all if its marker is still there. Panics are written
 /// to the log from now on.
 pub fn begin(dir: Option<PathBuf>) -> Vec<String> {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Never waits: the panic may have happened while the log was being written.
+        write(&format!("panic: {info}"), false);
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::gpu_watch::recover_painter_panic(info);
+        previous(info);
+    }));
     let Some(dir) = dir else { return Vec::new() };
     let _ = std::fs::create_dir_all(&dir);
     let died_in = std::fs::read_to_string(dir.join(MARKER_NAME)).ok().map(|s| s.trim().chars().take(200).collect::<String>()).filter(|s| !s.is_empty());
@@ -260,12 +295,6 @@ pub fn begin(dir: Option<PathBuf>) -> Vec<String> {
         *g = Some(Log { dir, file, since: std::time::Instant::now(), written: 0 });
     }
     FRAMES.store(0, Ordering::Relaxed);
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // Never waits: the panic may have happened while the log was being written.
-        write(&format!("panic: {info}"), false);
-        previous(info);
-    }));
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     line(&format!("{} {} ({}), {} {}, started at {unix} (Unix time)", crate::platform::name(), env!("ANICRAFT_BUILT_VERSION"), crate::app::RELEASE_STAGE, std::env::consts::OS, std::env::consts::ARCH));
     if let Some((l, left)) = &lost {
@@ -312,7 +341,7 @@ pub fn lost_mid_session() {
 
 /// The attempt the window runs on now.
 pub fn current() -> Option<String> {
-    CURRENT.lock().ok().and_then(|g| g.clone())
+    CURRENT.lock().ok().and_then(|g| g.map(|(attempt, _)| attempt.label()))
 }
 
 /// The window is closing to open again another way, then with `file` (the app asks this when
@@ -326,6 +355,70 @@ pub fn ask_reopen(file: Option<PathBuf>) {
 /// Whether the window that just closed asked to open again, and with which document.
 pub fn take_reopen() -> Option<Option<PathBuf>> {
     REOPEN.lock().ok().and_then(|mut g| g.take())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const REOPEN_PIPE: &str = "ANICRAFT_GPU_REOPEN_PIPE";
+
+/// The replacement receives an empty pipe. Its writer stays alive until the failing process
+/// exits, so the replacement can take over the profile, logs and recovery folder.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wait_for_failed_window() -> std::io::Result<Option<WindowBackend>> {
+    let Some(backend) = std::env::var_os(REOPEN_PIPE) else { return Ok(None) };
+    let backend = backend.to_str().and_then(|name| crate::platform::forced_backend(Some(name)))
+        .ok_or_else(|| std::io::Error::other("invalid graphics recovery backend"))?; // i18n-exempt: startup diagnostic
+    match std::io::Read::read_exact(&mut std::io::stdin().lock(), &mut [0]) {
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(Some(backend)),
+        Err(e) => Err(e),
+        Ok(()) => Err(std::io::Error::other("invalid graphics recovery pipe")), // i18n-exempt: startup diagnostic
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn replacement_command(
+    exe: &std::path::Path,
+    profile: &crate::launch_profile::Profile,
+    failed: WindowBackend,
+    files: &[PathBuf],
+    shot: Option<(&std::path::Path, Option<u32>)>,
+) -> std::process::Command {
+    use crate::launch_profile::{ROOT_ENV, VERSION};
+    let backend = match failed {
+        WindowBackend::Auto => "auto",
+        WindowBackend::Vulkan => "vulkan",
+        WindowBackend::Dx12 => "dx12",
+        WindowBackend::Metal => "metal",
+        WindowBackend::OpenGl => "gl",
+    };
+    let mut child = std::process::Command::new(exe);
+    child.env(REOPEN_PIPE, backend).env("ANICRAFT_STAGE_RENDERER", "cpu").env_remove(ROOT_ENV)
+        .stdin(std::process::Stdio::piped());
+    if let Some(root) = profile.root() {
+        if shot.is_some() {
+            // A Nightly screenshot can only have started through the existing wrapper form.
+            // Use that same grammar with the validated root, never both forms together.
+            child.env(ROOT_ENV, root);
+        } else {
+            child.args(["--launch-profile", VERSION, "--profile-root"]).arg(root);
+        }
+    }
+    if let Some((path, width)) = shot {
+        child.arg("--screenshot").arg(path);
+        if let Some(width) = width {
+            child.arg("--shot-width").arg(width.to_string());
+        }
+    }
+    child.arg("--").args(files);
+    child
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn replace_lost_window(files: &[PathBuf], shot: Option<(&std::path::Path, Option<u32>)>) -> std::io::Result<std::process::Child> {
+    if std::env::var_os(REOPEN_PIPE).is_some() {
+        return Err(std::io::Error::other("the replacement window also lost its device")); // i18n-exempt: startup diagnostic
+    }
+    let failed = CURRENT.lock().ok().and_then(|current| current.map(|(_, backend)| backend)).unwrap_or_default();
+    replacement_command(&std::env::current_exe()?, crate::launch_profile::current(), failed, files, shot).spawn()
 }
 
 /// Whether a failure after the window was up came from the graphics (wgpu, its surface, the
@@ -365,7 +458,7 @@ pub fn log_path() -> Option<PathBuf> {
 pub fn trying(a: &Attempt, n: usize, of: usize) {
     line(&format!("opening the window with {} (attempt {n} of {of})", a.label()));
     if let Ok(mut g) = CURRENT.lock() {
-        *g = Some(a.label());
+        *g = Some((*a, a.backend));
     }
     let marker = LOG.lock().ok().and_then(|g| g.as_ref().map(|l| l.dir.join(MARKER_NAME)));
     if let Some(m) = marker {
@@ -413,6 +506,16 @@ pub fn log_adapter(rs: Option<&eframe::egui_wgpu::RenderState>) {
     match rs {
         Some(rs) => {
             let i = rs.adapter.get_info();
+            use eframe::wgpu::Backend;
+            if let Ok(mut current) = CURRENT.lock() && let Some((_, backend)) = current.as_mut() {
+                *backend = match i.backend {
+                    Backend::Vulkan => WindowBackend::Vulkan,
+                    Backend::Dx12 => WindowBackend::Dx12,
+                    Backend::Metal => WindowBackend::Metal,
+                    Backend::Gl => WindowBackend::OpenGl,
+                    _ => *backend,
+                };
+            }
             line(&format!("window graphics: {} ({:?}, {:?}), driver {} {}", i.name, i.backend, i.device_type, i.driver, i.driver_info));
         }
         None => line("window graphics: OpenGL"), // i18n-exempt: log text
@@ -442,6 +545,146 @@ pub fn give_up(why: &str) {
 mod tests {
     use super::*;
     use WindowBackend::*;
+    use crate::launch_profile::{self, Profile};
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    fn read_command(command: &std::process::Command) -> launch_profile::Launch {
+        let root = command.get_envs().find(|(key, _)| *key == launch_profile::ROOT_ENV)
+            .and_then(|(_, value)| value.map(OsString::from));
+        launch_profile::parse_startup(command.get_args().map(OsString::from).collect(), root).unwrap()
+    }
+
+    #[test]
+    fn stable_replacement_keeps_screenshot_options_and_literal_document_paths() {
+        let files = [PathBuf::from("walk cycle.anicraft"), PathBuf::from("--profile-root")];
+        let shot = Path::new("screen shot.png");
+        let command = replacement_command(Path::new("anicraft"), &Profile::Stable, Dx12, &files, Some((shot, Some(800))));
+        let launch = read_command(&command);
+        let args = crate::parse_args(launch.args.into_iter().map(|arg| arg.into_string().unwrap())).unwrap();
+        assert_eq!(launch.profile, Profile::Stable);
+        assert_eq!(args.files, files);
+        assert_eq!(args.shot.as_deref(), Some(shot));
+        assert_eq!(args.look.shot_width, Some(800));
+    }
+
+    #[test]
+    fn nightly_replacement_uses_the_validated_root_and_honours_each_launch_grammar() {
+        use crate::build_flavor::{BuildFlavor, require_profile};
+        let root = std::env::temp_dir().join("Nightly private profile").join("anicraft");
+        let profile = Profile::NightlyV1(root.clone());
+        let files = [PathBuf::from("--launch-profile"), PathBuf::from("scene with spaces.anicraft")];
+        let legacy = launch_profile::parse_startup(vec![files[1].clone().into_os_string()], None).unwrap();
+        assert!(require_profile(BuildFlavor::NightlyV1, &legacy.profile).is_err());
+
+        let exe = Path::new("anicraft");
+        let command = replacement_command(exe, &profile, Vulkan, &files, None);
+        assert!(command.get_envs().any(|(key, value)| key == launch_profile::ROOT_ENV && value.is_none()));
+        let launch = read_command(&command);
+        require_profile(BuildFlavor::NightlyV1, &launch.profile).unwrap();
+        let launch = launch_profile::prepare(launch, |candidate| {
+            assert_eq!(candidate.as_os_str(), root.as_os_str());
+            Ok(root.clone())
+        }).unwrap();
+        assert_eq!(launch.profile, profile);
+        assert_eq!(launch.args, ["--".into(), files[0].clone().into_os_string(), files[1].clone().into_os_string()]);
+
+        let shot = Path::new("nightly shot.png");
+        let command = replacement_command(exe, &profile, Vulkan, &files, Some((shot, Some(640))));
+        let launch = read_command(&command);
+        let args = crate::parse_args(launch.args.into_iter().map(|arg| arg.into_string().unwrap())).unwrap();
+        assert_eq!(launch.profile, profile);
+        assert_eq!(args.files, files);
+        assert_eq!(args.shot.as_deref(), Some(shot));
+        assert_eq!(args.look.shot_width, Some(640));
+    }
+
+    #[test]
+    fn recovery_tries_other_explicit_apis_before_automatic_or_the_failed_api() {
+        let order = recovery_plan(Vulkan, WINDOWS, &[Auto, Vulkan, Dx12, OpenGl], &[]);
+        assert_eq!(order.iter().map(|a| a.backend).collect::<Vec<_>>(), [OpenGl, Dx12, Auto, Vulkan]);
+        let no_gl = recovery_plan(Vulkan, &[(Auto, false), (Dx12, true)], &[Auto, Vulkan, Dx12], &[]);
+        assert_eq!(no_gl.iter().map(|a| a.backend).collect::<Vec<_>>(), [Dx12, Auto, Vulkan]);
+    }
+
+    #[test]
+    fn native_handoff_releases_the_profile_and_publishes_recovery_without_unwinding() {
+        use anicraft_engine::{doc::sample, recovery::{self, Autosaver, SessionLock}};
+        use crate::nightly_session::Session;
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+        const PHASE: &str = "ANICRAFT_TEST_HANDOFF_PHASE";
+        const ROOT: &str = "ANICRAFT_TEST_HANDOFF_ROOT";
+        const TEST: &str = "startup::tests::native_handoff_releases_the_profile_and_publishes_recovery_without_unwinding";
+
+        fn process(phase: &str, root: &Path) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", TEST, "--nocapture"]).env(PHASE, phase).env(ROOT, root);
+            command
+        }
+
+        fn wait(mut child: Child) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{status}");
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the graphics handoff subprocess stalled");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        match std::env::var(PHASE).as_deref() {
+            Ok("original") => {
+                let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+                let health = Session::begin(Some(&root), "parent", None).unwrap().unwrap();
+                let recovery = root.join("Recovery");
+                let saver = Autosaver::start(SessionLock::acquire(&recovery).unwrap()).unwrap();
+                saver.checkpoint(&sample::demo(), None).unwrap().flush().unwrap();
+                let _replacement = process("replacement", &root).env(REOPEN_PIPE, "dx12").stdin(Stdio::piped()).spawn().unwrap();
+                health.finish(false).unwrap();
+                // Deliberately skip dropping the autosaver, just as the losing window does.
+                std::process::exit(0);
+            }
+            Ok("replacement") => {
+                let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+                let result = || {
+                    assert_eq!(wait_for_failed_window().unwrap(), Some(Dx12));
+                    assert!(replace_lost_window(&[], None).is_err());
+                    let health = Session::begin(Some(&root), "child", None).unwrap().unwrap();
+                    assert!(!health.previous_unclean());
+                    let recovery = root.join("Recovery");
+                    let entries = recovery::scan(&recovery, None);
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(recovery::load(&recovery, &entries[0].session).unwrap().0, sample::demo());
+                    health.finish(false).unwrap();
+                };
+                let passed = std::panic::catch_unwind(result).is_ok();
+                std::fs::write(root.join("result"), if passed { "passed" } else { "failed" }).unwrap();
+                assert!(passed);
+            }
+            _ => {
+                let root = std::env::temp_dir().join(format!("anicraft-gpu-handoff-{}-{}", std::process::id(), anicraft_engine::recovery::now_secs()));
+                std::fs::create_dir(&root).unwrap();
+                wait(process("original", &root).env_remove(REOPEN_PIPE).spawn().unwrap());
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let result = loop {
+                    if let Ok(result) = std::fs::read_to_string(root.join("result")) && !result.is_empty() {
+                        break result;
+                    }
+                    assert!(Instant::now() < deadline, "the replacement never reported its result");
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                std::fs::remove_dir_all(&root).unwrap();
+                assert_eq!(result, "passed");
+            }
+        }
+    }
 
     /// An order with whatever wgpu finds first (as macOS and Linux have; the plan is the same
     /// for any order).

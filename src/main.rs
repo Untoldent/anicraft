@@ -181,10 +181,8 @@ struct Look {
     shot_width: Option<u32>,
 }
 
-/// This run's Nightly session record, shared with the window's exit hook, and what the first
-/// window says about it. `session` is read by the exit hook, which only macOS has.
+/// This run's Nightly session record, shared by the desktop exit paths.
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone)]
 struct Nightly {
     session: nightly_session::Shared,
@@ -197,7 +195,14 @@ struct Nightly {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, open: Option<String>, look: Look, control: Option<u16>, nightly: Nightly) -> eframe::Result {
+impl Nightly {
+    fn finish(&self, window_drew: bool) {
+        nightly_session::finish_once(&self.session, window_drew && self.notice_shown.load(std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run(attempt: startup::Attempt, files: &[PathBuf], shot: Option<PathBuf>, open: Option<String>, look: Look, control: Option<u16>, nightly: Nightly) -> eframe::Result {
     let options = attempt.options(eframe::NativeOptions {
         viewport: platform::viewport(egui::ViewportBuilder::default().with_title(platform::name()).with_inner_size([1600.0, 940.0]).with_min_inner_size([960.0, 600.0])),
         ..Default::default()
@@ -207,8 +212,8 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
     anicraft_engine::text::Fonts::register(theme::embedded_fonts());
     // `--lang` before the window exists, so its first status line is in that language too.
     i18n::force(look.lang.as_deref());
-    let (session, report) = open_session(file);
-    let file_given = file.map(Path::to_path_buf);
+    let (session, report) = open_session(files.first().map(PathBuf::as_path));
+    let files = files.to_vec();
     eframe::run_native(
         platform::name(),
         options,
@@ -216,8 +221,15 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
             // A document the system hands over while AniCraft is idle wakes it (ADR 0062).
             platform::wake_on_requests(&cc.egui_ctx);
             startup::log_adapter(cc.wgpu_render_state.as_ref());
-            let starting_fresh = file_given.is_none() && shot.is_none();
+            let starting_fresh = files.is_empty() && shot.is_none();
             let mut a = app::App::new(cc, session, shot);
+            // A file named on the command line keeps its tab, even an imported one (ADR 0112).
+            if let Some((_, more)) = files.split_first() {
+                a.tabs.keep_first();
+                for path in more {
+                    a.request("file.open", serde_json::json!({ "path": path }));
+                }
+            }
             // The previous Nightly session did not finish, or this window cannot record its own:
             // said once, in the status bar, as the recovery notes are.
             if nightly.previous_unclean {
@@ -235,13 +247,8 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
             // macOS has no code path after `run_native`: a clean quit finishes here.
             #[cfg(target_os = "macos")]
             {
-                let shared = nightly.session.clone();
-                let shown = nightly.notice_shown.clone();
-                a.at_exit = Some(Box::new(move || nightly_session::finish_once(&shared, shown.load(std::sync::atomic::Ordering::Relaxed))));
-            }
-            // A file named on the command line keeps its tab, even an imported one (ADR 0112).
-            if file_given.is_some() {
-                a.tabs.keep_first();
+                let exit = nightly.clone();
+                a.at_exit = Some(Box::new(move || exit.finish(true)));
             }
             if let Some(s) = a.shot.as_mut() {
                 s.width = look.shot_width;
@@ -265,6 +272,9 @@ fn run(attempt: startup::Attempt, file: Option<&Path>, shot: Option<PathBuf>, op
                 Opened::Failed(name, e) => a.status_err(tr!("Could not open {name}: {e}", name = name, e = e)),
                 Opened::Quiet => {}
             }
+            if cc.wgpu_render_state.is_some() {
+                gpu_watch::begin_window(&a, move || nightly.finish(startup::started()));
+            }
             Ok(Box::new(a))
         }),
     )
@@ -284,7 +294,7 @@ fn main() {
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     shot: Option<PathBuf>,
-    file: Option<PathBuf>,
+    files: Vec<PathBuf>,
     open: Option<String>,
     renderer: Option<String>,
     look: Look,
@@ -292,6 +302,16 @@ struct Args {
     control: Option<u16>,
     /// `--version` / `--help`: print and leave.
     print: Option<Print>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn files_to_open(mut files: Vec<PathBuf>, replacing: bool) -> Vec<PathBuf> {
+    if !replacing && files.len() > 1 {
+        // An ordinary launch has always opened only the last file.
+        files.split_off(files.len() - 1)
+    } else {
+        files
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -351,13 +371,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             // of the flags above. A Nightly start arrives that way from the Launcher
             // (`launch_profile::parse`), so its documents are never taken for flags.
             "--" => {
-                for rest in args.by_ref() {
-                    out.file = Some(PathBuf::from(rest));
-                }
+                out.files.extend(args.by_ref().map(PathBuf::from));
             }
             // Not a file: what older macOS added when Finder started an app.
             other if platform::is_system_argument(other) => {}
-            other => out.file = Some(PathBuf::from(other)),
+            other => out.files.push(PathBuf::from(other)),
         }
     }
     Ok(out)
@@ -485,6 +503,12 @@ fn control_port(flag: Option<u16>) -> Option<u16> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    // Wait before even probing the launch profile: the original still owns its profile,
+    // logs and recovery locks until it exits.
+    let failed_backend = startup::wait_for_failed_window().map_err(|error| {
+        eprintln!("AniCraft could not start graphics recovery: {error}"); // i18n-exempt: console diagnostic
+        eframe::Error::AppCreation(error.into())
+    })?;
     let Some(arguments) = prepare_launch() else { return Ok(()) };
     // Nightly has no updater: the Launcher owns its version (`docs/nightly-release-preparation.md`).
     if platform::stable_services_allowed()
@@ -551,7 +575,8 @@ fn main() -> eframe::Result {
         }
         None => {}
     }
-    let Args { shot, file, open, renderer, look, control, .. } = args;
+    let Args { shot, files, open, renderer, look, control, .. } = args;
+    let mut files = files_to_open(files, failed_backend.is_some());
     // The control port is a stable service: Nightly never opens one, nor reads a port left in the
     // environment by a launch that forwarded its variables.
     let control = if platform::stable_services_allowed() { control_port(control) } else { None };
@@ -578,9 +603,7 @@ fn main() -> eframe::Result {
     };
     let previous_unclean = nightly_record.as_ref().is_some_and(nightly_session::Session::previous_unclean);
     let notice_shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let nightly_session: nightly_session::Shared = std::sync::Arc::new(std::sync::Mutex::new(nightly_record));
-    let nightly = Nightly { session: nightly_session.clone(), previous_unclean, health_warning, notice_shown: notice_shown.clone() };
-    let mut file = file;
+    let nightly = Nightly { session: std::sync::Arc::new(std::sync::Mutex::new(nightly_record)), previous_unclean, health_warning, notice_shown };
     let mut reopened = 0;
     let mut why = String::from("no attempt"); // i18n-exempt: log text
     // Once, and again each time the window closed to reopen another way.
@@ -592,14 +615,19 @@ fn main() -> eframe::Result {
     let result: eframe::Result = 'attempts: {
         while opening {
             opening = false;
-            let attempts = startup::plan(forced, prefs::Prefs::load().window_backend, &platform::window_attempts(platform::OS), &last);
+            let platform_attempts = platform::window_attempts(platform::OS);
+            let attempts = if let Some(failed) = failed_backend {
+                startup::recovery_plan(failed, &platform_attempts, platform::window_backends(platform::OS), &last)
+            } else {
+                startup::plan(forced, prefs::Prefs::load().window_backend, &platform_attempts, &last)
+            };
             for (n, attempt) in attempts.iter().enumerate() {
                 startup::trying(attempt, n + 1, attempts.len());
                 let mut unwound = false;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(*attempt, file.as_deref(), shot.clone(), open.clone(), look.clone(), control, nightly.clone())));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(*attempt, &files, shot.clone(), open.clone(), look.clone(), control, nightly.clone())));
                 why = match result {
                     Ok(Ok(())) => {
-                        // The window's graphics device was lost mid-session (ADR 0092): it closed
+                        // The window's surface stayed stuck mid-session (ADR 0092): it closed
                         // with the work autosaved, to open again another way, which offers it back.
                         if let Some(reopen) = startup::take_reopen()
                             && reopened < MAX_REOPENS
@@ -609,7 +637,7 @@ fn main() -> eframe::Result {
                             last.retain(|l| *l != attempt.label());
                             last.push(attempt.label());
                             forced = None;
-                            file = reopen;
+                            files = reopen.into_iter().collect();
                             opening = true;
                             break;
                         }
@@ -647,7 +675,7 @@ fn main() -> eframe::Result {
     // A window that drew and then panicked is not a controlled return: the record stays so the next
     // start reports the interruption (a panic before the first frame was retried or reported above).
     if !ended_in_panic {
-        nightly_session::finish_once(&nightly_session, notice_shown.load(std::sync::atomic::Ordering::Relaxed));
+        nightly.finish(true);
     }
     result
 }
@@ -683,7 +711,7 @@ mod args_tests {
         }
         let a = parse(&["--open", "testmovie", "--renderer", "wgpu", "walk.anicraft"]);
         assert_eq!((a.open.as_deref(), a.renderer.as_deref()), (Some("testmovie"), Some("wgpu")));
-        assert_eq!(a.file, Some(PathBuf::from("walk.anicraft")));
+        assert_eq!(a.files, [PathBuf::from("walk.anicraft")]);
     }
 
     /// Windows (`"%1"`) and Linux (`%f`) hand a double-clicked document over as the one plain
@@ -691,12 +719,12 @@ mod args_tests {
     #[test]
     fn a_double_clicked_document_arrives_on_the_command_line_and_opens() {
         for path in [r"C:\Users\Ana Lima\My Films\walk cycle.anicraft", "/home/ana/Films/old scene.fla", "/home/ana/Films/Scene/DOMDocument.xfl", "relative.anicraft"] {
-            assert_eq!(parse(&[path]).file, Some(PathBuf::from(path)), "{path}");
+            assert_eq!(parse(&[path]).files, [PathBuf::from(path)], "{path}");
         }
         // The process serial number older macOS added is not a file.
-        assert_eq!(parse(&["-psn_0_1234567"]).file, None);
+        assert!(parse(&["-psn_0_1234567"]).files.is_empty());
         let a = parse(&["walk.anicraft", "--screenshot", "shots/x.png", "--open", "testmovie"]);
-        assert_eq!((a.file, a.shot, a.open.as_deref()), (Some(PathBuf::from("walk.anicraft")), Some(PathBuf::from("shots/x.png")), Some("testmovie")));
+        assert_eq!((a.files, a.shot, a.open.as_deref()), (vec![PathBuf::from("walk.anicraft")], Some(PathBuf::from("shots/x.png")), Some("testmovie")));
         assert!(parse_args(["--scale".to_string(), "lots".to_string()]).is_err());
         assert!(parse_args(["--screenshot".to_string()]).is_err());
         assert_eq!(parse(&["--screenshot", "a.png", "--shot-width", "1200"]).look.shot_width, Some(1200));
@@ -710,14 +738,16 @@ mod args_tests {
         assert!(parse_args(["--check-theme".to_string()]).is_err());
         // `--` ends the options: everything after it is a file, even a name that reads like a flag
         // (the Launcher hands a Nightly start its documents over the same delimiter).
-        assert_eq!((parse(&["--"]).file, parse(&["--"]).print), (None, None));
+        assert_eq!((parse(&["--"]).files, parse(&["--"]).print), (Vec::new(), None));
         let flag_named_file = parse(&["--", "--version"]);
-        assert_eq!((flag_named_file.file, flag_named_file.print), (Some(PathBuf::from("--version")), None));
-        assert_eq!(parse(&["--", "a.anicraft"]).file, Some(PathBuf::from("a.anicraft")));
+        assert_eq!((flag_named_file.files, flag_named_file.print), (vec![PathBuf::from("--version")], None));
+        assert_eq!(parse(&["--", "a.anicraft"]).files, [PathBuf::from("a.anicraft")]);
         // Files on both sides of the delimiter open in the order the plain arguments always took:
         // the last one named is the one that is opened.
-        assert_eq!(parse(&["--", "a.anicraft", "--other.anicraft"]).file, Some(PathBuf::from("--other.anicraft")));
-        assert_eq!(parse(&["--screenshot", "shot.png", "--"]).file, None);
+        let files = parse(&["--", "a.anicraft", "--other.anicraft"]).files;
+        assert_eq!(files_to_open(files.clone(), false), [PathBuf::from("--other.anicraft")]);
+        assert_eq!(files_to_open(files, true), [PathBuf::from("a.anicraft"), PathBuf::from("--other.anicraft")]);
+        assert!(parse(&["--screenshot", "shot.png", "--"]).files.is_empty());
         // `--control <port>` (ADR 0104): a port from 1 to 65535, or an error before any window.
         assert_eq!(parse(&["--control", "9878"]).control, Some(9878));
         for bad in [&["--control"][..], &["--control", "0"], &["--control", "99999"], &["--control", "port"]] {
@@ -729,8 +759,8 @@ mod args_tests {
         let path = dir.join("walk cycle.anicraft");
         let mut s = Session::new(anicraft_engine::doc::sample::interactive());
         s.execute("file.save", &serde_json::json!({"path": path.display().to_string()})).unwrap();
-        let file = parse(&[&path.display().to_string()]).file;
-        let (opened, _) = open_session(file.as_deref());
+        let files = parse(&[&path.display().to_string()]).files;
+        let (opened, _) = open_session(files.first().map(PathBuf::as_path));
         assert_eq!(opened.path.as_deref(), Some(path.as_path()));
         assert!(opened.doc == s.doc, "the document on the command line, not the sample");
         // A file that isn't there: the sample, never a crash.
